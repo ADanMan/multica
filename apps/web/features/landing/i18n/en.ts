@@ -308,6 +308,8 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         ],
         improvements: [
           "Your agents no longer stall waiting on external CI — they finish and report back instead.",
+          "Agents now get your project's dependencies ready before they start editing or testing.",
+          "Agents now run focused tests with the right command for your project's language and test runner.",
           "Cursor agents now show their thinking and tool activity as they work.",
           "You can now build agents on the latest Kimi Code models.",
           "Runtime aliases now show consistently everywhere across the app.",

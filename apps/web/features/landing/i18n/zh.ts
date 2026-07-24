@@ -308,6 +308,8 @@ export function createZhDict(allowSignup: boolean): LandingDict {
         ],
         improvements: [
           "你的智能体不再干等外部 CI 了 —— 会直接完成并回报，不再空耗。",
+          "智能体开工前会先把项目依赖准备好，再动手改代码或测试。",
+          "智能体现在会按你项目的语言和测试框架，用对的命令跑针对性测试。",
           "Cursor 智能体现在会实时显示它的思考和工具调用。",
           "现在可以基于最新的 Kimi Code 模型搭建智能体了。",
           "运行时别名现在在全站各处都能一致显示了。",
