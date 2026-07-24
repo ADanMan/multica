@@ -294,6 +294,20 @@ export function createZhDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.11",
+        date: "2026-07-25",
+        title: "PR 实时状态，新增 Claude Opus 5",
+        changes: [],
+        features: [
+          "PR 卡片现在会显示实时的 CI 状态，以及这个 PR 是否可以合并了。",
+          "现在可以基于 Claude Opus 5 搭建智能体了。",
+        ],
+        improvements: [
+          "智能体启动的长时间运行服务，现在在任务结束后仍会继续运行。",
+          "非代码类工作区不再夹带智能体用不上的软件工程说明了。",
+        ],
+      },
+      {
         version: "0.4.10",
         date: "2026-07-24",
         title: "支持自托管 Git 服务，Chat 更懂你的项目",

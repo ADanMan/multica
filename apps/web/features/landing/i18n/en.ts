@@ -294,6 +294,20 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     },
     entries: [
       {
+        version: "0.4.11",
+        date: "2026-07-25",
+        title: "Live PR status and Claude Opus 5",
+        changes: [],
+        features: [
+          "Pull request cards now show live CI status and whether a PR is ready to merge.",
+          "You can now build agents on Claude Opus 5.",
+        ],
+        improvements: [
+          "Long-running services an agent starts now keep running after its task finishes.",
+          "Non-code workspaces no longer carry software-engineering instructions their agents don't need.",
+        ],
+      },
+      {
         version: "0.4.10",
         date: "2026-07-24",
         title: "Self-hosted Git providers and project-aware Chat",

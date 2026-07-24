@@ -269,6 +269,20 @@ export function createKoDict(allowSignup: boolean): LandingDict {
       },
       entries: [
         {
+          version: "0.4.11",
+          date: "2026-07-25",
+          title: "PR 실시간 상태와 Claude Opus 5",
+          changes: [],
+          features: [
+            "PR 카드에 CI 상태와 해당 PR을 병합할 수 있는지가 실시간으로 표시됩니다.",
+            "이제 Claude Opus 5로 에이전트를 만들 수 있습니다.",
+          ],
+          improvements: [
+            "에이전트가 시작한 장시간 실행 서비스가 작업이 끝난 뒤에도 계속 실행됩니다.",
+            "코드가 아닌 워크스페이스에 에이전트에 필요 없는 소프트웨어 개발 지침이 더 이상 포함되지 않습니다.",
+          ],
+        },
+        {
           version: "0.4.10",
           date: "2026-07-24",
           title: "셀프호스트 Git 서비스 지원, 프로젝트를 이해하는 Chat",

@@ -270,6 +270,20 @@ export function createJaDict(allowSignup: boolean): LandingDict {
       },
       entries: [
         {
+          version: "0.4.11",
+          date: "2026-07-25",
+          title: "PR のリアルタイム状態と Claude Opus 5",
+          changes: [],
+          features: [
+            "PR カードに CI の状態と、その PR がマージ可能かどうかがリアルタイムで表示されます。",
+            "Claude Opus 5 でエージェントを構築できるようになりました。",
+          ],
+          improvements: [
+            "エージェントが起動した長時間実行のサービスが、タスク終了後も動き続けるようになりました。",
+            "コード以外のワークスペースに、エージェントに不要なソフトウェア開発向けの指示が含まれなくなりました。",
+          ],
+        },
+        {
           version: "0.4.10",
           date: "2026-07-24",
           title: "セルフホスト Git サービス対応、プロジェクトを理解する Chat",
