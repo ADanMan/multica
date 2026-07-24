@@ -304,8 +304,10 @@ export function createEnDict(allowSignup: boolean): LandingDict {
           "The execution log is now easier to read and stays smooth on long runs.",
           "The issue table now shows which agents are working, right in the list.",
           "Copied transcripts now include a timestamp for each event.",
+          "You can now ask an agent to start a local service and keep it running after the task ends.",
         ],
         improvements: [
+          "Your agents no longer stall waiting on external CI — they finish and report back instead.",
           "Cursor agents now show their thinking and tool activity as they work.",
           "You can now build agents on the latest Kimi Code models.",
           "Runtime aliases now show consistently everywhere across the app.",
