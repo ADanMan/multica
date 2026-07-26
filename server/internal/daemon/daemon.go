@@ -3839,6 +3839,45 @@ func gateCodexResumeToRolloutPresence(task *Task, taskCtx *execenv.TaskContextFo
 	taskCtx.PriorSessionResumeUnavailable = true
 }
 
+const (
+	// codexRolloutFlushWait bounds how long the daemon waits for Codex to finish
+	// writing a session's rollout into the per-task store before treating that
+	// session as unrecoverable. Codex streams the rollout as the thread runs, so
+	// in the common case the file already exists and the check returns at once;
+	// the wait only adds latency on the rare path where the rollout never lands
+	// (an early crash/error) — which is exactly the pointer we must not persist.
+	codexRolloutFlushWait    = 2 * time.Second
+	codexRolloutPollInterval = 50 * time.Millisecond
+)
+
+// codexSessionResumable reports whether a Codex session's rollout is present in
+// the task's per-issue session store, so the daemon never records a session
+// pointer the next follow-up would only discover is unresumable — and then drop
+// via gateCodexResumeToRolloutPresence, losing the conversation (MUL-5305). It
+// mirrors, at write time, the presence gate the daemon already applies at resume
+// time: only a session whose rollout is on disk is worth persisting as the
+// resumable pointer.
+//
+// Non-Codex providers have no rollout store to check (codexHome == "") and are
+// always treated as resumable, preserving their existing behavior. Codex is
+// given a brief bounded window to finish flushing before we give up, so ordinary
+// flush lag is not mistaken for a lost rollout.
+func codexSessionResumable(codexHome, sessionID string, wait time.Duration) bool {
+	if codexHome == "" || sessionID == "" {
+		return true
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if execenv.CodexResumeRolloutPresent(codexHome, sessionID) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(codexRolloutPollInterval)
+	}
+}
+
 func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 	if task == nil || task.Agent == nil || len(task.Agent.SkillRefs) == 0 {
 		return nil
@@ -4733,7 +4772,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Shared across the resume-retry below so the retry's transcript rows
 	// keep ascending seq values for the same task.
 	var msgSeq atomic.Int32
-	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, &msgSeq)
+	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
 	if err != nil {
 		return TaskResult{}, err
 	}
@@ -4742,7 +4781,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		firstUsage := result.Usage
 		taskLog.Warn("session resume failed, retrying with fresh session", "error", result.Error)
 		execOpts.ResumeSessionID = ""
-		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, &msgSeq)
+		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
 		if retryErr != nil {
 			taskLog.Error("fresh session also failed to start", "error", retryErr)
 		} else {
@@ -4781,6 +4820,21 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			CacheWriteTokens: u.CacheWriteTokens,
 			CostUSDTicks:     u.CostUSDTicks,
 		})
+	}
+
+	// MUL-5305: only forward a Codex session as the resumable pointer once its
+	// rollout is actually present in the per-issue store. A task that pinned a
+	// thread id mid-flight, or reported one on a terminal error, but never got
+	// its rollout written to disk, would otherwise become the next follow-up's
+	// prior session — which gateCodexResumeToRolloutPresence then drops, losing
+	// the conversation. Blanking it here (NULL on the server) lets
+	// GetLastTaskSession fall back to the last session whose rollout is real,
+	// rather than overwriting a good pointer with an unrecoverable one. No-op for
+	// non-Codex providers (env.CodexHome == "") and when there is no session.
+	if result.SessionID != "" && !codexSessionResumable(env.CodexHome, result.SessionID, codexRolloutFlushWait) {
+		taskLog.Warn("not recording codex session as resumable: rollout not present in task CODEX_HOME",
+			"session_id", result.SessionID, "codex_home", env.CodexHome, "status", result.Status)
+		result.SessionID = ""
 	}
 
 	switch result.Status {
@@ -5036,7 +5090,7 @@ func freshSessionMayHelp(errText string) bool {
 // messages and is owned by the caller so a same-task retry continues the
 // sequence instead of restarting at 1 — the server orders the transcript by
 // seq alone, and duplicate seqs would interleave the two attempts' rows.
-func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID string, msgSeq *atomic.Int32) (agent.Result, int32, error) {
+func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID, codexHome string, msgSeq *atomic.Int32) (agent.Result, int32, error) {
 	// Wrap the caller's ctx so the idle watchdog (below) can interrupt both
 	// the agent subprocess (via the ctx passed to backend.Execute) AND the
 	// drain loop with a single cancel. Without this layer the backend would
@@ -5188,6 +5242,18 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 						sid := msg.SessionID
 						wd := opts.Cwd
 						go func() {
+							// MUL-5305: don't pin a Codex session whose rollout
+							// isn't in the store — a crash-recovery pointer the
+							// daemon can't actually resume would just poison the
+							// next follow-up (FailAgentTask keeps the pinned
+							// session_id via COALESCE, so a bad mid-flight pin
+							// survives a later terminal failure). Non-Codex
+							// providers (codexHome == "") pin unchanged.
+							if !codexSessionResumable(codexHome, sid, codexRolloutFlushWait) {
+								taskLog.Debug("skip pinning codex session: rollout not present in task CODEX_HOME",
+									"session_id", sid, "codex_home", codexHome)
+								return
+							}
 							pinCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if err := d.client.PinTaskSession(pinCtx, taskID, sid, wd); err != nil {
