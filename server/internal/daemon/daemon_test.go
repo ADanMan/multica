@@ -1333,6 +1333,45 @@ func TestCodexSessionResumable(t *testing.T) {
 	})
 }
 
+func TestResumableTerminalSessionID(t *testing.T) {
+	t.Parallel()
+
+	home := filepath.Join(t.TempDir(), "codex-home")
+	present := filepath.Join(home, "sessions", "2026", "07", "27",
+		"rollout-2026-07-27T00-00-00-present.jsonl")
+	if err := os.MkdirAll(filepath.Dir(present), 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(present, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	cases := []struct {
+		name, status, home, sessionID, want string
+	}{
+		// A completed session is authoritative and never withheld, even in the
+		// anomalous absent-rollout case — that path is disclosed by the next
+		// run's resume gate rather than silently downgraded (MUL-4424).
+		{"completed keeps session even when rollout absent", "completed", home, "gone", "gone"},
+		{"failed with rollout keeps session", "failed", home, "present", "present"},
+		// Withheld only when non-completed AND rollout absent (no durable
+		// conversation was persisted, so nothing is lost).
+		{"failed without rollout withholds session", "failed", home, "gone", ""},
+		{"blocked without rollout withholds session", "blocked", home, "gone", ""},
+		{"non-codex keeps session", "failed", "", "gone", "gone"},
+		{"empty session is a no-op", "failed", home, "", ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resumableTerminalSessionID(tc.status, tc.home, tc.sessionID, 40*time.Millisecond); got != tc.want {
+				t.Fatalf("resumableTerminalSessionID(%q, home, %q) = %q, want %q", tc.status, tc.sessionID, got, tc.want)
+			}
+		})
+	}
+}
+
 // statusOnlyBackend emits a single status message carrying a session id (the
 // point at which the daemon pins the resume pointer) and then completes.
 type statusOnlyBackend struct {
@@ -1414,6 +1453,27 @@ func TestExecuteAndDrain_PinsResumableCodexSession(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected the resumable codex session to be pinned, got %+v", rec.snapshot())
+}
+
+// TestExecuteAndDrain_SkipsPinWhenRolloutAbsent pins the negative half of the
+// write-time invariant (MUL-5305): a Codex session with no rollout in the store
+// is never pinned mid-flight, so a pointer the daemon cannot resume is not left
+// on the task row for the next follow-up to inherit.
+func TestExecuteAndDrain_SkipsPinWhenRolloutAbsent(t *testing.T) {
+	t.Parallel()
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home") // sessions dir never created
+	d, rec := newPinRecorder(t)
+	backend := &statusOnlyBackend{sessionID: "sess-absent", result: agent.Result{Status: "failed", Error: "boom", SessionID: "sess-absent"}}
+
+	if _, _, err := d.executeAndDrain(context.Background(), backend, "p", agent.ExecOptions{}, slog.Default(), "task-nopin", codexHome, new(atomic.Int32)); err != nil {
+		t.Fatalf("executeAndDrain: %v", err)
+	}
+	// Give any (incorrectly-spawned) pin goroutine time to fire before asserting.
+	time.Sleep(100 * time.Millisecond)
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("expected no pin when the rollout is absent, got %+v", got)
+	}
 }
 
 func TestGateResumeToReusedWorkdir(t *testing.T) {

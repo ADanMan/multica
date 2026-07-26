@@ -106,6 +106,56 @@ func TestGetLastTaskSessionExcludesPoisonedFailures(t *testing.T) {
 	}
 }
 
+// TestGetLastTaskSessionFallsBackWhenLatestSessionBlanked is the claim-side
+// half of MUL-5305: when the most recent task recorded NO session_id (the
+// daemon withheld an unresumable Codex session so it would not poison the next
+// follow-up), the resume lookup skips that row via `session_id IS NOT NULL`
+// and falls back to the most recent task that does have a session — so the next
+// follow-up continues from the last real conversation instead of the dropped
+// pointer that produced the reported regression.
+func TestGetLastTaskSessionFallsBackWhenLatestSessionBlanked(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+
+	// Older completed task with a good, recorded session (its rollout is real).
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, completed_at, session_id, work_dir)
+		VALUES ($1, $2, $3, 'completed', 0, now() - interval '2 minutes', now() - interval '2 minutes', 'OLD-GOOD-SESSION', '/tmp/good')
+	`, agentID, runtimeID, issueID); err != nil {
+		t.Fatalf("insert older completed task: %v", err)
+	}
+
+	// Newer failed task whose unresumable session was withheld (session_id NULL).
+	// This is the row a naive lookup would return, cold-starting the next run.
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, completed_at, session_id, work_dir, failure_reason)
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', now() - interval '1 minute', NULL, '/tmp/blanked', 'timeout')
+	`, agentID, runtimeID, issueID); err != nil {
+		t.Fatalf("insert newer blanked task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	prior, err := queries.GetLastTaskSession(ctx, db.GetLastTaskSessionParams{
+		AgentID: pgtype.UUID{Bytes: parseUUIDBytes(agentID), Valid: true},
+		IssueID: pgtype.UUID{Bytes: parseUUIDBytes(issueID), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("GetLastTaskSession failed: %v", err)
+	}
+	if !prior.SessionID.Valid {
+		t.Fatal("expected fallback to the older recorded session, got no session")
+	}
+	if prior.SessionID.String != "OLD-GOOD-SESSION" {
+		t.Fatalf("expected OLD-GOOD-SESSION, got %q", prior.SessionID.String)
+	}
+}
+
 // TestGetLastTaskSessionFallbackPoisonedClassifier covers the second
 // poisoned classifier so adding a third doesn't silently break this rule.
 func TestGetLastTaskSessionFallbackPoisonedClassifier(t *testing.T) {

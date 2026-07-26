@@ -3878,6 +3878,34 @@ func codexSessionResumable(codexHome, sessionID string, wait time.Duration) bool
 	}
 }
 
+// resumableTerminalSessionID returns the session id a finished task should
+// persist as its resume pointer. It withholds a Codex session whose rollout
+// never reached the store (returning "" → NULL server-side) so the next
+// follow-up does not inherit a pointer it would only discover is unresumable
+// and drop, losing the conversation (MUL-5305).
+//
+// Blanking is limited to NON-completed terminal states, and this is what keeps
+// the fix from silently downgrading context (MUL-4424 transparency):
+//   - A missing rollout means Codex persisted no resumable conversation for
+//     that session, so a non-completed attempt that hit this branch made no
+//     durable progress — falling back to the last session whose rollout is real
+//     loses nothing.
+//   - A `completed` task's session is authoritative and must never be silently
+//     replaced by an older one. In the anomalous case its rollout is absent, we
+//     still record it, so the next run's resume-presence gate surfaces the loss
+//     (PriorSessionResumeUnavailable) rather than continuing from stale context.
+//
+// Non-Codex providers (codexHome == "") and empty sessions are unaffected.
+func resumableTerminalSessionID(status, codexHome, sessionID string, wait time.Duration) string {
+	if sessionID == "" || status == "completed" {
+		return sessionID
+	}
+	if codexSessionResumable(codexHome, sessionID, wait) {
+		return sessionID
+	}
+	return ""
+}
+
 func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 	if task == nil || task.Agent == nil || len(task.Agent.SkillRefs) == 0 {
 		return nil
@@ -4823,18 +4851,18 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 
 	// MUL-5305: only forward a Codex session as the resumable pointer once its
-	// rollout is actually present in the per-issue store. A task that pinned a
-	// thread id mid-flight, or reported one on a terminal error, but never got
-	// its rollout written to disk, would otherwise become the next follow-up's
-	// prior session — which gateCodexResumeToRolloutPresence then drops, losing
-	// the conversation. Blanking it here (NULL on the server) lets
-	// GetLastTaskSession fall back to the last session whose rollout is real,
-	// rather than overwriting a good pointer with an unrecoverable one. No-op for
-	// non-Codex providers (env.CodexHome == "") and when there is no session.
-	if result.SessionID != "" && !codexSessionResumable(env.CodexHome, result.SessionID, codexRolloutFlushWait) {
+	// rollout is actually present in the per-issue store. A non-completed attempt
+	// that pinned/reported a thread id but never got its rollout written to disk
+	// would otherwise become the next follow-up's prior session — which
+	// gateCodexResumeToRolloutPresence then drops, losing the conversation.
+	// Withholding it (NULL on the server) lets GetLastTaskSession fall back to the
+	// last session whose rollout is real. A `completed` session is never withheld
+	// (see resumableTerminalSessionID) so a successful turn is never silently
+	// downgraded.
+	if gated := resumableTerminalSessionID(result.Status, env.CodexHome, result.SessionID, codexRolloutFlushWait); gated != result.SessionID {
 		taskLog.Warn("not recording codex session as resumable: rollout not present in task CODEX_HOME",
 			"session_id", result.SessionID, "codex_home", env.CodexHome, "status", result.Status)
-		result.SessionID = ""
+		result.SessionID = gated
 	}
 
 	switch result.Status {
@@ -5238,22 +5266,22 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					// reveals them. Without this, a daemon crash mid-run
 					// loses the resume pointer and the auto-retry fires
 					// without context.
-					if msg.SessionID != "" && !sessionPinned.Swap(true) {
+					// MUL-5305: pin the resume pointer only once the session's
+					// rollout is in the store, so a crash-recovery pointer the
+					// daemon cannot actually resume never poisons the next
+					// follow-up (FailAgentTask keeps the pinned session_id via
+					// COALESCE, so a bad mid-flight pin survives a later terminal
+					// failure). Re-checked on each status rather than pinning once
+					// then waiting a fixed window, so a rollout that lands shortly
+					// after the first status is still pinned this run; the terminal
+					// report remains the authoritative writer. Non-Codex providers
+					// (codexHome == "") have no rollout to verify and pin at once.
+					if msg.SessionID != "" && !sessionPinned.Load() &&
+						(codexHome == "" || execenv.CodexResumeRolloutPresent(codexHome, msg.SessionID)) &&
+						!sessionPinned.Swap(true) {
 						sid := msg.SessionID
 						wd := opts.Cwd
 						go func() {
-							// MUL-5305: don't pin a Codex session whose rollout
-							// isn't in the store — a crash-recovery pointer the
-							// daemon can't actually resume would just poison the
-							// next follow-up (FailAgentTask keeps the pinned
-							// session_id via COALESCE, so a bad mid-flight pin
-							// survives a later terminal failure). Non-Codex
-							// providers (codexHome == "") pin unchanged.
-							if !codexSessionResumable(codexHome, sid, codexRolloutFlushWait) {
-								taskLog.Debug("skip pinning codex session: rollout not present in task CODEX_HOME",
-									"session_id", sid, "codex_home", codexHome)
-								return
-							}
 							pinCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
 							if err := d.client.PinTaskSession(pinCtx, taskID, sid, wd); err != nil {
