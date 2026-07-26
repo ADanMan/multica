@@ -724,6 +724,31 @@ WHERE agent_id = $1 AND issue_id = $2
 ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
 LIMIT 1;
 
+-- name: MarkTaskSessionRolloutMissing :exec
+-- The daemon withheld this task's Codex session because its rollout was never
+-- written to the per-issue store (MUL-5305). Clear the resume pointer so the
+-- (agent_id, issue_id) lookup skips this row, and flag the gap so the next
+-- claim can still disclose the loss even while resuming an older good session.
+-- session_id is forced NULL (not COALESCE-merged) so a stale mid-flight pin can
+-- never survive a withheld terminal report.
+UPDATE agent_task_queue
+SET session_id = NULL, session_rollout_missing = TRUE
+WHERE id = $1;
+
+-- name: GetLatestTaskRolloutMissing :one
+-- Reports whether the most recent terminal task for (agent_id, issue_id)
+-- withheld its Codex session because the rollout was missing (MUL-5305). When
+-- true, GetLastTaskSession fell back to an older session, so the next run must
+-- disclose that the most recent turn's context could not be carried over. Any
+-- later task that records a real session resets this to FALSE by being the new
+-- most-recent row, so the disclosure fires once and then clears.
+SELECT COALESCE(session_rollout_missing, FALSE) FROM agent_task_queue
+WHERE agent_id = $1 AND issue_id = $2
+  AND status IN ('completed', 'failed')
+  AND started_at IS NOT NULL
+ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
+LIMIT 1;
+
 -- name: GetLastTaskStartedAtForIssueAndAgent :one
 -- Returns the started_at of the most recent prior task for this (agent, issue)
 -- pair, used as the "since" anchor for counting comments that arrived since the

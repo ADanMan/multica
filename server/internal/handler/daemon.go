@@ -2030,6 +2030,18 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					resp.PriorWorkDir = prior.WorkDir.String
 				}
 			}
+			// MUL-5305: if the most recent terminal task withheld its Codex
+			// session because the rollout was missing, GetLastTaskSession fell
+			// back to an older session (or none). Disclose the continuity gap so
+			// the next run tells the user the most recent turn's context could not
+			// be carried over — even when that older session resumes cleanly,
+			// which the resume-presence gate would otherwise pass silently.
+			if missing, err := h.Queries.GetLatestTaskRolloutMissing(r.Context(), db.GetLatestTaskRolloutMissingParams{
+				AgentID: task.AgentID,
+				IssueID: task.IssueID,
+			}); err == nil && missing {
+				resp.PriorSessionResumeUnavailable = true
+			}
 		}
 	}
 
@@ -2877,6 +2889,10 @@ type TaskCompleteRequest struct {
 	Output    string `json:"output"`
 	SessionID string `json:"session_id"` // Claude session ID for future resumption
 	WorkDir   string `json:"work_dir"`   // working directory used during execution
+	// SessionRolloutMissing: the daemon withheld this task's Codex session
+	// because its rollout was missing (MUL-5305). Clear the resume pointer and
+	// flag the continuity gap for the next claim.
+	SessionRolloutMissing bool `json:"session_rollout_missing,omitempty"`
 }
 
 func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
@@ -2905,6 +2921,17 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("complete task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// MUL-5305: the daemon withheld this Codex session (its rollout was missing).
+	// Force the resume pointer NULL and flag the continuity gap so the next claim
+	// falls back to an older good session yet still discloses the loss. Best
+	// effort — the session_id was already sent empty, so a failure here only
+	// costs the disclosure, not correctness.
+	if req.SessionRolloutMissing {
+		if err := h.Queries.MarkTaskSessionRolloutMissing(r.Context(), parseUUID(taskID)); err != nil {
+			slog.Warn("mark task session rollout missing failed", "task_id", taskID, "error", err)
+		}
 	}
 
 	h.emitIssueExecutedOnFirstCompletion(r, task)
@@ -3503,6 +3530,10 @@ type TaskFailRequest struct {
 	SessionID     string `json:"session_id,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
+	// SessionRolloutMissing: the daemon withheld this task's Codex session
+	// because its rollout was missing (MUL-5305). Clear the resume pointer and
+	// flag the continuity gap for the next claim.
+	SessionRolloutMissing bool `json:"session_rollout_missing,omitempty"`
 }
 
 func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
@@ -3525,6 +3556,16 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("fail task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// MUL-5305: the daemon withheld this Codex session (its rollout was missing).
+	// Force the resume pointer NULL — overriding FailAgentTask's COALESCE, which
+	// would otherwise keep a stale mid-flight pin — and flag the continuity gap
+	// so the next claim discloses the loss. Best effort; failure only costs the
+	// disclosure.
+	if req.SessionRolloutMissing {
+		if err := h.Queries.MarkTaskSessionRolloutMissing(r.Context(), parseUUID(taskID)); err != nil {
+			slog.Warn("mark task session rollout missing failed", "task_id", taskID, "error", err)
+		}
 	}
 	h.TaskService.NotifyTaskFinished(*task)
 

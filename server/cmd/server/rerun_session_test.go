@@ -156,6 +156,74 @@ func TestGetLastTaskSessionFallsBackWhenLatestSessionBlanked(t *testing.T) {
 	}
 }
 
+// TestCompletedTaskRolloutMissingWithholdsAndDisclosesGap is the cross-layer
+// regression for MUL-5305 Must-fix 1: a COMPLETED follow-up whose Codex rollout
+// is missing (the #5934 case — the user waits for each turn to finish) must (1)
+// NOT be handed to the next follow-up as its resume pointer, and (2) NOT be
+// resumed silently — the next claim must still disclose the continuity gap. It
+// exercises MarkTaskSessionRolloutMissing (the withhold) + GetLastTaskSession
+// (falls back to the older good session) + GetLatestTaskRolloutMissing (the
+// disclosure signal buildClaimedTaskResponse reads).
+func TestCompletedTaskRolloutMissingWithholdsAndDisclosesGap(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+	queries := db.New(testPool)
+
+	// Older completed turn with a real, recorded session.
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, completed_at, session_id, work_dir)
+		VALUES ($1, $2, $3, 'completed', 0, now() - interval '2 minutes', now() - interval '2 minutes', 'OLD-GOOD-SESSION', '/tmp/good')
+	`, agentID, runtimeID, issueID); err != nil {
+		t.Fatalf("insert older completed task: %v", err)
+	}
+
+	// Newer COMPLETED turn whose rollout was missing: it recorded a session id,
+	// which is exactly the pointer the reported bug propagates to the next run.
+	var newerTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, completed_at, session_id, work_dir)
+		VALUES ($1, $2, $3, 'completed', 0, now() - interval '1 minute', now() - interval '1 minute', 'NEW-ROLLOUT-MISSING', '/tmp/newer')
+		RETURNING id
+	`, agentID, runtimeID, issueID).Scan(&newerTaskID); err != nil {
+		t.Fatalf("insert newer completed task: %v", err)
+	}
+
+	// The daemon withheld it (rollout missing): clear the pointer + flag the gap.
+	if err := queries.MarkTaskSessionRolloutMissing(ctx, pgtype.UUID{Bytes: parseUUIDBytes(newerTaskID), Valid: true}); err != nil {
+		t.Fatalf("MarkTaskSessionRolloutMissing: %v", err)
+	}
+
+	// (1) The bad session is NOT handed out — resume falls back to the older good one.
+	prior, err := queries.GetLastTaskSession(ctx, db.GetLastTaskSessionParams{
+		AgentID: pgtype.UUID{Bytes: parseUUIDBytes(agentID), Valid: true},
+		IssueID: pgtype.UUID{Bytes: parseUUIDBytes(issueID), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("GetLastTaskSession failed: %v", err)
+	}
+	if !prior.SessionID.Valid || prior.SessionID.String != "OLD-GOOD-SESSION" {
+		t.Fatalf("expected fallback to OLD-GOOD-SESSION, got valid=%v %q", prior.SessionID.Valid, prior.SessionID.String)
+	}
+
+	// (2) The gap is disclosed — the resume is NOT silently claimed as complete.
+	missing, err := queries.GetLatestTaskRolloutMissing(ctx, db.GetLatestTaskRolloutMissingParams{
+		AgentID: pgtype.UUID{Bytes: parseUUIDBytes(agentID), Valid: true},
+		IssueID: pgtype.UUID{Bytes: parseUUIDBytes(issueID), Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("GetLatestTaskRolloutMissing failed: %v", err)
+	}
+	if !missing {
+		t.Fatal("expected the continuity gap to be flagged so the next claim discloses it")
+	}
+}
+
 // TestGetLastTaskSessionFallbackPoisonedClassifier covers the second
 // poisoned classifier so adding a third doesn't silently break this rule.
 func TestGetLastTaskSessionFallbackPoisonedClassifier(t *testing.T) {
