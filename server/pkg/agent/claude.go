@@ -184,11 +184,11 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		// On cancellation / timeout, terminate claude (and every MCP server and
 		// tool subprocess it spawned) BEFORE unblocking the scanner. EOF stdin
 		// to nudge a clean exit, then SIGTERM the whole process group, give it a
-		// grace period, and SIGKILL if it is still alive. SIGKILL is uncatchable,
-		// so once delivered no group member can write again — only then is it
-		// safe to close the stdout read end as a last-resort unblock for a
-		// scanner a wedged descendant still keeps open. WaitDelay is the final
-		// backstop (#5918).
+		// grace period, and SIGKILL the group if any member is still alive.
+		// SIGKILL is uncatchable, so once delivered no group member can write
+		// again — only then is it safe to close the stdout read end as a
+		// last-resort unblock for a scanner a wedged descendant still keeps
+		// open. WaitDelay is the final backstop (#5918).
 		go func() {
 			select {
 			case <-procDone:
@@ -198,9 +198,15 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 			closeStdin()
 			if cmd.Process != nil {
 				signalProcessGroup(cmd.Process, syscall.SIGTERM)
-				select {
-				case <-procDone: // exited within the grace window
-				case <-time.After(claudeTerminateGrace()):
+				// Escalate to a group SIGKILL unless the WHOLE process group has
+				// exited within the grace window. This must key off the process
+				// group, not procDone: procDone only means cmd.Wait() returned
+				// for the leader, so a SIGTERM-ignoring descendant that does not
+				// hold claude's stdout would let the leader exit, close procDone,
+				// and skip the SIGKILL — leaking exactly the orphan this fix
+				// targets. waitProcessGroupGone returns as soon as the group is
+				// empty, so the graceful case adds no latency.
+				if !waitProcessGroupGone(cmd.Process, claudeTerminateGrace()) {
 					signalProcessGroup(cmd.Process, syscall.SIGKILL)
 				}
 			}
