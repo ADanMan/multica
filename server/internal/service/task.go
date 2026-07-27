@@ -4370,16 +4370,19 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			// The lookup itself failed (DB fault, timeout, …), not a confirmed
-			// "no issue". The agent may well have created the issue, so writing
-			// a failure inbox here would both mislead the user and bury a real
-			// issue. Log and bail: the success inbox is lost, but no false
-			// failure is emitted.
-			slog.Error("quick-create completion: issue lookup failed",
+			// "no issue": the agent may well have created the issue, so a
+			// failure inbox would misreport it. But the task is already
+			// completed and nothing retries this reconciliation, so returning
+			// silently would end the run with NO inbox result at all. Write a
+			// neutral, terminal notification instead — the user always gets a
+			// result, and it never asserts a failure we did not observe.
+			slog.Error("quick-create completion: issue lookup failed, writing unconfirmed inbox",
 				"task_id", util.UUIDToString(task.ID),
 				"agent_id", util.UUIDToString(task.AgentID),
 				"workspace_id", qc.WorkspaceID,
 				"error", err,
 			)
+			s.notifyQuickCreateUnconfirmed(ctx, task, qc)
 			return
 		}
 		// No issue created — the agent ran to completion but the CLI create
@@ -4480,8 +4483,39 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 // notifyQuickCreateFailed writes a failure inbox notification carrying the
 // original prompt + agent ID so the frontend can render an "Edit as
 // advanced form" entry that pre-fills the legacy create-issue modal
-// without asking the user to retype.
+// without asking the user to retype. Use this only when the run is KNOWN not
+// to have produced an issue; when that is merely unverified, use
+// notifyQuickCreateUnconfirmed so the user is not told a definite failure.
 func (s *TaskService) notifyQuickCreateFailed(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext, errMsg string) {
+	if errMsg == "" {
+		errMsg = "Quick create did not finish successfully"
+	}
+	s.writeQuickCreateOutcomeInbox(ctx, task, qc, "Quick create failed", errMsg)
+}
+
+// quickCreateUnconfirmedDetail is the user-facing message for a quick-create
+// run whose outcome could not be verified (the completion lookup itself
+// failed). It must not claim failure: the agent may well have created the
+// issue. It points at the one safe next step instead — check before retrying,
+// so a retry cannot silently produce the duplicate the guard exists to prevent.
+const quickCreateUnconfirmedDetail = "Couldn't confirm whether the issue was created. Check your recent issues before retrying — creating it again may produce a duplicate."
+
+// notifyQuickCreateUnconfirmed writes a NEUTRAL terminal notification for a
+// quick-create run whose outcome is unverified. The task is already completed
+// and nothing re-runs this reconciliation, so returning without writing here
+// would strand the requester with no inbox result at all — the failure mode
+// this exists to prevent. Severity stays action_required because the user does
+// need to look; the wording (see above) deliberately does not assert failure.
+func (s *TaskService) notifyQuickCreateUnconfirmed(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext) {
+	s.writeQuickCreateOutcomeInbox(ctx, task, qc, "Quick create needs a check", quickCreateUnconfirmedDetail)
+}
+
+// writeQuickCreateOutcomeInbox writes the shared quick_create_failed inbox row
+// used by both non-success outcomes (known failure and unverified outcome).
+// Callers own the user-facing wording; the row shape — original prompt, agent
+// id, redacted message — is identical so the frontend's recovery affordance
+// keeps working for both.
+func (s *TaskService) writeQuickCreateOutcomeInbox(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext, title, errMsg string) {
 	requesterID, err := util.ParseUUID(qc.RequesterID)
 	if err != nil {
 		return
@@ -4489,9 +4523,6 @@ func (s *TaskService) notifyQuickCreateFailed(ctx context.Context, task db.Agent
 	workspaceID, err := util.ParseUUID(qc.WorkspaceID)
 	if err != nil {
 		return
-	}
-	if errMsg == "" {
-		errMsg = "Quick create did not finish successfully"
 	}
 	details, _ := json.Marshal(map[string]any{
 		"task_id":         util.UUIDToString(task.ID),
@@ -4506,7 +4537,7 @@ func (s *TaskService) notifyQuickCreateFailed(ctx context.Context, task db.Agent
 		Type:          "quick_create_failed",
 		Severity:      "action_required",
 		IssueID:       pgtype.UUID{},
-		Title:         "Quick create failed",
+		Title:         title,
 		Body:          pgtype.Text{String: redact.Text(errMsg), Valid: true},
 		ActorType:     pgtype.Text{String: "agent", Valid: true},
 		ActorID:       task.AgentID,
