@@ -28,14 +28,9 @@ import {
 import { createBestEffortDevLog } from "./dev-log";
 import {
   writeFreezeBreadcrumb,
-  readFreezeBreadcrumb,
-  ackFreezeBreadcrumb,
+  readAndClearFreezeBreadcrumb,
   clearFreezeBreadcrumb,
 } from "./freeze-breadcrumb";
-import {
-  captureHangStack,
-  warmDebuggerChannel,
-} from "./renderer-stack-capture";
 import {
   loadWindowState,
   resolveWindowOptions,
@@ -453,7 +448,6 @@ function createWindow(): BrowserWindow {
       const routeContext = rendererRouteContexts.get(window.webContents);
       return routeContext ? { desktopRoute: routeContext } : {};
     },
-    captureStack: is.dev ? undefined : () => captureHangStack(window.webContents.debugger),
     // Only persist in production: a true hang/crash can't report itself, so we
     // write a breadcrumb and the next renderer boot flushes it to PostHog. Dev
     // is excluded to keep field telemetry clean.
@@ -473,12 +467,6 @@ function createWindow(): BrowserWindow {
           clearFreezeBreadcrumb(freezeBreadcrumbPath(), `main:${window.id}`),
     log: devLog,
   });
-
-  // Open the debugger channel while the renderer is healthy. A hang can only
-  // be interrogated through a channel that already exists — attaching after
-  // the main thread is stuck never gets dispatched. Measured cost of holding
-  // it open: none beyond benchmark noise (MUL-5345 spike).
-  if (!is.dev) void warmDebuggerChannel(window.webContents.debugger);
 
   installContextMenu(window.webContents);
   installNavigationGestures(window);
@@ -546,7 +534,6 @@ function createIssueWindow(context: IssueWindowContext): void {
       const routeContext = rendererRouteContexts.get(window.webContents);
       return routeContext ? { desktopRoute: routeContext } : {};
     },
-    captureStack: is.dev ? undefined : () => captureHangStack(window.webContents.debugger),
     persistBreadcrumb: is.dev
       ? undefined
       : (payload) =>
@@ -563,12 +550,6 @@ function createIssueWindow(context: IssueWindowContext): void {
           clearFreezeBreadcrumb(freezeBreadcrumbPath(), `issue:${window.id}`),
     log: devLog,
   });
-
-  // Open the debugger channel while the renderer is healthy. A hang can only
-  // be interrogated through a channel that already exists — attaching after
-  // the main thread is stuck never gets dispatched. Measured cost of holding
-  // it open: none beyond benchmark noise (MUL-5345 spike).
-  if (!is.dev) void warmDebuggerChannel(window.webContents.debugger);
 
   installContextMenu(window.webContents);
   loadRenderer(window);
@@ -602,15 +583,6 @@ if (is.dev) {
   // productName / the build pipeline. Must run before requestSingleInstanceLock().
   app.setName("Multica");
 }
-
-// --- Freeze diagnostics --------------------------------------------------
-// The renderer's long-animation-frame observer is what turns "froze for 8s"
-// into "froze in <function> at <script>". Chromium withholds the script URL
-// on a non-http(s) document unless this feature is on, and the packaged
-// renderer is loaded from `file://` — without it every field freeze report
-// comes back unattributed. Must run before `ready`; Chromium reads command
-// line switches during startup.
-app.commandLine.appendSwitch("enable-features", "AlwaysLogLOAFURL");
 
 // --- Protocol registration -----------------------------------------------
 
@@ -737,22 +709,12 @@ if (!gotTheLock) {
       event.returnValue = { version: getAppVersion(), os };
     });
 
-    // Sync IPC: read any freeze/crash breadcrumb left by a previous session.
-    // The renderer flushes it to telemetry on boot (it couldn't be reported
-    // when it happened — the renderer was hung or gone). Reading does NOT
-    // delete: the renderer acknowledges below once the event is on the wire,
-    // so a report lost to a second hang is retried next boot.
+    // Sync IPC: read + clear any freeze/crash breadcrumb left by a previous
+    // session. The renderer flushes it to telemetry on boot (it couldn't be
+    // reported when it happened — the renderer was hung or gone). Read-and-
+    // clear so a failure reports exactly once.
     ipcMain.on("freeze:get-last", (event) => {
-      event.returnValue = readFreezeBreadcrumb(freezeBreadcrumbPath());
-    });
-
-    // The renderer got its breadcrumb event to posthog — retire that exact
-    // payload. A newer failure recorded since the read keeps its own ts and
-    // survives to be reported on the next boot.
-    ipcMain.on("freeze:ack", (event, ts: unknown) => {
-      if (!BrowserWindow.fromWebContents(event.sender)) return;
-      if (typeof ts !== "number" || !Number.isFinite(ts)) return;
-      ackFreezeBreadcrumb(freezeBreadcrumbPath(), ts);
+      event.returnValue = readAndClearFreezeBreadcrumb(freezeBreadcrumbPath());
     });
 
     // Sync IPC: preload exposes the validated runtime config before renderer

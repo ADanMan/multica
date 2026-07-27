@@ -34,11 +34,7 @@ vi.mock("@/stores/tab-store", () => ({
 }));
 
 import { DiagnosticRouteReporter } from "./diagnostic-route-reporter";
-import {
-  getDiagnosticRoute,
-  markDiagnosticOperation,
-  resetDiagnosticContext,
-} from "@multica/core/diagnostics";
+import { getDiagnosticRoute, resetDiagnosticContext } from "@multica/core/diagnostics";
 
 const setRendererRouteContext = vi.fn();
 
@@ -113,19 +109,6 @@ describe("DiagnosticRouteReporter", () => {
     });
   });
 
-  it("forwards a marked operation so main has it before the thread blocks", () => {
-    render(<DiagnosticRouteReporter />);
-    setRendererRouteContext.mockClear();
-
-    markDiagnosticOperation("parse-markdown-chunked");
-
-    expect(setRendererRouteContext).toHaveBeenCalledWith({
-      surface: "tab",
-      path: "/:slug/issues",
-      operation: "parse-markdown-chunked",
-    });
-  });
-
   it("does not re-send an unchanged context", () => {
     const { rerender } = render(<DiagnosticRouteReporter />);
     expect(setRendererRouteContext).toHaveBeenCalledTimes(1);
@@ -135,13 +118,16 @@ describe("DiagnosticRouteReporter", () => {
     expect(setRendererRouteContext).toHaveBeenCalledTimes(1);
   });
 
-  it("stops forwarding once unmounted", () => {
-    const { unmount } = render(<DiagnosticRouteReporter />);
-    unmount();
-    setRendererRouteContext.mockClear();
+  it("re-reports when the tab navigates to another page", () => {
+    const { rerender } = render(<DiagnosticRouteReporter />);
+    tabState.url = "/acme/inbox";
 
-    markDiagnosticOperation("parse-markdown-chunked");
+    rerender(<DiagnosticRouteReporter />);
 
-    expect(setRendererRouteContext).not.toHaveBeenCalled();
+    expect(setRendererRouteContext).toHaveBeenLastCalledWith({
+      surface: "tab",
+      path: "/:slug/inbox",
+    });
+    expect(getDiagnosticRoute()).toBe("/:slug/inbox");
   });
 });

@@ -1,23 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   bucketDiagnosticPath,
-  getDiagnosticContext,
-  getDiagnosticOperation,
-  getDiagnosticOperationAgeMs,
   getDiagnosticRoute,
-  markDiagnosticOperation,
   resetDiagnosticContext,
-  setDiagnosticContextListener,
   setDiagnosticRoute,
 } from "./diagnostic-context";
 
 afterEach(() => {
   resetDiagnosticContext();
-  vi.useRealTimers();
 });
 
-describe("diagnostic route + operation", () => {
+describe("diagnostic route", () => {
   it("holds the published route", () => {
     setDiagnosticRoute("/:slug/issues");
     expect(getDiagnosticRoute()).toBe("/:slug/issues");
@@ -28,60 +22,10 @@ describe("diagnostic route + operation", () => {
     expect(getDiagnosticRoute()).toBeNull();
   });
 
-  it("notifies the mirror when either field changes", () => {
-    const listener = vi.fn();
-    setDiagnosticContextListener(listener);
-
-    setDiagnosticRoute("/:slug/inbox");
-    markDiagnosticOperation("parse-markdown-chunked");
-
-    expect(listener).toHaveBeenNthCalledWith(1, {
-      route: "/:slug/inbox",
-      operation: null,
-    });
-    expect(listener).toHaveBeenNthCalledWith(2, {
-      route: "/:slug/inbox",
-      operation: "parse-markdown-chunked",
-    });
-  });
-
-  it("does not notify when the value is unchanged", () => {
-    const listener = vi.fn();
-    setDiagnosticContextListener(listener);
-
+  it("clears on null, so a window that leaves a route stops claiming it", () => {
     setDiagnosticRoute("/:slug/issues");
-    setDiagnosticRoute("/:slug/issues");
-
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it("survives a listener that throws — the caller is about to do heavy work", () => {
-    setDiagnosticContextListener(() => {
-      throw new Error("ipc gone");
-    });
-
-    expect(() => markDiagnosticOperation("parse-markdown-chunked")).not.toThrow();
-    expect(getDiagnosticOperation()).toBe("parse-markdown-chunked");
-  });
-
-  it("re-stamps the age when the same operation is marked again", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-    markDiagnosticOperation("parse-markdown-chunked");
-
-    vi.advanceTimersByTime(5_000);
-    expect(getDiagnosticOperationAgeMs()).toBe(5_000);
-
-    markDiagnosticOperation("parse-markdown-chunked");
-    expect(getDiagnosticOperationAgeMs()).toBe(0);
-  });
-
-  it("reports no age once the operation is cleared", () => {
-    markDiagnosticOperation("parse-markdown-chunked");
-    markDiagnosticOperation(null);
-
-    expect(getDiagnosticContext()).toEqual({ route: null, operation: null });
-    expect(getDiagnosticOperationAgeMs()).toBeNull();
+    setDiagnosticRoute(null);
+    expect(getDiagnosticRoute()).toBeNull();
   });
 });
 

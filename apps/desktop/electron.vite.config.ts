@@ -19,12 +19,6 @@ export default defineConfig({
       strictPort: true,
     },
     plugins: [react(), tailwindcss()],
-    // NOTE: this renderer build does not minify (verified MUL-5345: the
-    // packaged `out/renderer` bundle keeps original identifiers), which is why
-    // freeze/exception telemetry can report real function names without
-    // sourcemaps. Turning minification on here would silently reduce those
-    // reports to single-letter names — add `esbuild: { keepNames: true }` in
-    // the same change if that ever happens.
     resolve: {
       alias: {
         "@": resolve("src/renderer/src"),

@@ -1,9 +1,5 @@
 import { useEffect, useRef } from "react";
-import {
-  bucketDiagnosticPath,
-  setDiagnosticContextListener,
-  setDiagnosticRoute,
-} from "@multica/core/diagnostics";
+import { bucketDiagnosticPath, setDiagnosticRoute } from "@multica/core/diagnostics";
 import { useAuthStore } from "@multica/core/auth";
 import { useActiveTabIdentity, useActiveTabUrl } from "@/stores/tab-store";
 import {
@@ -40,10 +36,9 @@ export function DiagnosticRouteReporter() {
   // never sees a filter value or an anchor.
   const activeTabUrl = useActiveTabUrl();
 
-  // Last payload pushed to main, so an operation mark or a re-render doesn't
-  // re-send an identical context.
+  // Last payload pushed to main, so a re-render doesn't re-send an identical
+  // context.
   const lastSentRef = useRef<string | null>(null);
-  const contextRef = useRef<RendererRouteContextInput | null>(null);
 
   useEffect(() => {
     const surface = resolveSurface({
@@ -61,24 +56,8 @@ export function DiagnosticRouteReporter() {
       surface: surface.kind,
       path: surface.path,
     };
-    contextRef.current = context;
     send(context, lastSentRef);
   }, [user, overlay, activeWorkspaceSlug, activeTabUrl]);
-
-  // A marked operation must reach main before the thread it is about to block:
-  // `ipcRenderer.send` is asynchronous and travels on the IPC thread, so it
-  // still arrives after the renderer's main thread stops responding.
-  useEffect(() => {
-    setDiagnosticContextListener(({ operation }) => {
-      const context = contextRef.current;
-      if (!context) return;
-      send(
-        { ...context, ...(operation ? { operation } : {}) },
-        lastSentRef,
-      );
-    });
-    return () => setDiagnosticContextListener(null);
-  }, []);
 
   return null;
 }

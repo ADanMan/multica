@@ -12,16 +12,12 @@ import { sanitizeRendererRouteContext } from "./renderer-route-context";
 const reportedAt = new Date("2026-07-27T00:00:00.000Z");
 
 describe("sanitizeRendererRouteContext", () => {
-  it("keeps the bucketed route and the operation label", () => {
+  it("keeps the bucketed route", () => {
     expect(
-      sanitizeRendererRouteContext(
-        { surface: "tab", path: "/:slug/issues", operation: "parse-markdown-chunked" },
-        reportedAt,
-      ),
+      sanitizeRendererRouteContext({ surface: "tab", path: "/:slug/issues" }, reportedAt),
     ).toEqual({
       surface: "tab",
       path: "/:slug/issues",
-      operation: "parse-markdown-chunked",
       reportedAt: "2026-07-27T00:00:00.000Z",
     });
   });

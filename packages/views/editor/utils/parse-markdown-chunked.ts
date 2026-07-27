@@ -1,5 +1,4 @@
 import type { JSONContent } from "@tiptap/core";
-import { markDiagnosticOperation } from "@multica/core/diagnostics";
 
 /**
  * Above this source size, ContentEditor parses markdown in chunks instead of in
@@ -38,13 +37,6 @@ export function parseMarkdownChunked(
   markdown: string,
   chunkSize = MARKDOWN_CHUNK_SIZE,
 ): JSONContent {
-  // Only documents past MARKDOWN_CHUNK_THRESHOLD reach this path, and marked's
-  // tokenizer is superlinear even on the chunks — this is one of the few known
-  // ways the app blocks its own main thread for seconds. Name it before the
-  // work starts so a freeze report can say what was in flight, whether or not
-  // a stack was captured.
-  markDiagnosticOperation("parse-markdown-chunked");
-
   const lines = markdown.split("\n");
   const chunks: string[] = [];
   let current: string[] = [];
