@@ -7,6 +7,13 @@ export type RendererRouteContextInput = {
   path: string;
   workspaceSlug?: string;
   tabId?: string;
+  /**
+   * Name of the heavy synchronous operation in flight, if the renderer
+   * declared one. The main process can't ask a hung renderer what it was
+   * doing, so this rides along with the route and is read back from whatever
+   * was last received.
+   */
+  operation?: string;
 };
 
 export type RendererRouteContext = RendererRouteContextInput & {
@@ -29,12 +36,14 @@ export function sanitizeRendererRouteContext(
 
   const workspaceSlug = sanitizeString(input.workspaceSlug);
   const tabId = sanitizeString(input.tabId);
+  const operation = sanitizeString(input.operation);
 
   return {
     surface: input.surface,
     path,
     ...(workspaceSlug ? { workspaceSlug } : {}),
     ...(tabId ? { tabId } : {}),
+    ...(operation ? { operation } : {}),
     reportedAt: reportedAt.toISOString(),
   };
 }

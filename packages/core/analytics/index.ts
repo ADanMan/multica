@@ -47,7 +47,12 @@ let analyticsEnvironment = "dev";
 // only ever carry user-triggered signals on identified users, so the
 // buffer stays small (~one step-transition worth).
 type PendingOp =
-  | { kind: "event"; name: string; props?: Record<string, unknown> }
+  | {
+      kind: "event";
+      name: string;
+      props?: Record<string, unknown>;
+      options?: CaptureEventOptions;
+    }
   | { kind: "set"; props: Record<string, unknown> }
   | { kind: "exception"; error: unknown; props?: Record<string, unknown> };
 const pendingOps: PendingOp[] = [];
@@ -186,7 +191,7 @@ export function initAnalytics(config: AnalyticsConfig | null | undefined): boole
   while (pendingOps.length > 0) {
     const op = pendingOps.shift()!;
     if (op.kind === "event") {
-      posthog.capture(op.name, withClientEventProperties(op.props));
+      captureNow(op.name, op.props, op.options);
     } else if (op.kind === "exception") {
       posthog.captureException(op.error, withClientEventProperties(op.props));
     } else {
@@ -242,15 +247,47 @@ export function resetAnalytics(): void {
  * Calls before initAnalytics() buffer in order so a late-arriving config
  * doesn't silently swallow a step transition.
  */
+export interface CaptureEventOptions {
+  /**
+   * Bypass posthog-js's batching timer and put the event on the wire now.
+   * Batching is a JS timer in the same thread that is about to freeze or be
+   * killed, so a failure report queued normally can be lost exactly when it
+   * matters (MUL-4115: three deterministic hangs, zero events delivered).
+   * Reserve this for failure telemetry — routine events should batch.
+   */
+  sendInstantly?: boolean;
+  /**
+   * Fired once the event has been handed to posthog.capture. This marks
+   * hand-off, NOT delivery confirmation, and never fires on a build with
+   * analytics disabled — callers that persist state until acknowledgement need
+   * their own expiry path.
+   */
+  onCaptured?: () => void;
+}
+
 export function captureEvent(
   name: string,
   props?: Record<string, unknown>,
+  options?: CaptureEventOptions,
 ): void {
   if (!initialized) {
-    pendingOps.push({ kind: "event", name, props });
+    pendingOps.push({ kind: "event", name, props, options });
     return;
   }
-  posthog.capture(name, withClientEventProperties(props));
+  captureNow(name, props, options);
+}
+
+function captureNow(
+  name: string,
+  props?: Record<string, unknown>,
+  options?: CaptureEventOptions,
+): void {
+  posthog.capture(
+    name,
+    withClientEventProperties(props),
+    options?.sendInstantly ? { send_instantly: true } : undefined,
+  );
+  options?.onCaptured?.();
 }
 
 /**

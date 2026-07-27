@@ -2,6 +2,10 @@ import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import {
+  bucketDiagnosticPath,
+  setDiagnosticRoute,
+} from "@multica/core/diagnostics";
+import {
   NavigationProvider,
   type NavigationAdapter,
 } from "@multica/views/navigation";
@@ -61,9 +65,14 @@ export function IssueWindowNavigationProvider({
   const currentPath = `${location.pathname}${location.search}${location.hash}`;
 
   useEffect(() => {
+    // Both freeze observers need the route: main for a hang this window never
+    // returns from, the in-renderer watchdog for one it survives (its
+    // `location.pathname` is the packaged index.html path).
+    const bucketed = bucketDiagnosticPath(currentPath);
+    setDiagnosticRoute(bucketed);
     window.desktopAPI.setRendererRouteContext({
       surface: "tab",
-      path: currentPath,
+      path: bucketed,
       ...(workspace?.slug ? { workspaceSlug: workspace.slug } : {}),
     });
   }, [currentPath, workspace?.slug]);
