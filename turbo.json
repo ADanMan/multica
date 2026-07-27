@@ -1,5 +1,10 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // The CI workflow pins the toolchain these tasks run under (Node 22 today).
+  // Without it in the global hash, bumping that version would replay cached
+  // typecheck/test results produced by the old runtime and hide an
+  // incompatibility behind a green check.
+  "globalDependencies": [".github/workflows/ci.yml"],
   "globalEnv": [
     "DATABASE_URL",
     "PORT",
@@ -18,7 +23,13 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "inputs": ["src/**", "app/**", "**/*.ts", "**/*.tsx", "**/*.css"],
+      // No explicit `inputs`: turbo's default (every git-tracked file in the
+      // package) is the only safe hash source now that the cache is actually
+      // restored in CI. The previous narrow glob list matched neither
+      // `content/**/*.mdx` (compiled by fumadocs-mdx during the build),
+      // `public/**` assets, nor `package.json` / `tsconfig.json`, so the task
+      // hash was unchanged by edits to any of them -- harmless while nothing
+      // was ever cached, a stale-build bug the moment it is.
       "outputs": [".next/**", "!.next/cache/**", "dist/**", "out/**"]
     },
     "dev": {
@@ -32,13 +43,21 @@
     "typecheck": {
       "dependsOn": ["^typecheck"]
     },
-    // `test` and `lint` deliberately have no `^typecheck` dependency. No
-    // package emits build artifacts (core/ui/views export raw .ts that the
-    // consumer transpiles), so depending on a dependency's `tsc --noEmit`
-    // bought nothing but head-of-line blocking: the heaviest task in the
-    // graph, `@multica/views:test`, sat idle until core/ui typechecked.
-    // Type errors still fail CI through the `typecheck` task itself.
-    "test": {},
+    // `^typecheck` is load-bearing here, but not for ordering: a turbo task
+    // hash only covers a workspace dependency's sources if a task edge
+    // reaches them. Without this edge, editing packages/views left
+    // `@multica/web#test` and `@multica/desktop#test` byte-identical in hash,
+    // so a cached pass would be replayed for code that changed underneath.
+    // `typecheck` is the one task every package defines, which is what makes
+    // it the usable edge -- `^test` would miss packages/ui, which has no test
+    // script. Harmless to omit while nothing was cached; not once it is.
+    "test": {
+      "dependsOn": ["^typecheck"]
+    },
+    // `lint` keeps no dependency edge: eslint here is not type-aware (no
+    // `projectService` / `parserOptions.project` anywhere in
+    // packages/eslint-config), so it only ever reads its own package's files
+    // and a dependency's source cannot change its result.
     "lint": {}
   }
 }

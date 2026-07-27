@@ -90,6 +90,9 @@ jobs:
   frontend-build:
     needs: changes
     runs-on: ubuntu-latest
+    env:
+      # Pin turbo's filesystem cache somewhere actions/cache can address.
+      TURBO_CACHE_DIR: .turbo/cache
     steps:
       - name: Checkout
         if: ${{ needs.changes.outputs.frontend == 'true' }}
@@ -109,6 +112,21 @@ jobs:
       - name: Install dependencies
         if: ${{ needs.changes.outputs.frontend == 'true' }}
         run: pnpm install
+
+      # Cache entries are immutable, so the key carries the commit SHA to make
+      # every run publish a fresh one and `restore-keys` falls back to the most
+      # recent prefix match. The two frontend jobs run disjoint task sets, so
+      # they get their own prefixes rather than racing to save one key.
+      # GitHub scopes caches by branch: a PR reads main's entries (so unchanged
+      # tasks hit on the first push) and writes its own (so re-pushes hit too).
+      - name: Restore turbo cache
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-build-${{ runner.os }}-
 
       - name: Test self-host env derivation
         if: ${{ needs.changes.outputs.frontend == 'true' }}
@@ -136,6 +154,8 @@ jobs:
   frontend-test:
     needs: changes
     runs-on: ubuntu-latest
+    env:
+      TURBO_CACHE_DIR: .turbo/cache
     steps:
       - name: Checkout
         if: ${{ needs.changes.outputs.frontend == 'true' }}
@@ -155,6 +175,19 @@ jobs:
       - name: Install dependencies
         if: ${{ needs.changes.outputs.frontend == 'true' }}
         run: pnpm install
+
+      # See frontend-build for the key strategy. These entries are tiny (~60KB
+      # measured): `test` declares no outputs, so turbo caches exit codes and
+      # logs rather than artifacts -- yet a hit still skips the whole suite,
+      # which is the single most expensive task in the graph.
+      - name: Restore turbo cache
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-test-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            turbo-test-${{ runner.os }}-
 
       - name: Test
         if: ${{ needs.changes.outputs.frontend == 'true' }}
