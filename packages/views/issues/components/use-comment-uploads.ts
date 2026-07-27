@@ -26,7 +26,7 @@
  * visible, deletable, and deleting it really unbinds it.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type RefObject } from "react";
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
 import { startUpload, hasUploadingDraft, type DraftUpload } from "@multica/core/drafts";
@@ -51,12 +51,66 @@ const EMPTY_ATTACHMENTS: Attachment[] = [];
 // the editor a REOPENED composer mounted for the same draft.
 const liveEditors = new Map<CommentDraftKey, RefObject<ContentEditorRef | null>>();
 
-/** Markdown for a finished upload, matching what the in-editor swap produces. */
+/** Markdown for a finished upload. Mirrors the shape the in-editor swap
+ *  produces (`extensions/file-upload.ts`: image node for images, fileCard link
+ *  for everything else) — keep the two in sync. */
 function attachmentMarkdown(att: Attachment): string {
   const link = toUploadResult(att).markdownLink;
   return (att.content_type ?? "").startsWith("image/")
     ? `![${att.filename}](${link})`
     : `[${att.filename}](${link})`;
+}
+
+const DELIVER_RETRY_MS = 50;
+const DELIVER_MAX_TRIES = 100; // ~5s — editor init is a passive effect away
+
+/**
+ * Land a finished upload's markdown link in the draft BODY after the mount
+ * that owned the upload died. Delivery must be CONFIRMED, not assumed:
+ *
+ *  - live editor for the key, insert landed → also persist the same body via
+ *    `appendToDraftContent` as insurance — the editor's debounced emit is
+ *    dropped on a quick unmount, and it converges to identical content anyway.
+ *  - no composer mounted for the key → append to the persisted draft; the next
+ *    mount reads it as `defaultValue`.
+ *  - composer mounted but its Tiptap instance not created yet (the handle
+ *    exists from first commit; the instance arrives in a passive effect) →
+ *    RETRY. Appending to the store here would be erased by the mounted
+ *    editor's first emit, which snapshots a body without the link.
+ *
+ * Every attempt re-checks the generation guard (draft may be cleared or
+ * submitted while waiting) and the body (the link may have landed some other
+ * way) before writing.
+ */
+function deliverFinishedUpload(
+  draftKey: CommentDraftKey,
+  clientUploadId: string,
+  attachment: Attachment,
+  tries = 0,
+): void {
+  const store = useCommentDraftStore.getState();
+  if (!store.getUploads(draftKey).some((u) => u.clientUploadId === clientUploadId)) return;
+  if (contentReferencesAttachment(store.getDraft(draftKey) ?? "", attachment)) return;
+
+  const md = attachmentMarkdown(attachment);
+  const live = liveEditors.get(draftKey);
+  if (live?.current?.insertMarkdownAtEnd(md) === true) {
+    store.appendToDraftContent(draftKey, md);
+    return;
+  }
+  if (!live) {
+    store.appendToDraftContent(draftKey, md);
+    return;
+  }
+  if (tries >= DELIVER_MAX_TRIES) {
+    // Editor never initialized — persist to the store as the least-bad option.
+    store.appendToDraftContent(draftKey, md);
+    return;
+  }
+  setTimeout(
+    () => deliverFinishedUpload(draftKey, clientUploadId, attachment, tries + 1),
+    DELIVER_RETRY_MS,
+  );
 }
 
 export interface CommentUploads {
@@ -97,8 +151,11 @@ export function useCommentUploads(
   // Liveness of THIS mount, read by settle closures it created: while true,
   // the editor that started the upload will do the inline swap itself; once
   // false, the write-back below is the only path that lands the link.
+  // Layout effect on purpose: React nulls the child editor's ref during the
+  // unmount commit, but a passive cleanup flips this a task later — a settle
+  // landing in that gap would see "mounted" with no editor left to swap.
   const mountedRef = useRef(true);
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -183,23 +240,13 @@ export function useCommentUploads(
                   store.settleUpload(draftKey, clientUploadId, outcome.attachment);
                   // Write-back (MUL-5181): the mount that started this upload
                   // is gone, so no editor swap will put the finished link into
-                  // the document. Land it in the editor a reopened composer is
-                  // showing for this draft, or append it to the persisted body
-                  // — the BODY is what submit binds (reference-filtered), so a
-                  // link nowhere in it would silently never attach. Skipped
-                  // while this mount is alive: resolving the promise below
-                  // drives the normal inline blob→URL swap.
-                  if (
-                    !mountedRef.current &&
-                    !contentReferencesAttachment(
-                      store.getDraft(draftKey) ?? "",
-                      outcome.attachment,
-                    )
-                  ) {
-                    const md = attachmentMarkdown(outcome.attachment);
-                    const live = liveEditors.get(draftKey);
-                    if (live?.current) live.current.insertMarkdownAtEnd(md);
-                    else store.appendToDraftContent(draftKey, md);
+                  // the document — deliver it into the BODY instead (that is
+                  // what submit binds, reference-filtered). Skipped while this
+                  // mount is alive: resolving the promise below drives the
+                  // normal inline blob→URL swap, and a placeholder the user
+                  // deleted mid-upload must stay deleted.
+                  if (!mountedRef.current) {
+                    deliverFinishedUpload(draftKey, clientUploadId, outcome.attachment);
                   }
                 }
               } else {
@@ -246,27 +293,26 @@ export function useCommentUploads(
     [draftKey],
   );
 
-  // Submit-time truth for the local (non-persisted) path: a ref, because
-  // `isBlocked` must read the value at invocation time, not at the render the
-  // callback captured. The persisted path reads the store directly.
+  // Submit-time truth for the local (non-persisted) path: a deliberate
+  // latest-value ref written during render, because `isBlocked` must read the
+  // value at invocation time, not at the render the callback captured. The
+  // persisted path reads the store directly.
   const localUploadsRef = useRef(localUploads);
   localUploadsRef.current = localUploads;
 
-  const uploadingInDraft = hasUploadingDraft(uploads);
-  const gate = useMemo<UploadGate>(
-    () => ({
-      uploading: editorGate.uploading || uploadingInDraft,
-      onUploadingChange: editorGate.onUploadingChange,
-      isBlocked: () =>
-        editorGate.isBlocked() ||
-        hasUploadingDraft(
-          draftKey
-            ? useCommentDraftStore.getState().getUploads(draftKey)
-            : localUploadsRef.current,
-        ),
-    }),
-    [editorGate, uploadingInDraft, draftKey],
-  );
+  // Rebuilt every render on purpose (editorGate itself is a fresh object per
+  // render): consumers read it through refs/props, never by identity.
+  const gate: UploadGate = {
+    uploading: editorGate.uploading || hasUploadingDraft(uploads),
+    onUploadingChange: editorGate.onUploadingChange,
+    isBlocked: () =>
+      editorGate.isBlocked() ||
+      hasUploadingDraft(
+        draftKey
+          ? useCommentDraftStore.getState().getUploads(draftKey)
+          : localUploadsRef.current,
+      ),
+  };
 
   return { uploads, attachments, handleUpload, removeUpload, gate };
 }

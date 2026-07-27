@@ -158,6 +158,11 @@ export async function uploadAndInsertFile(
 
     try {
       const result = await handler(file);
+      // The upload outlives the mount (coordinator-owned, MUL-5181): by the
+      // time it settles this editor may be destroyed. Dispatching against a
+      // destroyed EditorView throws, and the catch would dispatch again —
+      // the write-back path owns delivery for dead editors, not this swap.
+      if (editor.isDestroyed) return;
       if (result) {
         const imagePos = findImagePosBySrc(editor, blobUrl);
         const imageNode = imagePos === null ? null : editor.state.doc.nodeAt(imagePos);
@@ -181,7 +186,7 @@ export async function uploadAndInsertFile(
         removeImageBySrc(editor, blobUrl);
       }
     } catch {
-      removeImageBySrc(editor, blobUrl);
+      if (!editor.isDestroyed) removeImageBySrc(editor, blobUrl);
     } finally {
       URL.revokeObjectURL(blobUrl);
     }
@@ -198,13 +203,16 @@ export async function uploadAndInsertFile(
 
     try {
       const result = await handler(file);
+      // See the image branch: a settle after this editor's destroy must not
+      // dispatch against the dead EditorView.
+      if (editor.isDestroyed) return;
       if (result) {
         finalizeFileCard(editor, uploadId, result.markdownLink || result.link);
       } else {
         removeUploadingFileCard(editor, uploadId);
       }
     } catch {
-      removeUploadingFileCard(editor, uploadId);
+      if (!editor.isDestroyed) removeUploadingFileCard(editor, uploadId);
     }
   }
 }

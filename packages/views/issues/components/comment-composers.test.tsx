@@ -17,6 +17,11 @@ const uploadWithToast = vi.hoisted(() => vi.fn());
 const editorDefaultValues = vi.hoisted(() => ({
   values: [] as Array<string | undefined>,
 }));
+// Observability + failure control for the write-back insert path (MUL-5181):
+// `insertMarkdownAtEnd` returns false while the (simulated) Tiptap instance
+// doesn't exist yet, exactly like the real handle.
+const insertMarkdownSpy = vi.hoisted(() => vi.fn());
+const insertMarkdownBehavior = vi.hoisted(() => ({ succeed: true }));
 
 vi.mock("@multica/core/api", () => ({
   api: { uploadFile: apiUploadFile },
@@ -85,9 +90,16 @@ vi.mock("../../editor", async () => ({
     // from before the await until the upload settles, `hasActiveUploads` reads
     // it synchronously, and the host is told through onUploadingChange.
     const inFlightRef = useRef(0);
+    // Mirrors `editor.isDestroyed`: a settle continuation after unmount must
+    // not write the document or emit onUpdate (uploadAndInsertFile guards on
+    // isDestroyed in production).
+    const destroyedRef = useRef(false);
 
     useEffect(() => {
       onReady?.();
+      return () => {
+        destroyedRef.current = true;
+      };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -104,18 +116,21 @@ vi.mock("../../editor", async () => ({
         if (inFlightRef.current === 1) onUploadingChange?.(true);
         try {
           const result = await onUploadFile?.(file);
-          if (!result) return;
+          if (!result || destroyedRef.current) return;
           valueRef.current = `${valueRef.current}\n${result.url}`.trim();
           onUpdate?.(valueRef.current);
         } finally {
           inFlightRef.current -= 1;
-          if (inFlightRef.current === 0) onUploadingChange?.(false);
+          if (inFlightRef.current === 0 && !destroyedRef.current) onUploadingChange?.(false);
         }
       },
       hasActiveUploads: () => inFlightRef.current > 0,
       insertMarkdownAtEnd: (md: string) => {
+        insertMarkdownSpy(md);
+        if (destroyedRef.current || !insertMarkdownBehavior.succeed) return false;
         valueRef.current = `${valueRef.current}\n\n${md}`.trim();
         onUpdate?.(valueRef.current);
+        return true;
       },
     }));
 
@@ -195,6 +210,8 @@ function getSubmitButton(container: HTMLElement): HTMLButtonElement {
 beforeEach(() => {
   uploadWithToast.mockReset();
   apiUploadFile.mockReset();
+  insertMarkdownSpy.mockReset();
+  insertMarkdownBehavior.succeed = true;
   localStorage.clear();
   useCommentComposerStore.setState({ sticky: true });
   // The draft store is a module singleton — a draft left by a previous test
@@ -587,12 +604,51 @@ describe("comment composers — upload submit gate", () => {
       pending.resolve(uploadAttachment("att-live", "https://cdn.example/att-live.png"));
     });
 
-    // The live editor received the insert and synced the draft through its
-    // normal onUpdate pipeline.
+    // The LIVE EDITOR received the insert (not just the store — an append the
+    // mounted editor never saw would be erased by its next emit)…
+    expect(insertMarkdownSpy).toHaveBeenCalledWith(
+      expect.stringContaining("https://cdn.example/att-live.png"),
+    );
+    // …and the draft body converged through the normal onUpdate pipeline.
     await waitFor(() =>
       expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toContain(
         "https://cdn.example/att-live.png",
       ),
+    );
+  });
+
+  it("retries the insert while the reopened editor's instance is still warming up", async () => {
+    const first = renderCommentInput();
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "draft body" } });
+
+    const pending = startPendingUpload(first.container);
+    first.unmount();
+
+    renderCommentInput();
+    await screen.findByTestId("editor");
+
+    // Simulate the real handle's window where the component committed but the
+    // Tiptap instance hasn't been created yet: insert reports failure.
+    insertMarkdownBehavior.succeed = false;
+    await act(async () => {
+      pending.resolve(uploadAttachment("att-retry", "https://cdn.example/att-retry.png"));
+    });
+
+    // Nothing may land in the store while a mounted editor can't show it —
+    // that append would be silently erased by the editor's first emit.
+    expect(useCommentDraftStore.getState().getDraft("new:issue-1") ?? "").not.toContain(
+      "att-retry.png",
+    );
+
+    // Instance comes up → the retry delivers into the editor.
+    insertMarkdownBehavior.succeed = true;
+    await waitFor(
+      () =>
+        expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toContain(
+          "https://cdn.example/att-retry.png",
+        ),
+      { timeout: 3000 },
     );
   });
 
