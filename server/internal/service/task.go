@@ -4480,6 +4480,17 @@ func (s *TaskService) notifyQuickCreateCompleted(ctx context.Context, task db.Ag
 	s.publishQuickCreateInbox(item, qc.WorkspaceID, util.UUIDToString(task.AgentID), issue.Status)
 }
 
+// Inbox types for the two non-success quick-create outcomes. They are distinct
+// because clients render them differently: the failed type carries an explicit
+// "Failed:" framing, which must not be applied to an outcome we could not
+// verify. Older clients that predate the unconfirmed type fall through their
+// existing default branch and render the row's title/body unchanged, which is
+// already the neutral wording.
+const (
+	inboxTypeQuickCreateFailed      = "quick_create_failed"
+	inboxTypeQuickCreateUnconfirmed = "quick_create_unconfirmed"
+)
+
 // notifyQuickCreateFailed writes a failure inbox notification carrying the
 // original prompt + agent ID so the frontend can render an "Edit as
 // advanced form" entry that pre-fills the legacy create-issue modal
@@ -4490,7 +4501,7 @@ func (s *TaskService) notifyQuickCreateFailed(ctx context.Context, task db.Agent
 	if errMsg == "" {
 		errMsg = "Quick create did not finish successfully"
 	}
-	s.writeQuickCreateOutcomeInbox(ctx, task, qc, "Quick create failed", errMsg)
+	s.writeQuickCreateOutcomeInbox(ctx, task, qc, inboxTypeQuickCreateFailed, "Quick create failed", errMsg)
 }
 
 // quickCreateUnconfirmedDetail is the user-facing message for a quick-create
@@ -4504,18 +4515,27 @@ const quickCreateUnconfirmedDetail = "Couldn't confirm whether the issue was cre
 // quick-create run whose outcome is unverified. The task is already completed
 // and nothing re-runs this reconciliation, so returning without writing here
 // would strand the requester with no inbox result at all — the failure mode
-// this exists to prevent. Severity stays action_required because the user does
-// need to look; the wording (see above) deliberately does not assert failure.
+// this exists to prevent.
+//
+// It uses its own inbox type rather than reusing quick_create_failed: every
+// client renders the failed type with a "Failed:" prefix, which would assert a
+// failure we never observed no matter how neutral the title and body are.
+// Severity stays action_required because the user does need to look.
 func (s *TaskService) notifyQuickCreateUnconfirmed(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext) {
-	s.writeQuickCreateOutcomeInbox(ctx, task, qc, "Quick create needs a check", quickCreateUnconfirmedDetail)
+	s.writeQuickCreateOutcomeInbox(ctx, task, qc, inboxTypeQuickCreateUnconfirmed, "Quick create needs a check", quickCreateUnconfirmedDetail)
 }
 
-// writeQuickCreateOutcomeInbox writes the shared quick_create_failed inbox row
-// used by both non-success outcomes (known failure and unverified outcome).
-// Callers own the user-facing wording; the row shape — original prompt, agent
+// quickCreateNotifyTimeout bounds the detached terminal-notification write in
+// writeQuickCreateOutcomeInbox. Long enough for a healthy DB round-trip, short
+// enough that a wedged pool cannot pin the completion goroutine.
+const quickCreateNotifyTimeout = 5 * time.Second
+
+// writeQuickCreateOutcomeInbox writes the shared inbox row used by both
+// non-success outcomes (known failure and unverified outcome). Callers own the
+// user-facing wording and the row type; the row shape — original prompt, agent
 // id, redacted message — is identical so the frontend's recovery affordance
 // keeps working for both.
-func (s *TaskService) writeQuickCreateOutcomeInbox(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext, title, errMsg string) {
+func (s *TaskService) writeQuickCreateOutcomeInbox(ctx context.Context, task db.AgentTaskQueue, qc QuickCreateContext, inboxType, title, errMsg string) {
 	requesterID, err := util.ParseUUID(qc.RequesterID)
 	if err != nil {
 		return
@@ -4524,6 +4544,15 @@ func (s *TaskService) writeQuickCreateOutcomeInbox(ctx context.Context, task db.
 	if err != nil {
 		return
 	}
+	// The task is already committed as completed and nothing retries this
+	// notification, so it must not die with the caller's context. This matters
+	// most on the unconfirmed path: the completion lookup may have failed
+	// precisely BECAUSE ctx was cancelled or timed out, and reusing that ctx
+	// would fail the write for the same reason — leaving the user with no
+	// result at all, the exact silent drop this path exists to prevent. Detach
+	// from cancellation, but keep a bound so a wedged DB cannot pin us.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), quickCreateNotifyTimeout)
+	defer cancel()
 	details, _ := json.Marshal(map[string]any{
 		"task_id":         util.UUIDToString(task.ID),
 		"agent_id":        util.UUIDToString(task.AgentID),
@@ -4534,7 +4563,7 @@ func (s *TaskService) writeQuickCreateOutcomeInbox(ctx context.Context, task db.
 		WorkspaceID:   workspaceID,
 		RecipientType: "member",
 		RecipientID:   requesterID,
-		Type:          "quick_create_failed",
+		Type:          inboxType,
 		Severity:      "action_required",
 		IssueID:       pgtype.UUID{},
 		Title:         title,

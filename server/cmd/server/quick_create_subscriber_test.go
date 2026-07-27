@@ -214,11 +214,11 @@ func TestQuickCreateFailure_SurfacesAgentOutput(t *testing.T) {
 	// only output (per the quick-create prompt contract).
 	const agentErr = "Error: an active issue already exists: JKY-30 (blocked). Pass --allow-duplicate to override."
 	result, _ := json.Marshal(map[string]any{"output": agentErr})
-	if _, err := taskSvc.CompleteTask(ctx, task.ID, result, "", ""); err != nil {
+	if _, err := taskSvc.CompleteTask(ctx, task.ID, result, "", "", false); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 
-	body, errDetail, _ := requireQuickCreateOutcomeInbox(t, task.ID)
+	body, errDetail, _ := requireQuickCreateOutcomeInbox(t, task.ID, "quick_create_failed")
 
 	if !strings.Contains(errDetail, "JKY-30") {
 		t.Fatalf("expected failure detail to carry the agent's real error, got %q", errDetail)
@@ -296,11 +296,11 @@ func TestQuickCreateLookupFault_WritesUnconfirmedInbox(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{
 		"output": "Error: an active issue already exists: JKY-30 (blocked).",
 	})
-	if _, err := faulting.CompleteTask(ctx, task.ID, result, "", ""); err != nil {
+	if _, err := faulting.CompleteTask(ctx, task.ID, result, "", "", false); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 
-	body, errDetail, title := requireQuickCreateOutcomeInbox(t, task.ID)
+	body, errDetail, title := requireQuickCreateOutcomeInbox(t, task.ID, "quick_create_unconfirmed")
 
 	if !strings.Contains(body, "Couldn't confirm") {
 		t.Fatalf("expected the neutral unconfirmed wording, got body %q", body)
@@ -368,11 +368,11 @@ func TestQuickCreateFailure_RedactsAgentOutput(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{
 		"output": "Error: create failed while authenticating with " + fakeToken,
 	})
-	if _, err := taskSvc.CompleteTask(ctx, task.ID, result, "", ""); err != nil {
+	if _, err := taskSvc.CompleteTask(ctx, task.ID, result, "", "", false); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
 
-	body, errDetail, _ := requireQuickCreateOutcomeInbox(t, task.ID)
+	body, errDetail, _ := requireQuickCreateOutcomeInbox(t, task.ID, "quick_create_failed")
 
 	if strings.Contains(body, fakeToken) || strings.Contains(errDetail, fakeToken) {
 		t.Fatal("agent output reached the inbox row unredacted")
@@ -382,24 +382,99 @@ func TestQuickCreateFailure_RedactsAgentOutput(t *testing.T) {
 	}
 }
 
+// TestQuickCreateLookupCancelled_StillWritesUnconfirmedInbox covers the
+// cancel/timeout shape of the lookup fault, which the plain-error case cannot:
+// when GetIssueByOrigin fails because the caller's context was cancelled or
+// timed out, reusing that same context for the notification write would fail it
+// for the identical reason and leave the user with nothing. The terminal write
+// must be detached from the caller's cancellation.
+func TestQuickCreateLookupCancelled_StillWritesUnconfirmedInbox(t *testing.T) {
+	setupCtx := context.Background()
+	queries := db.New(testPool)
+	bus := events.New()
+	taskSvc := service.NewTaskService(queries, testPool, nil, bus)
+
+	var agentID string
+	if err := testPool.QueryRow(setupCtx,
+		`SELECT id::text FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("load fixture agent: %v", err)
+	}
+
+	task, err := taskSvc.EnqueueQuickCreateTask(setupCtx,
+		parseUUID(testWorkspaceID),
+		parseUUID(testUserID),
+		parseUUID(agentID),
+		pgtype.UUID{},
+		"file a bug while the request is cancelled",
+		"",
+		"",
+		pgtype.UUID{},
+		pgtype.UUID{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("EnqueueQuickCreateTask: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, task.ID)
+		deleteInboxForTask(task.ID)
+	})
+
+	if _, err := testPool.Exec(setupCtx,
+		`UPDATE agent_task_queue SET status = 'dispatched', dispatched_at = now() WHERE id = $1`,
+		task.ID,
+	); err != nil {
+		t.Fatalf("dispatch task: %v", err)
+	}
+	if _, err := queries.StartAgentTask(setupCtx, task.ID); err != nil {
+		t.Fatalf("StartAgentTask: %v", err)
+	}
+
+	// The completion transaction runs on a healthy context; the context dies at
+	// the moment of the origin lookup, exactly as a cancelled request would.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	faulting := service.NewTaskService(
+		db.New(cancelOnGetIssueByOriginDB{DBTX: testPool, cancel: cancel}),
+		testPool, nil, bus,
+	)
+
+	result, _ := json.Marshal(map[string]any{"output": "Error: something went wrong"})
+	if _, err := faulting.CompleteTask(ctx, task.ID, result, "", "", false); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test setup is wrong: the context should have been cancelled during the lookup")
+	}
+
+	body, _, _ := requireQuickCreateOutcomeInbox(t, task.ID, "quick_create_unconfirmed")
+	if !strings.Contains(body, "Couldn't confirm") {
+		t.Fatalf("expected the neutral unconfirmed wording, got %q", body)
+	}
+}
+
 // requireQuickCreateOutcomeInbox returns (body, details.error, title) for the
-// single quick-create outcome notification belonging to taskID, failing the
-// test when none exists. Scoping by task id keeps concurrent/ordering-sensitive
-// cases from reading a sibling test's row.
-func requireQuickCreateOutcomeInbox(t *testing.T, taskID pgtype.UUID) (string, string, string) {
+// quick-create outcome notification of the given type belonging to taskID,
+// failing the test when none exists. Scoping by task id keeps
+// concurrent/ordering-sensitive cases from reading a sibling test's row; the
+// type is asserted because the failed and unconfirmed outcomes must never
+// collapse into one another (clients frame them differently).
+func requireQuickCreateOutcomeInbox(t *testing.T, taskID pgtype.UUID, inboxType string) (string, string, string) {
 	t.Helper()
 	var body, errDetail, title string
 	err := testPool.QueryRow(context.Background(), `
 		SELECT COALESCE(body, ''), COALESCE(details->>'error', ''), title
 		FROM inbox_item
 		WHERE recipient_type = 'member' AND recipient_id = $1
-		  AND type = 'quick_create_failed'
+		  AND type = $3
 		  AND details->>'task_id' = $2::text
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, testUserID, taskID).Scan(&body, &errDetail, &title)
+	`, testUserID, taskID, inboxType).Scan(&body, &errDetail, &title)
 	if err != nil {
-		t.Fatalf("expected a quick-create outcome notification for the task, got none: %v", err)
+		t.Fatalf("expected a %s notification for the task, got none: %v", inboxType, err)
 	}
 	return body, errDetail, title
 }
@@ -423,6 +498,23 @@ func (f failGetIssueByOriginDB) QueryRow(ctx context.Context, sql string, args .
 	// so this matches that one query and nothing else.
 	if strings.Contains(sql, "name: GetIssueByOrigin") {
 		return errRow{err: f.err}
+	}
+	return f.DBTX.QueryRow(ctx, sql, args...)
+}
+
+// cancelOnGetIssueByOriginDB cancels the caller's context at the moment of the
+// origin lookup and fails it with context.Canceled — the shape a cancelled or
+// timed-out request actually produces, where every later use of that same
+// context is doomed too.
+type cancelOnGetIssueByOriginDB struct {
+	db.DBTX
+	cancel context.CancelFunc
+}
+
+func (f cancelOnGetIssueByOriginDB) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
+	if strings.Contains(sql, "name: GetIssueByOrigin") {
+		f.cancel()
+		return errRow{err: context.Canceled}
 	}
 	return f.DBTX.QueryRow(ctx, sql, args...)
 }
