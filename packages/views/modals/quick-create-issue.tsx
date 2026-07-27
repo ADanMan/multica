@@ -392,6 +392,10 @@ export function AgentCreatePanel({
       // The button already disables on !actor / versionBlocked, but the
       // ⌘+Enter path bypasses it — re-guard here and keep the draft in place.
       if (!actor || versionBlocked) return false;
+      // Flush the prompt editor's pending debounce before snapshotting — see
+      // ManualCreatePanel.
+      const pendingPrompt = editorRef.current?.flushPendingUpdate?.();
+      if (pendingPrompt != null) setAgent({ prompt: pendingPrompt });
       submittedDraftRef.current = useIssueDraftStore.getState().draft;
       const activeAttachmentIds = pendingAttachments
         .filter((a) => contentReferencesAttachment(md, a))
@@ -462,8 +466,9 @@ export function AgentCreatePanel({
       // submit snapshot — a stale request may only consume what it submitted.
       const untouched =
         useIssueDraftStore.getState().draft === submittedDraftRef.current;
-      if (mountedRef.current || untouched) clearDraft();
-      if (!mountedRef.current) return;
+      if (untouched) clearDraft();
+      // An edit made during the request survives; the panel stays open on it.
+      if (!mountedRef.current || !untouched) return;
       if (keepOpen) {
         // Stay open for continuous creation — clear the editor so the user can
         // immediately type the next prompt.

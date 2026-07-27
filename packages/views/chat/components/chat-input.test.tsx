@@ -862,6 +862,41 @@ describe("ChatInput attachment wiring", () => {
     });
   });
 
+  it("text typed while a chat send is in flight survives the success", async () => {
+    const state = useChatStore.getState() as unknown as {
+      inputDrafts: Record<string, string>;
+    };
+    let resolveSend!: (v: boolean) => void;
+    const onSend = vi.fn(
+      (
+        _content: string,
+        _ids: string[] | undefined,
+        _commit: (o?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => void,
+      ) => new Promise<boolean>((r) => { resolveSend = r; }),
+    );
+    renderInput({ onSend: onSend as never });
+
+    const editor = screen.getByTestId("editor");
+    fireEvent.change(editor, { target: { value: "draft A" } });
+    const buttons = screen.getAllByRole("button");
+    fireEvent.click(buttons[buttons.length - 1]!);
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+
+    // The editor stays interactive during the send; the debounced commit files
+    // the newer text under the same slot mid-flight.
+    fireEvent.change(editor, { target: { value: "draft B typed during send" } });
+
+    await act(async () => {
+      resolveSend(true);
+      await Promise.resolve();
+    });
+
+    // Success may only clear what it sent — the newer draft survives, and the
+    // editor was not scrubbed over it.
+    expect(state.inputDrafts["__draft_new__"]).toBe("draft B typed during send");
+    expect(editorState.cleared).toBe(0);
+  });
+
   it("keeps an in-flight placeholder while the user keeps typing", () => {
     // commitDraft prunes uploaded rows the body no longer references; a
     // placeholder has no body reference yet, so a keystroke must never prune

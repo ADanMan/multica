@@ -64,7 +64,6 @@ function ReplyInput({
   );
   const [content, setContent] = useState(initialDraft ?? "");
   const setDraft = useCommentDraftStore((s) => s.setDraft);
-  const clearDraft = useCommentDraftStore((s) => s.clearDraft);
   const [isEmpty, setIsEmpty] = useState(!initialDraft?.trim());
   const [suppressedAgentIds, setSuppressedAgentIds] = useState<Set<string>>(() => new Set());
   const triggerPreview = useCommentTriggerPreview({ issueId, parentId, content });
@@ -146,6 +145,9 @@ function ReplyInput({
     uploadGate: gate,
     onSubmit: (content) => {
       if (draftKey) {
+        // Flush pending debounce before snapshotting — see CommentInput.
+        const pending = editorRef.current?.flushPendingUpdate?.();
+        if (pending != null) setDraft(draftKey, pending);
         submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
       }
       // Bind only uploads the body still references (see CommentInput):
@@ -164,22 +166,21 @@ function ReplyInput({
       );
     },
     onAccepted: () => {
-      if (!mountedRef.current) {
-        // Dead mount: clear only the exact draft entry this submit consumed.
-        if (!draftKey) return;
+      // Success may only consume the entry it submitted — see CommentInput.
+      if (draftKey) {
         const store = useCommentDraftStore.getState();
         const live = store.drafts[draftKey];
-        if (live === undefined || live === submittedEntryRef.current) {
-          store.clearDraft(draftKey);
-        }
-        return;
+        const untouched = live === undefined || live === submittedEntryRef.current;
+        if (untouched) store.clearDraft(draftKey);
+        if (!mountedRef.current || !untouched) return;
+      } else {
+        if (!mountedRef.current) return;
+        uploads.forEach((u) => removeUpload(u.clientUploadId));
       }
       editorRef.current?.clearContent();
       setContent("");
       setIsEmpty(true);
       setSuppressedAgentIds(new Set());
-      if (draftKey) clearDraft(draftKey);
-      else uploads.forEach((u) => removeUpload(u.clientUploadId));
     },
   });
 

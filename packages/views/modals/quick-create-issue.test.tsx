@@ -609,6 +609,38 @@ describe("AgentCreatePanel", () => {
     });
   });
 
+  // MUL-5181 P0: success may only consume the draft it submitted — the editor
+  // stays interactive during the request, so mid-flight edits must survive.
+  it("typing draft B while draft A's quick-create is pending survives the success (mounted)", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    mockQuickCreateIssue.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
+    );
+    const onClose = vi.fn();
+    renderPanel({ onClose, isExpanded: false, setIsExpanded: vi.fn() });
+    const editor = screen.getByPlaceholderText(
+      'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
+    );
+    fireEvent.change(editor, { target: { value: "Draft A prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/i }));
+    await waitFor(() => expect(mockQuickCreateIssue).toHaveBeenCalled());
+
+    // Mid-flight edit replaces the singleton draft's object identity.
+    mockIssueDraftStore.draft = {
+      ...emptyIssueDraft(),
+      agent: { ...emptyIssueDraft().agent, prompt: "Draft B prompt" },
+    };
+
+    await act(async () => {
+      resolveCreate(undefined);
+      await Promise.resolve();
+    });
+
+    expect(mockClearDraft).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mockIssueDraftStore.draft.agent.prompt).toBe("Draft B prompt");
+  });
+
   // MUL-5181 P0: a submit that outlives its dialog may only consume the draft
   // it submitted — never one typed after closing and reopening.
   it("a late quick-create success does NOT clear a draft replaced after close", async () => {

@@ -13,10 +13,13 @@
  * centralizes the contract so every surface behaves identically.
  *
  * It is deliberately await-then-render, NOT optimistic: the composer keeps the
- * user's text and attachments in place (editor locked, button spinning) until
- * the server accepts the submission, then clears. A slow send never looks like
- * "posted but the box is still full", and a rejected send keeps the draft for
- * retry instead of silently dropping it.
+ * user's text and attachments in place (send affordance locked and spinning)
+ * until the server accepts the submission, then clears. A slow send never
+ * looks like "posted but the box is still full", and a rejected send keeps the
+ * draft for retry instead of silently dropping it. The editor itself stays
+ * interactive (Tiptap cannot toggle editable post-mount), so callers' accepted
+ * handlers guard on a submit-time snapshot: success clears ONLY the draft it
+ * submitted, and anything typed during the request survives.
  */
 
 import { useCallback, useRef, useState, type RefObject } from "react";

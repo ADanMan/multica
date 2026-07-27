@@ -458,6 +458,11 @@ export function ManualCreatePanel({
     uploadGate: gate,
     normalize: () => title.trim(),
     onSubmit: async (): Promise<boolean> => {
+      // Flush the description editor's pending debounce into the store BEFORE
+      // snapshotting, so a late flush of pre-submit typing cannot masquerade
+      // as an edit made during the request.
+      const pendingDesc = descEditorRef.current?.flushPendingUpdate?.();
+      if (pendingDesc != null) setManual({ description: pendingDesc });
       submittedDraftRef.current = useIssueDraftStore.getState().draft;
       try {
       const description = descEditorRef.current?.getMarkdown()?.trim() || undefined;
@@ -657,14 +662,18 @@ export function ManualCreatePanel({
     }
   },
     onAccepted: () => {
+      // Success may only consume the draft it submitted (MUL-5181 P0): any
+      // edit after the submit snapshot — typing while the request is in
+      // flight, or a reopened dialog — survives, and the dialog then stays
+      // open on the newer draft instead of closing/resetting over it.
       const untouched =
         useIssueDraftStore.getState().draft === submittedDraftRef.current;
-      if (mountedRef.current || untouched) {
+      if (untouched) {
         setLastAssignee(assigneeType, assigneeId);
         setLastMode("manual");
         clearDraft();
       }
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || !untouched) return;
       if (keepOpen) {
         resetForNextIssue();
       } else {

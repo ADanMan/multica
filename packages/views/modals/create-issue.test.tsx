@@ -1306,10 +1306,10 @@ describe("CreateIssueModal", () => {
   // its dialog may only consume the draft it submitted — never one the user
   // typed after closing and reopening.
   describe("stale-submit draft guard", () => {
-    function renderManualPanel() {
+    function renderManualPanel(onClose = vi.fn()) {
       return renderModal(
         <ManualCreatePanel
-          onClose={vi.fn()}
+          onClose={onClose}
           onSwitchMode={vi.fn()}
           isExpanded={false}
           setIsExpanded={vi.fn()}
@@ -1323,7 +1323,8 @@ describe("CreateIssueModal", () => {
         () => new Promise((resolve) => { resolveCreate = resolve; }),
       );
       const user = userEvent.setup();
-      const view = renderManualPanel();
+      const onClose = vi.fn();
+      const view = renderManualPanel(onClose);
       await user.type(screen.getByPlaceholderText("Issue title"), "Draft A");
       fireEvent.keyDown(screen.getByPlaceholderText("Issue title"), {
         key: "Enter",
@@ -1332,6 +1333,7 @@ describe("CreateIssueModal", () => {
       await waitFor(() => expect(mockCreateIssue).toHaveBeenCalled());
       return {
         view,
+        onClose,
         finish: () =>
           act(async () => {
             resolveCreate({ id: "issue-9", identifier: "TES-9", title: "Draft A", status: "todo", labels: [] });
@@ -1339,6 +1341,33 @@ describe("CreateIssueModal", () => {
           }),
       };
     }
+
+    it("typing draft B while draft A's submit is pending survives the success (mounted)", async () => {
+      const { onClose, finish } = await startPendingCreate();
+
+      // The editor stays interactive during the request; a store write during
+      // the flight replaces the singleton draft's object identity.
+      mockDraftStore.draft = {
+        ...emptyIssueDraft(),
+        manual: { ...emptyIssueDraft().manual, title: "Draft B" },
+      };
+
+      await finish();
+
+      expect(mockClearDraft).not.toHaveBeenCalled();
+      // The dialog must not close/reset over the newer draft either.
+      expect(onClose).not.toHaveBeenCalled();
+      expect(mockDraftStore.draft.manual.title).toBe("Draft B");
+    });
+
+    it("an untouched mounted submit still clears and closes", async () => {
+      const { onClose, finish } = await startPendingCreate();
+
+      await finish();
+
+      expect(mockClearDraft).toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalled();
+    });
 
     it("a late success does NOT clear a draft replaced after the dialog closed", async () => {
       const { view, finish } = await startPendingCreate();

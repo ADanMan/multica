@@ -346,6 +346,29 @@ describe("comment composers", () => {
     expect(screen.getByTestId("editor").closest("[aria-busy]")).toBeNull();
   });
 
+  // MUL-5181 P0: the editor stays interactive during a send — text typed
+  // while draft A is in flight must survive A's success, in store AND editor.
+  it("text typed while a comment send is in flight survives the success", async () => {
+    let resolveSubmit!: (v: boolean) => void;
+    const onSubmit = vi.fn(() => new Promise<boolean>((r) => { resolveSubmit = r; }));
+    renderCommentInput(onSubmit);
+    activateComposer("comment-composer-shell");
+    const editor = screen.getByTestId("editor");
+    fireEvent.change(editor, { target: { value: "draft A" } });
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    // Still mounted, still typing while the request is in flight.
+    fireEvent.change(editor, { target: { value: "draft A plus more" } });
+
+    await act(async () => {
+      resolveSubmit(true);
+      await Promise.resolve();
+    });
+
+    expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toBe("draft A plus more");
+  });
+
   // MUL-5181 P0: a submit that outlives its composer may only clear the draft
   // it submitted — never one typed after the composer unmounted and reopened.
   it("a late comment success does NOT clear a draft typed after unmount", async () => {

@@ -431,6 +431,9 @@ function useEditAttachmentState(
     onSubmit: async (trimmed) => {
       // A save racing a just-pressed Cancel must never reach the server.
       if (cancelledRef.current) return false;
+      // Flush pending debounce before snapshotting — see CommentInput.
+      const pendingMd = editorRef.current?.flushPendingUpdate?.();
+      if (pendingMd != null) setDraft(draftKey, pendingMd);
       submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
       const activeIds = collectActiveAttachmentIds(
         trimmed,
@@ -467,15 +470,16 @@ function useEditAttachmentState(
       }
     },
     onAccepted: () => {
+      // Success may only consume the entry it submitted: edits made during the
+      // save survive, and the editor then STAYS in edit mode on them.
+      const store = useCommentDraftStore.getState();
+      const live = store.drafts[draftKey];
+      const untouched = live === undefined || live === submittedEntryRef.current;
       if (!editMountedRef.current) {
-        // Dead mount: clear only the exact draft entry this save consumed.
-        const store = useCommentDraftStore.getState();
-        const live = store.drafts[draftKey];
-        if (live === undefined || live === submittedEntryRef.current) {
-          store.clearDraft(draftKey);
-        }
+        if (untouched) store.clearDraft(draftKey);
         return;
       }
+      if (!untouched) return;
       resetState();
     },
   });

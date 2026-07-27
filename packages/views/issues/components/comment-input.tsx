@@ -75,7 +75,6 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
   // Flush on every onUpdate (debounced upstream) + visibilitychange/pagehide
   // so tab close / mobile background doesn't lose work. Cleared on submit.
   const setDraft = useCommentDraftStore((s) => s.setDraft);
-  const clearDraft = useCommentDraftStore((s) => s.clearDraft);
   useEffect(() => {
     const flush = () => {
       const md = editorRef.current?.getMarkdown();
@@ -131,6 +130,10 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
     editorRef,
     uploadGate: gate,
     onSubmit: (content) => {
+      // Flush the editor's pending debounce before snapshotting — a late flush
+      // of pre-submit typing must not read as an edit made during the request.
+      const pending = editorRef.current?.flushPendingUpdate?.();
+      if (pending != null) setDraft(draftKey, pending);
       submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
       // Bind only uploads the BODY still references (MUL-5181): deleting an
       // inline image really unbinds it. Uploads that finished after a close
@@ -149,21 +152,18 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
       );
     },
     onAccepted: () => {
-      if (!mountedRef.current) {
-        // Dead mount: clear only the exact draft entry this submit consumed.
-        const store = useCommentDraftStore.getState();
-        const live = store.drafts[draftKey];
-        if (live === undefined || live === submittedEntryRef.current) {
-          store.clearDraft(draftKey);
-        }
-        return;
-      }
+      // Success may only consume the entry it submitted (MUL-5181 P0): edits
+      // made while the request was in flight — or by a reopened composer after
+      // this one unmounted — survive both in the store and in the editor.
+      const store = useCommentDraftStore.getState();
+      const live = store.drafts[draftKey];
+      const untouched = live === undefined || live === submittedEntryRef.current;
+      if (untouched) store.clearDraft(draftKey);
+      if (!mountedRef.current || !untouched) return;
       editorRef.current?.clearContent();
       setContent("");
       setIsEmpty(true);
       setSuppressedAgentIds(new Set());
-      // clearDraft drops both content and attachments for this key.
-      clearDraft(draftKey);
     },
   });
 
