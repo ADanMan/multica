@@ -18,17 +18,22 @@
  * drafts — cannot resurrect a placeholder into a wiped draft.
  *
  * The returned `handleUpload` resolves the editor's `onUploadFile` promise so
- * the happy-path inline preview (blob node → real URL) still works; the SOURCE
- * OF TRUTH for submit is the draft, not the editor document.
+ * the happy-path inline preview (blob node → real URL) still works. The SOURCE
+ * OF TRUTH for what a submit binds is the draft BODY (reference-filtered, like
+ * every other composer): an upload that settles after its mount died gets its
+ * link written back into the body — via the reopened composer's live editor
+ * when one exists, else appended to the persisted draft — so the file is
+ * visible, deletable, and deleting it really unbinds it.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
-import { startUpload, type DraftUpload } from "@multica/core/drafts";
+import { startUpload, hasUploadingDraft, type DraftUpload } from "@multica/core/drafts";
 import { attachmentToDraftUpload } from "@multica/core/drafts";
+import type { UploadGate, ContentEditorRef } from "../../editor";
 import { createSafeId } from "@multica/core/utils";
-import type { Attachment } from "@multica/core/types";
+import { contentReferencesAttachment, type Attachment } from "@multica/core/types";
 import {
   toUploadResult,
   type UploadContext,
@@ -41,15 +46,38 @@ import { useT } from "../../i18n";
 const EMPTY_UPLOADS: DraftUpload[] = [];
 const EMPTY_ATTACHMENTS: Attachment[] = [];
 
+// The editor currently showing each draft key. Lets a settle handler whose own
+// mount is gone (the upload outlived the composer) hand the finished link to
+// the editor a REOPENED composer mounted for the same draft.
+const liveEditors = new Map<CommentDraftKey, RefObject<ContentEditorRef | null>>();
+
+/** Markdown for a finished upload, matching what the in-editor swap produces. */
+function attachmentMarkdown(att: Attachment): string {
+  const link = toUploadResult(att).markdownLink;
+  return (att.content_type ?? "").startsWith("image/")
+    ? `![${att.filename}](${link})`
+    : `[${att.filename}](${link})`;
+}
+
 export interface CommentUploads {
   /** Every upload for this composer (placeholders included) — for status chips. */
   uploads: DraftUpload[];
-  /** Completed attachment rows — the editor preview + submit-bindable set. */
+  /** Completed attachment rows — the editor preview set; submit binds the
+   *  subset whose link the body still references. */
   attachments: Attachment[];
   /** Wire to `<ContentEditor onUploadFile={...} />`. */
   handleUpload: (file: File) => Promise<UploadResult | null>;
   /** Drop a placeholder (dismiss a failure / interrupted). */
   removeUpload: (clientUploadId: string) => void;
+  /**
+   * The submit gate for this composer. Combines the editor gate (this mount's
+   * in-document uploads) with the coordinator-owned placeholders in the draft:
+   * a composer reopened while a previous mount's upload is still in flight has
+   * a clean editor document, so the editor gate alone would let a send clear
+   * the draft out from under the settling upload — silently dropping the file
+   * whose "uploading" chip is on screen.
+   */
+  gate: UploadGate;
 }
 
 /**
@@ -60,9 +88,30 @@ export interface CommentUploads {
 export function useCommentUploads(
   draftKey: CommentDraftKey | undefined,
   ctx: UploadContext,
+  editorGate: UploadGate,
+  editorRef: RefObject<ContentEditorRef | null>,
 ): CommentUploads {
   const { t } = useT("editor");
   const [localUploads, setLocalUploads] = useState<DraftUpload[]>([]);
+
+  // Liveness of THIS mount, read by settle closures it created: while true,
+  // the editor that started the upload will do the inline swap itself; once
+  // false, the write-back below is the only path that lands the link.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!draftKey) return;
+    liveEditors.set(draftKey, editorRef);
+    return () => {
+      if (liveEditors.get(draftKey) === editorRef) liveEditors.delete(draftKey);
+    };
+  }, [draftKey, editorRef]);
 
   const storeUploads = useCommentDraftStore((s) =>
     draftKey ? s.getUploads(draftKey) : EMPTY_UPLOADS,
@@ -132,6 +181,26 @@ export function useCommentUploads(
                 // Generation guard: only write if the draft still tracks it.
                 if (store.getUploads(draftKey).some((u) => u.clientUploadId === clientUploadId)) {
                   store.settleUpload(draftKey, clientUploadId, outcome.attachment);
+                  // Write-back (MUL-5181): the mount that started this upload
+                  // is gone, so no editor swap will put the finished link into
+                  // the document. Land it in the editor a reopened composer is
+                  // showing for this draft, or append it to the persisted body
+                  // — the BODY is what submit binds (reference-filtered), so a
+                  // link nowhere in it would silently never attach. Skipped
+                  // while this mount is alive: resolving the promise below
+                  // drives the normal inline blob→URL swap.
+                  if (
+                    !mountedRef.current &&
+                    !contentReferencesAttachment(
+                      store.getDraft(draftKey) ?? "",
+                      outcome.attachment,
+                    )
+                  ) {
+                    const md = attachmentMarkdown(outcome.attachment);
+                    const live = liveEditors.get(draftKey);
+                    if (live?.current) live.current.insertMarkdownAtEnd(md);
+                    else store.appendToDraftContent(draftKey, md);
+                  }
                 }
               } else {
                 setLocalUploads((prev) =>
@@ -177,5 +246,27 @@ export function useCommentUploads(
     [draftKey],
   );
 
-  return { uploads, attachments, handleUpload, removeUpload };
+  // Submit-time truth for the local (non-persisted) path: a ref, because
+  // `isBlocked` must read the value at invocation time, not at the render the
+  // callback captured. The persisted path reads the store directly.
+  const localUploadsRef = useRef(localUploads);
+  localUploadsRef.current = localUploads;
+
+  const uploadingInDraft = hasUploadingDraft(uploads);
+  const gate = useMemo<UploadGate>(
+    () => ({
+      uploading: editorGate.uploading || uploadingInDraft,
+      onUploadingChange: editorGate.onUploadingChange,
+      isBlocked: () =>
+        editorGate.isBlocked() ||
+        hasUploadingDraft(
+          draftKey
+            ? useCommentDraftStore.getState().getUploads(draftKey)
+            : localUploadsRef.current,
+        ),
+    }),
+    [editorGate, uploadingInDraft, draftKey],
+  );
+
+  return { uploads, attachments, handleUpload, removeUpload, gate };
 }

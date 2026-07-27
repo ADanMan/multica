@@ -223,5 +223,14 @@ registerForWorkspaceRehydration(() => useIssueDraftStore.persist.rehydrate());
 registerDraftCleanup({
   storageKey: "multica_issue_draft",
   workspaceScoped: true,
-  resetInMemory: () => useIssueDraftStore.getState().clearDraft(),
+  // Full reset, NOT clearDraft(): clearDraft deliberately keeps the
+  // last-assignee preference and re-seeds it into the fresh draft's manual
+  // slot — correct between drafts of one user, but on logout it would hand
+  // the previous user's last-picked assignee to the next login on this tab.
+  resetInMemory: () =>
+    useIssueDraftStore.setState({
+      draft: migrateDraft(undefined),
+      lastAssigneeType: undefined,
+      lastAssigneeId: undefined,
+    }),
 });

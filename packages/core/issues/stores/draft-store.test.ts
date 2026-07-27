@@ -2,6 +2,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { useIssueDraftStore } from "./draft-store";
 import { setCurrentWorkspace } from "../../platform/workspace-storage";
+import { resetAllRegisteredDrafts } from "../../drafts/cleanup-registry";
+import { clearWorkspaceStorage } from "../../platform/storage-cleanup";
+import { defaultStorage } from "../../platform/storage";
 
 const flush = () => new Promise((resolve) => queueMicrotask(() => resolve(null)));
 
@@ -260,5 +263,53 @@ describe("issue draft store — legacy rehydrate", () => {
     expect(draft.manual.status).toBe("todo");
     expect(draft.agent.prompt).toBe("keep me");
     expect(draft.activeMode).toBe("agent");
+  });
+});
+
+describe("issue draft store — logout cleanup", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    setCurrentWorkspace(null, null);
+    useIssueDraftStore.setState(RESET_STATE);
+  });
+
+  afterEach(() => {
+    setCurrentWorkspace(null, null);
+  });
+
+  it("registered reset wipes the last-assignee preference, not just the draft", () => {
+    const { setManual, setLastAssignee } = useIssueDraftStore.getState();
+    setManual({ title: "wip", assigneeType: "member", assigneeId: "alice" });
+    setLastAssignee("member", "alice");
+
+    resetAllRegisteredDrafts();
+
+    const state = useIssueDraftStore.getState();
+    expect(state.lastAssigneeType).toBeUndefined();
+    expect(state.lastAssigneeId).toBeUndefined();
+    // clearDraft() would have re-seeded the manual slot from lastAssignee —
+    // the logout reset must not hand the next login a previous user's pick.
+    expect(state.draft.manual.assigneeType).toBeUndefined();
+    expect(state.draft.manual.assigneeId).toBeUndefined();
+  });
+
+  it("logout sequence (reset in-memory, then clear storage) leaves no persisted key", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    await flush();
+
+    const { setManual, setLastAssignee } = useIssueDraftStore.getState();
+    setManual({ title: "secret wip" });
+    setLastAssignee("member", "alice");
+    expect(localStorage.getItem("multica_issue_draft:acme")).not.toBeNull();
+
+    // use-logout's order: reset first (each reset is a setState, and persist
+    // writes the new state back to storage under the still-active slug), THEN
+    // remove the keys. The reverse order resurrects the key with the previous
+    // user's lastAssignee inside.
+    resetAllRegisteredDrafts();
+    clearWorkspaceStorage(defaultStorage, "acme");
+
+    expect(localStorage.getItem("multica_issue_draft:acme")).toBeNull();
   });
 });

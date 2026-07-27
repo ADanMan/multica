@@ -53,6 +53,13 @@ interface CommentDraftStore {
   /** Every upload for this draft (placeholders included) — for status chips. */
   getUploads: (key: CommentDraftKey) => DraftUpload[];
   setDraft: (key: CommentDraftKey, content: string) => void;
+  /**
+   * Append a markdown fragment to the draft body (upload write-back,
+   * MUL-5181): an upload that finished after its composer unmounted has no
+   * live editor to insert its link, so the settle handler lands it here —
+   * the draft body stays the single source of truth for what gets bound.
+   */
+  appendToDraftContent: (key: CommentDraftKey, markdown: string) => void;
   /** Replace the upload list with completed attachments (legacy/compat path). */
   setAttachments: (key: CommentDraftKey, attachments: Attachment[]) => void;
   /** Record a placeholder the moment a file is picked (coordinator-owned). */
@@ -148,6 +155,14 @@ export const useCommentDraftStore = create<CommentDraftStore>()(
         set((s) => ({
           drafts: writeDraft(s.drafts, key, content, uploadsOf(s.drafts, key)),
         })),
+      appendToDraftContent: (key, markdown) =>
+        set((s) => {
+          const existing = s.drafts[key]?.content ?? "";
+          const next = existing.trim() ? `${existing.replace(/\s+$/, "")}\n\n${markdown}` : markdown;
+          return {
+            drafts: writeDraft(s.drafts, key, next, uploadsOf(s.drafts, key)),
+          };
+        }),
       setAttachments: (key, attachments) =>
         set((s) => ({
           drafts: writeDraft(

@@ -251,6 +251,28 @@ describe("comment draft store — upload lifecycle", () => {
     expect(s.getAttachments(KEY).map((a) => a.id)).toEqual(["att-1"]);
   });
 
+  it("appendToDraftContent lands a fragment after existing text, keeping uploads", () => {
+    const s = useCommentDraftStore.getState();
+    s.setDraft(KEY, "wip text");
+    s.addUpload(KEY, { clientUploadId: "c1", status: "uploading", filename: "shot.png", size: 9 });
+
+    s.appendToDraftContent(KEY, "![shot.png](https://cdn.example/shot.png)");
+
+    expect(useCommentDraftStore.getState().getDraft(KEY)).toBe(
+      "wip text\n\n![shot.png](https://cdn.example/shot.png)",
+    );
+    expect(useCommentDraftStore.getState().getUploads(KEY)).toHaveLength(1);
+  });
+
+  it("appendToDraftContent on an empty draft is just the fragment", () => {
+    const s = useCommentDraftStore.getState();
+    s.appendToDraftContent(KEY, "[doc.pdf](https://cdn.example/doc.pdf)");
+
+    expect(useCommentDraftStore.getState().getDraft(KEY)).toBe(
+      "[doc.pdf](https://cdn.example/doc.pdf)",
+    );
+  });
+
   it("settleUpload is a no-op once the placeholder is gone (generation guard)", () => {
     const s = useCommentDraftStore.getState();
     s.addUpload(KEY, { clientUploadId: "c1", status: "uploading", filename: "shot.png", size: 9 });

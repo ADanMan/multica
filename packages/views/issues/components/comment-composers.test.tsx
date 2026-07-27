@@ -113,6 +113,10 @@ vi.mock("../../editor", async () => ({
         }
       },
       hasActiveUploads: () => inFlightRef.current > 0,
+      insertMarkdownAtEnd: (md: string) => {
+        valueRef.current = `${valueRef.current}\n\n${md}`.trim();
+        onUpdate?.(valueRef.current);
+      },
     }));
 
     return (
@@ -423,6 +427,48 @@ describe("comment composers — upload submit gate", () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
   });
 
+  it("blocks send while a coordinator upload from a PREVIOUS mount is still in flight", async () => {
+    // Reopened-composer scenario: the upload placeholder lives in the draft
+    // store (coordinator-owned), but this mount's editor is clean — the editor
+    // gate alone sees no active uploads. Sending here would clear the draft
+    // out from under the settling upload and silently drop the file.
+    useCommentDraftStore.getState().setDraft("new:issue-1", "recovered draft");
+    useCommentDraftStore.getState().addUpload("new:issue-1", {
+      clientUploadId: "prev-mount-upload",
+      status: "uploading",
+      filename: "shot.png",
+      size: 10,
+    });
+
+    const { container, onSubmit } = renderCommentInput();
+    // Draft + pending upload mount the editor directly (no shell).
+    const editor = await screen.findByTestId("editor");
+
+    expect(getSubmitButton(container)).toBeDisabled();
+    expect(getSubmitButton(container)).toHaveAttribute("aria-busy", "true");
+
+    // The shortcut path bypasses the button — the submit-time re-read of the
+    // DRAFT's uploads is the only guard.
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    await Promise.resolve();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    // The old upload settles (coordinator onSettled → store.settleUpload) —
+    // the gate opens and the send goes through.
+    await act(async () => {
+      useCommentDraftStore
+        .getState()
+        .settleUpload(
+          "new:issue-1",
+          "prev-mount-upload",
+          uploadAttachment("att-prev", "https://cdn.example/att-prev.png"),
+        );
+    });
+    await waitFor(() => expect(getSubmitButton(container)).not.toBeDisabled());
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+  });
+
   it("stays gated until the LAST of two concurrent uploads settles", async () => {
     const { container } = renderCommentInput();
     activateComposer("comment-composer-shell");
@@ -479,6 +525,73 @@ describe("comment composers — upload submit gate", () => {
         expect.stringContaining("https://cdn.example/att-9.png"),
         ["att-9"],
         undefined,
+      ),
+    );
+  });
+
+  it("does NOT bind an upload the user deleted from the body", async () => {
+    const { container, onSubmit } = renderCommentInput();
+    activateComposer("comment-composer-shell");
+    const editor = screen.getByTestId("editor");
+    fireEvent.change(editor, { target: { value: "keep this" } });
+
+    const pending = startPendingUpload(container);
+    await act(async () => {
+      pending.resolve(uploadAttachment("att-del", "https://cdn.example/att-del.png"));
+    });
+
+    // The completed upload's link is in the body; the user deletes it. What
+    // is not referenced must not ship — deleting really unbinds (MUL-5181).
+    fireEvent.change(editor, { target: { value: "keep this, dropped the image" } });
+    fireEvent.keyDown(editor, { key: "Enter", metaKey: true });
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit).toHaveBeenCalledWith("keep this, dropped the image", undefined, undefined);
+  });
+
+  it("writes the finished upload's link into the persisted draft after the composer unmounts", async () => {
+    const { container, unmount } = renderCommentInput();
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "wip text" } });
+
+    const pending = startPendingUpload(container);
+    unmount();
+
+    await act(async () => {
+      pending.resolve(uploadAttachment("att-wb", "https://cdn.example/att-wb.png"));
+    });
+
+    // The upload outlived the composer; its link must land in the draft BODY —
+    // that's what a future submit binds, and what a reopen renders.
+    const draft = useCommentDraftStore.getState().getDraft("new:issue-1");
+    expect(draft).toContain("wip text");
+    expect(draft).toContain("https://cdn.example/att-wb.png");
+    const uploads = useCommentDraftStore.getState().getUploads("new:issue-1");
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0]?.status).toBe("uploaded");
+  });
+
+  it("hands the finished upload's link to a REOPENED composer's live editor", async () => {
+    const first = renderCommentInput();
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "draft body" } });
+
+    const pending = startPendingUpload(first.container);
+    first.unmount();
+
+    // Reopen: the draft + pending upload mount the editor directly (no shell).
+    renderCommentInput();
+    await screen.findByTestId("editor");
+
+    await act(async () => {
+      pending.resolve(uploadAttachment("att-live", "https://cdn.example/att-live.png"));
+    });
+
+    // The live editor received the insert and synced the draft through its
+    // normal onUpdate pipeline.
+    await waitFor(() =>
+      expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toContain(
+        "https://cdn.example/att-live.png",
       ),
     );
   });

@@ -5,6 +5,7 @@ import { cn } from "@multica/ui/lib/utils";
 import { ContentEditor, type ContentEditorRef, useFileDropZone, FileDropOverlay, useLazyEditor, useUploadGate, useComposerSubmit } from "../../editor";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { SubmitButton } from "@multica/ui/components/common/submit-button";
+import { contentReferencesAttachment } from "@multica/core/types";
 import { formatShortcut, useShortcut } from "@multica/core/shortcuts";
 import { useCommentComposerStore, useCommentDraftStore } from "@multica/core/issues/stores";
 import { useT } from "../../i18n";
@@ -47,8 +48,10 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
   // draft. `attachments` (completed rows) drives both the submit `attachment_ids`
   // payload and the editor's AttachmentDownloadProvider; `uploads` drives the
   // status chips (uploading / failed / interrupted).
-  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload } =
-    useCommentUploads(draftKey, { issueId });
+  // `gate` widens the editor gate with coordinator-owned placeholders, so a
+  // composer reopened over a still-in-flight upload cannot send past it.
+  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload, gate } =
+    useCommentUploads(draftKey, { issueId }, uploadGate, editorRef);
 
   // Readonly-first: the composer renders as a same-looking static shell until
   // the user shows intent (click / keyboard / file drop). An unsent draft is
@@ -114,13 +117,15 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
   // the draft instead of silently dropping it.
   const { submitting, submit } = useComposerSubmit({
     editorRef,
-    uploadGate,
+    uploadGate: gate,
     onSubmit: (content) => {
-      // The draft is the source of truth (MUL-5181): bind every completed
-      // upload, whether it landed inline in the body or survived a close as a
-      // standalone attachment. Non-referenced rows render as attachment cards
-      // for the recipient, exactly like the existing standalone-attachment path.
-      const activeIds = pendingAttachments.map((a) => a.id);
+      // Bind only uploads the BODY still references (MUL-5181): deleting an
+      // inline image really unbinds it. Uploads that finished after a close
+      // are written back into the body by the settle handler, so surviving
+      // files are referenced too — never silently attached.
+      const activeIds = pendingAttachments
+        .filter((a) => contentReferencesAttachment(content, a))
+        .map((a) => a.id);
       const suppressAgentIds = triggerPreview.agents
         .filter((agent) => suppressedAgentIds.has(agent.id))
         .map((agent) => agent.id);
@@ -235,13 +240,13 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
           onClick={submit}
           disabled={isEmpty}
           loading={submitting}
-          busy={uploadGate.uploading}
-          tooltip={uploadGate.uploading
+          busy={gate.uploading}
+          tooltip={gate.uploading
             ? tEditor(($) => $.upload.in_progress)
             : sendShortcut
               ? `${t(($) => $.comment.send_tooltip)} · ${formatShortcut(sendShortcut)}`
               : t(($) => $.comment.send_tooltip)}
-          ariaLabel={uploadGate.uploading
+          ariaLabel={gate.uploading
             ? tEditor(($) => $.upload.in_progress)
             : t(($) => $.comment.send_tooltip)}
         />

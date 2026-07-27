@@ -241,6 +241,15 @@ interface ContentEditorRef {
   /** True when file uploads are still in progress. */
   hasActiveUploads: () => boolean;
   /**
+   * Append a markdown fragment to the end of the document (parsed, not raw
+   * text), firing the normal `onUpdate` pipeline. For the upload write-back
+   * path (MUL-5181): an upload that outlived the mount that started it settles
+   * while a NEW editor instance is showing the same draft — that editor never
+   * owned the upload's promise, so this is how the finished attachment's link
+   * lands in the visible document instead of only in the persisted draft.
+   */
+  insertMarkdownAtEnd: (markdown: string) => void;
+  /**
    * Cancel the pending debounced `onUpdate` and hand its markdown back to the
    * caller instead of firing it. Returns null when nothing is pending.
    *
@@ -801,6 +810,12 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         uploadAndInsertFile(editor, file, onUploadFileRef.current, endPos);
       },
       hasActiveUploads: () => (editor ? hasUploadingNode(editor) : false),
+      insertMarkdownAtEnd: (markdown: string) => {
+        if (!editor || editor.isDestroyed) return;
+        editor.commands.insertContentAt(editor.state.doc.content.size, markdown, {
+          contentType: "markdown",
+        });
+      },
       flushPendingUpdate: () => {
         // No armed timer = nothing typed since the last emit. The editor is
         // already clean, so the host has nothing to re-route.

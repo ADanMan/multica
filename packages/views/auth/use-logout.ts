@@ -29,7 +29,17 @@ export function useLogout() {
   const { push } = useNavigation();
 
   return useCallback(() => {
-    // Clear workspace-scoped storage for every workspace this user has
+    // Reset draft stores' in-memory state FIRST, before removing persisted
+    // keys. Each reset is a Zustand setState, and persist middleware writes
+    // the new (empty) state straight back to storage under the still-active
+    // workspace slug — so resetting after removal would resurrect the very
+    // keys just deleted, with whatever the reset state still carries. Memory
+    // must be wiped regardless of the workspace list below: a client-side
+    // navigation to /login does not reload the page, so the singletons would
+    // otherwise surface the previous user's draft after the next login.
+    resetAllRegisteredDrafts();
+
+    // Then clear workspace-scoped storage for every workspace this user has
     // access to, BEFORE clearing the React Query cache (which holds the
     // workspace list). Otherwise per-workspace drafts/chat/etc would leak
     // to the next user on this device.
@@ -38,15 +48,6 @@ export function useLogout() {
     for (const ws of cachedWorkspaces) {
       clearWorkspaceStorage(defaultStorage, ws.slug);
     }
-
-    // Reset draft stores' in-memory state regardless of the workspace list.
-    // A client-side navigation to /login does not reload the page, so the
-    // Zustand draft singletons keep the previous user's draft in memory even
-    // after their persisted keys are removed; a subsequent login on the same
-    // tab would surface it. This runs unconditionally because the cached
-    // workspace list can be empty/stale, in which case the per-slug storage
-    // clear above is a no-op but memory must still be wiped.
-    resetAllRegisteredDrafts();
 
     // Clear the last-workspace-slug cookie. Otherwise on a shared device
     // the next user gets redirected by the proxy to the previous user's

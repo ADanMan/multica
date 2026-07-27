@@ -337,8 +337,10 @@ function useEditAttachmentState(
   // the draft store keyed by the edit draft so scroll-out/close no longer drops
   // an in-flight upload.
   const draftKey = `edit:${issueId}:${entry.id}` as const;
-  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload } =
-    useCommentUploads(draftKey, { issueId });
+  // `gate` widens the editor gate with coordinator-owned placeholders — see
+  // CommentInput.
+  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload, gate } =
+    useCommentUploads(draftKey, { issueId }, uploadGate, editorRef);
   const [retainedStandaloneIds, setRetainedStandaloneIds] = useState<Set<string> | null>(null);
   const triggerPreview = useCommentTriggerPreview({
     issueId,
@@ -414,17 +416,17 @@ function useEditAttachmentState(
   // upload re-check, single-flight, and lock/spin via `submitting`.
   const { submitting: saving, submit: saveEdit } = useComposerSubmit({
     editorRef,
-    uploadGate,
+    uploadGate: gate,
     onSubmit: async (trimmed) => {
       // A save racing a just-pressed Cancel must never reach the server.
       if (cancelledRef.current) return false;
       const activeIds = collectActiveAttachmentIds(
         trimmed,
         [...(entry.attachments ?? []), ...pendingAttachments],
-        // Every upload completed in this edit session is bound whether or not it
-        // ended up inline in the body (MUL-5181 — the draft is the source of
-        // truth), on top of the body-referenced + retained-standalone ids.
-        new Set([...(retainedStandaloneIds ?? []), ...pendingAttachments.map((a) => a.id)]),
+        // Body-referenced + retained-standalone only (MUL-5181): an upload the
+        // user removed from the body is really unbound. Close-surviving
+        // uploads are written back into the body by the settle handler.
+        retainedStandaloneIds,
       );
       const attachmentsChanged = !sameIdSet(activeIds, (entry.attachments ?? []).map((a) => a.id));
       // Nothing changed — close the editor without a write. Accepted, so
@@ -458,8 +460,8 @@ function useEditAttachmentState(
   return {
     editing,
     saving,
-    uploading: uploadGate.uploading,
-    onUploadingChange: uploadGate.onUploadingChange,
+    uploading: gate.uploading,
+    onUploadingChange: gate.onUploadingChange,
     uploadingLabel: tEditor(($) => $.upload.in_progress),
     editorRef,
     editorAttachments,

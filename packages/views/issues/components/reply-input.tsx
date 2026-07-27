@@ -5,6 +5,7 @@ import { ContentEditor, type ContentEditorRef, useFileDropZone, FileDropOverlay,
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { SubmitButton } from "@multica/ui/components/common/submit-button";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { contentReferencesAttachment } from "@multica/core/types";
 import { formatShortcut, useShortcut } from "@multica/core/shortcuts";
 import { useCommentDraftStore, type CommentDraftKey } from "@multica/core/issues/stores";
 import { cn } from "@multica/ui/lib/utils";
@@ -71,8 +72,10 @@ function ReplyInput({
   // a draftKey they persist in the draft store so scroll-out/close no longer
   // drops an in-flight upload; without one (no persistence context) they fall
   // back to session-local state inside the hook.
-  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload } =
-    useCommentUploads(draftKey, { issueId });
+  // `gate` widens the editor gate with coordinator-owned placeholders — see
+  // CommentInput.
+  const { uploads, attachments: pendingAttachments, handleUpload, removeUpload, gate } =
+    useCommentUploads(draftKey, { issueId }, uploadGate, editorRef);
 
   // Readonly-first: static shell until intent; an unsent draft mounts the
   // real editor immediately (see CommentInput). This is also what keeps the
@@ -130,11 +133,14 @@ function ReplyInput({
   // locks + spins, and clears only once the server accepts it.
   const { submitting, submit } = useComposerSubmit({
     editorRef,
-    uploadGate,
+    uploadGate: gate,
     onSubmit: (content) => {
-      // Draft is the source of truth (MUL-5181): bind every completed upload,
-      // inline or standalone.
-      const activeIds = pendingAttachments.map((a) => a.id);
+      // Bind only uploads the body still references (see CommentInput):
+      // deleting an inline image really unbinds it; close-surviving uploads
+      // are written back into the body by the settle handler.
+      const activeIds = pendingAttachments
+        .filter((a) => contentReferencesAttachment(content, a))
+        .map((a) => a.id);
       const suppressAgentIds = triggerPreview.agents
         .filter((agent) => suppressedAgentIds.has(agent.id))
         .map((agent) => agent.id);
@@ -248,13 +254,13 @@ function ReplyInput({
             onClick={submit}
             disabled={isEmpty}
             loading={submitting}
-            busy={uploadGate.uploading}
-            tooltip={uploadGate.uploading
+            busy={gate.uploading}
+            tooltip={gate.uploading
               ? tEditor(($) => $.upload.in_progress)
               : sendShortcut
                 ? `${t(($) => $.comment.send_tooltip)} · ${formatShortcut(sendShortcut)}`
                 : t(($) => $.comment.send_tooltip)}
-            ariaLabel={uploadGate.uploading
+            ariaLabel={gate.uploading
               ? tEditor(($) => $.upload.in_progress)
               : t(($) => $.comment.send_tooltip)}
           />
