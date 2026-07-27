@@ -1,7 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import {
@@ -12,19 +12,24 @@ import {
   useUploadGate,
   useComposerSubmit,
 } from "../../editor";
+import {
+  useCoordinatedUploads,
+  type UploadDraftBinding,
+} from "../../editor/use-coordinated-uploads";
+import { ComposerUploadChips } from "../../issues/components/composer-upload-chips";
 import { SubmitButton } from "@multica/ui/components/common/submit-button";
 import { ChatAddMenu } from "./chat-add-menu";
 import { useChatStore, DRAFT_NEW_SESSION } from "@multica/core/chat";
+import { attachmentToDraftUpload, type DraftUpload } from "@multica/core/drafts";
 import { createLogger } from "@multica/core/logger";
 import { formatShortcut, useShortcut } from "@multica/core/shortcuts";
-import type { UploadResult } from "@multica/core/hooks/use-file-upload";
 import type { MentionItem } from "../../editor/extensions/mention-suggestion";
 import type { Attachment, Project } from "@multica/core/types";
 import { ProjectPicker } from "../../projects/components/project-picker";
 import { useT } from "../../i18n";
 
 const logger = createLogger("chat.ui");
-const EMPTY_ATTACHMENTS: Attachment[] = [];
+const EMPTY_UPLOADS: DraftUpload[] = [];
 /** Editor identity for the chat composer — see the editorKey note below. */
 const CHAT_COMPOSER_EDITOR_KEY = "chat-composer";
 
@@ -74,13 +79,11 @@ interface ChatInputProps {
    * therefore treat this as the single terminal transition and consume the row.
    */
   onRestoreDraftApplied?: () => void;
-  /** Receives a File and returns the attachment row (with id + CDN link).
-   *  The wrapper owner (ChatWindow) lazy-creates a chat_session if needed
-   *  and forwards `chatSessionId` to the upload — chat-input only cares
-   *  about the upload result so it can map URL → id for back-fill on send.
-   *  When unset, paste/drag/button still type into the editor but no upload
-   *  fires (the editor's file-upload extension is a no-op without a handler). */
-  onUploadFile?: (file: File) => Promise<UploadResult | null>;
+  /** True when uploads are available for this composer (an agent is selected).
+   *  The transport itself is the coordinated-upload engine (MUL-5181 L2) —
+   *  the owner only says whether the affordance exists. When false,
+   *  paste/drag/button still type into the editor but no upload fires. */
+  uploadEnabled?: boolean;
   onStop?: () => void;
   isRunning?: boolean;
   disabled?: boolean;
@@ -126,7 +129,7 @@ export function ChatInput({
   onSend,
   restoreDraftRequest,
   onRestoreDraftApplied,
-  onUploadFile,
+  uploadEnabled: uploadAllowed,
   onStop,
   isRunning,
   disabled,
@@ -180,12 +183,11 @@ export function ChatInput({
   const draftKey = draftKeyOverride ?? activeSessionId ?? DRAFT_NEW_SESSION;
   // Select a primitive — empty-string fallback keeps referential stability.
   const inputDraft = useChatStore((s) => s.inputDrafts[draftKey] ?? "");
-  const draftAttachments = useChatStore(
-    (s) => s.inputDraftAttachments[draftKey] ?? EMPTY_ATTACHMENTS,
+  const storeUploads = useChatStore(
+    (s) => s.inputDraftAttachments[draftKey] ?? EMPTY_UPLOADS,
   );
   const setInputDraft = useChatStore((s) => s.setInputDraft);
   const setInputDraftAttachments = useChatStore((s) => s.setInputDraftAttachments);
-  const addInputDraftAttachment = useChatStore((s) => s.addInputDraftAttachment);
   const clearInputDraft = useChatStore((s) => s.clearInputDraft);
   const [isEmpty, setIsEmpty] = useState(!inputDraft.trim());
   // `isEmpty` tracks the LIVE editor, which the persisted draft lags by a
@@ -225,13 +227,17 @@ export function ChatInput({
   const commitDraft = useCallback(
     (key: string, markdown: string) => {
       setInputDraft(key, markdown);
-      const attachments =
-        useChatStore.getState().inputDraftAttachments[key] ?? EMPTY_ATTACHMENTS;
-      if (attachments.length === 0) return;
-      const referenced = attachments.filter((attachment) =>
-        isAttachmentReferenced(markdown, attachment),
+      const uploads =
+        useChatStore.getState().inputDraftAttachments[key] ?? EMPTY_UPLOADS;
+      if (uploads.length === 0) return;
+      // Prune only COMPLETED uploads the body no longer references — deleting
+      // an image's markdown drops the staged upload with it. Placeholders
+      // (uploading / failed / interrupted) have no body reference yet; the
+      // status chips are their only UI, so they must survive every keystroke.
+      const referenced = uploads.filter(
+        (u) => u.status !== "uploaded" || isAttachmentReferenced(markdown, u.attachment),
       );
-      if (referenced.length !== attachments.length) {
+      if (referenced.length !== uploads.length) {
         setInputDraftAttachments(key, referenced);
       }
     },
@@ -244,6 +250,38 @@ export function ChatInput({
   // used to be a local in-flight counter that a manual delete of the pending
   // image would leave stuck (MUL-4808).
   const uploadGate = useUploadGate(editorRef);
+
+  // Store-backed accessors for one draft slot, buildable for ANY key: the
+  // engine snapshots `resolveUploadTarget()` at pick time so an upload lands
+  // in — and settles against — the draft the editor was HOLDING, even if the
+  // user has since switched sessions.
+  const makeUploadBinding = useCallback((key: string): UploadDraftBinding => ({
+    registryKey: `chat:${key}`,
+    getUploads: () => useChatStore.getState().inputDraftAttachments[key] ?? EMPTY_UPLOADS,
+    addUpload: (u) => useChatStore.getState().addInputDraftUpload(key, u),
+    settleUpload: (id, att) => useChatStore.getState().settleInputDraftUpload(key, id, att),
+    failUpload: (id, err) => useChatStore.getState().failInputDraftUpload(key, id, err),
+    removeUpload: (id) => useChatStore.getState().removeInputDraftUpload(key, id),
+    getBody: () => useChatStore.getState().inputDrafts[key] ?? "",
+    appendToBody: (md) => useChatStore.getState().appendToInputDraft(key, md),
+  }), []);
+  const uploadBinding = useMemo(
+    () => makeUploadBinding(draftKey),
+    [makeUploadBinding, draftKey],
+  );
+  // Coordinator-owned uploads (MUL-5181 L2): survive window close, abort on
+  // logout, read `interrupted` after a reload. `gate` widens the editor gate
+  // with the draft's placeholders so a REOPENED composer over a still-running
+  // upload cannot send past it.
+  const {
+    uploads: draftUploads,
+    attachments: draftAttachments,
+    handleUpload,
+    removeUpload,
+    gate,
+  } = useCoordinatedUploads(uploadBinding, storeUploads, {}, uploadGate, editorRef, {
+    resolveUploadTarget: () => makeUploadBinding(editorDraftKeyRef.current),
+  });
 
   // Move the editor from the draft it holds to the draft that is selected.
   //
@@ -295,20 +333,6 @@ export function ChatInput({
     setIsEmpty(!incoming.trim());
   }, [draftKey, uploadGate.uploading, commitDraft]);
 
-  // Maps "URL inserted into the editor" → "attachment row id" so that
-  // on send we can ask the server to bind only the attachments still
-  // referenced in the message body. Cleared after every send. Mirrors
-  // the comment-input flow exactly. The map key MUST match what the
-  // editor actually wrote into the markdown — that's `markdownLink`
-  // (the stable per-attachment URL) for normal post-MUL-3130 uploads
-  // and `link` (= att.url) for the no-workspace upload branch where
-  // there's no attachment-row id to address. Storing only `link` here
-  // would cause `content.includes(url)` to miss every new chat upload
-  // because the editor persists `markdownLink` instead, and the
-  // `onSend` call would silently drop `attachment_ids` so the
-  // attachment never binds to the chat message.
-  const uploadMapRef = useRef<Map<string, string>>(new Map());
-
   // Grab keyboard focus when the owner bumps `focusRequest` (a new chat was
   // started) so the user can type immediately. The editor's `focus()` latches
   // through to `onCreate` when it isn't mounted yet, so this works even on the
@@ -338,7 +362,7 @@ export function ChatInput({
     // pending and this effect re-runs on every draft change, so the restore
     // lands as soon as the user sends or clears what they were typing. Marking
     // it done here would strand it for the rest of this composer's life.
-    if (inputDraft.trim() || draftAttachments.length > 0) {
+    if (inputDraft.trim() || draftUploads.length > 0) {
       logger.debug("input.restore waiting: draft has content", {
         draftKey,
         restoreId: restoreDraftRequest.id,
@@ -347,37 +371,22 @@ export function ChatInput({
     }
     appliedRestoreIdRef.current = restoreDraftRequest.id;
     setInputDraft(draftKey, restoreDraftRequest.content);
-    setInputDraftAttachments(draftKey, restoreDraftRequest.attachments ?? []);
+    // Restores carry completed server rows — stage them as uploaded entries.
+    setInputDraftAttachments(
+      draftKey,
+      (restoreDraftRequest.attachments ?? []).map(attachmentToDraftUpload),
+    );
     setIsEmpty(!restoreDraftRequest.content.trim());
     onRestoreDraftApplied?.();
   }, [
     draftKey,
     inputDraft,
-    draftAttachments,
+    draftUploads,
     onRestoreDraftApplied,
     restoreDraftRequest,
     setInputDraft,
     setInputDraftAttachments,
   ]);
-
-  const handleUpload = useCallback(
-    async (file: File): Promise<UploadResult | null> => {
-      if (!onUploadFile) return null;
-      const result = await onUploadFile(file);
-      if (result) {
-        const persistedURL = result.markdownLink || result.link;
-        uploadMapRef.current.set(persistedURL, result.id);
-        // Bind to the draft this file is landing IN. The editor inserts the
-        // node into whatever document it currently holds, so while an earlier
-        // upload pins it to the source draft, that — not the selected draft —
-        // is where the body lives. Filing the row anywhere else splits a
-        // message from its own attachment.
-        if (result.id) addInputDraftAttachment(editorDraftKeyRef.current, result);
-      }
-      return result;
-    },
-    [addInputDraftAttachment, onUploadFile],
-  );
 
   // Drop zone wraps the rounded card so a drop anywhere on the input
   // surface routes the file through the editor's upload extension (same
@@ -395,7 +404,7 @@ export function ChatInput({
   // here in `onSubmit`, which receives the already-normalized content.
   const { submitting, submit } = useComposerSubmit({
     editorRef,
-    uploadGate,
+    uploadGate: gate,
     onSubmit: async (content: string): Promise<boolean> => {
       // These states disable the SubmitButton, but Mod+Enter bypasses it — so a
       // read-only or busy composer must still refuse the keyboard path.
@@ -421,9 +430,6 @@ export function ChatInput({
       // Only send attachment IDs for uploads still present in the content.
       // Edits / deletions that remove the markdown URL also drop the binding.
       const activeIds: string[] = [];
-      for (const [url, id] of uploadMapRef.current) {
-        if (content.includes(url)) activeIds.push(id);
-      }
       for (const attachment of draftAttachments) {
         if (isAttachmentReferenced(content, attachment)) activeIds.push(attachment.id);
       }
@@ -460,7 +466,6 @@ export function ChatInput({
         for (const key of options?.extraDraftKeys ?? []) {
           if (key !== keyAtSend) clearInputDraft(key);
         }
-        uploadMapRef.current.clear();
       };
       logger.info("input.send", {
         contentLength: content.length,
@@ -492,7 +497,7 @@ export function ChatInput({
         ? t(($) => $.input.placeholder_named, { name: agentName })
         : t(($) => $.input.placeholder_default);
 
-  const uploadEnabled = !!onUploadFile && !disabled && !noAgent;
+  const uploadEnabled = !!uploadAllowed && !disabled && !noAgent;
   // Lock only while the send request itself is creating/resolving the target
   // session. Once accepted, its project can still be detached while agent work
   // continues: changing session metadata does not cancel or move that task.
@@ -605,6 +610,13 @@ export function ChatInput({
             showBubbleMenu
           />
         </div>
+        {draftUploads.some((u) => u.status !== "uploaded") && (
+          <ComposerUploadChips
+            uploads={draftUploads}
+            onRemove={removeUpload}
+            className="px-3 pb-1"
+          />
+        )}
         {(uploadEnabled || projectSelectionEnabled || leftAdornment) && (
           <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1">
             {(uploadEnabled || projectSelectionEnabled) && (
@@ -626,15 +638,15 @@ export function ChatInput({
             onClick={submit}
             disabled={hasNothingToSend || submitting || !!disabled || !!noAgent}
             loading={submitting}
-            busy={uploadGate.uploading}
+            busy={gate.uploading}
             running={isRunning}
             onStop={onStop}
-            tooltip={uploadGate.uploading
+            tooltip={gate.uploading
               ? tEditor(($) => $.upload.in_progress)
               : sendShortcut
                 ? `${t(($) => $.input.send_tooltip)} · ${formatShortcut(sendShortcut)}`
                 : t(($) => $.input.send_tooltip)}
-            ariaLabel={uploadGate.uploading
+            ariaLabel={gate.uploading
               ? tEditor(($) => $.upload.in_progress)
               : t(($) => $.input.send_tooltip)}
             stopTooltip={t(($) => $.input.stop_tooltip)}

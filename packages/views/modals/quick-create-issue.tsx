@@ -74,9 +74,10 @@ import {
   useFileDropZone,
   FileDropOverlay,
   useUploadGate,
-  useEditorUpload,
   useComposerSubmit,
 } from "../editor";
+import { useIssueCreateUploads } from "./use-issue-create-uploads";
+import { ComposerUploadChips } from "../issues/components/composer-upload-chips";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { useT } from "../i18n";
 import { matchesPinyin } from "../editor/extensions/pinyin-match";
@@ -344,30 +345,18 @@ export function AgentCreatePanel({
   const [justSent, setJustSent] = useState(false);
   const [sentCount, setSentCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  // Uploaded attachments live in the shared draft so they survive a dialog
-  // close (and a mode switch) the same way manual-mode uploads do.
-  const pendingAttachments = draft.shared.attachments;
-
-  // Image paste/drop support: route uploads through the same helper Advanced
-  // uses, so users can paste screenshots straight into the prompt and the
-  // agent receives them as embedded markdown image URLs in the prompt.
-  const { uploadWithToast } = useEditorUpload();
-  // Was two parallel truths — useFileUpload's request counter for the button
-  // and the editor's node scan for the handler. The editor document is the
-  // queue, so one source drives both now.
   const uploadGate = useUploadGate(editorRef);
-  const handleUploadFile = useCallback(async (file: File) => {
-    const result = await uploadWithToast(file);
-    if (result) {
-      const current = useIssueDraftStore.getState().draft.shared.attachments ?? [];
-      if (!current.some((a) => a.id === result.id)) {
-        // Persist only durable fields — `download_url` is a short-lived signed
-        // URL minted for this response; render/download paths re-resolve it.
-        setShared({ attachments: [...current, { ...result, download_url: "" }] });
-      }
-    }
-    return result;
-  }, [uploadWithToast, setShared]);
+  // Coordinator-owned uploads in the shared draft pool (MUL-5181, L2): a file
+  // pasted into the prompt survives dialog close and mode switches, aborts on
+  // logout, and reads `interrupted` after a reload. `gate` widens the editor
+  // gate with the pool's placeholders.
+  const {
+    uploads: draftUploads,
+    attachments: pendingAttachments,
+    handleUpload: handleUploadFile,
+    removeUpload,
+    gate,
+  } = useIssueCreateUploads("agent", uploadGate, editorRef);
   const { isDragOver, dropZoneProps } = useFileDropZone({
     onDrop: (files) => files.forEach((f) => editorRef.current?.uploadFile(f)),
   });
@@ -386,7 +375,7 @@ export function AgentCreatePanel({
   // onto the hook directly.
   const composer = useComposerSubmit({
     editorRef,
-    uploadGate,
+    uploadGate: gate,
     onSubmit: async (md): Promise<boolean> => {
       // The button already disables on !actor / versionBlocked, but the
       // ⌘+Enter path bypasses it — re-guard here and keep the draft in place.
@@ -486,7 +475,7 @@ export function AgentCreatePanel({
   const switchToManual = () => {
     // The prompt is copied into the manual description on assist-init; mid-upload
     // that body has already lost the pending image (see switchToAgent).
-    if (uploadGate.isBlocked()) return;
+    if (gate.isBlocked()) return;
     // Commit the shared fields to the draft so the manual panel reads them from
     // there — local state can hold a value seeded from `data` that was never
     // written through a picker.
@@ -610,6 +599,14 @@ export function AgentCreatePanel({
           />
           {isDragOver && <FileDropOverlay />}
         </div>
+
+        {draftUploads.some((u) => u.status !== "uploaded") && (
+          <ComposerUploadChips
+            uploads={draftUploads}
+            onRemove={removeUpload}
+            className="px-5 pb-1"
+          />
+        )}
 
         {error && (
           <div className="px-5 pb-2 text-xs text-destructive">{error}</div>
@@ -748,9 +745,9 @@ export function AgentCreatePanel({
             <button
               type="button"
               onClick={switchToManual}
-              disabled={uploadGate.uploading}
-              aria-disabled={uploadGate.uploading || undefined}
-              aria-busy={uploadGate.uploading || undefined}
+              disabled={gate.uploading}
+              aria-disabled={gate.uploading || undefined}
+              aria-busy={gate.uploading || undefined}
               title={t(($) => $.create_issue.switch_to_manual_tooltip)}
               className="flex shrink-0 items-center gap-1.5 text-xs px-2 py-1 rounded-sm text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -768,10 +765,10 @@ export function AgentCreatePanel({
             <Button
               size="sm"
               onClick={submit}
-              disabled={!hasContent || !actor || submitting || versionBlocked || uploadGate.uploading}
-              aria-disabled={uploadGate.uploading || undefined}
+              disabled={!hasContent || !actor || submitting || versionBlocked || gate.uploading}
+              aria-disabled={gate.uploading || undefined}
               // Sending is a busy state too, not just uploading.
-              aria-busy={uploadGate.uploading || submitting || undefined}
+              aria-busy={gate.uploading || submitting || undefined}
               title={
                 versionBlocked
                   ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
@@ -779,7 +776,7 @@ export function AgentCreatePanel({
               }
               className={justSent ? "min-w-28 !bg-emerald-600 !text-white" : "min-w-28"}
             >
-              {submitting ? t(($) => $.create_issue.agent.sending) : uploadGate.uploading ? t(($) => $.create_issue.agent.uploading) : justSent ? (
+              {submitting ? t(($) => $.create_issue.agent.sending) : gate.uploading ? t(($) => $.create_issue.agent.uploading) : justSent ? (
                 <span className="flex items-center gap-1"><Check className="size-3.5" />{t(($) => $.create_issue.agent.sent_label)}</span>
               ) : (
                 <>

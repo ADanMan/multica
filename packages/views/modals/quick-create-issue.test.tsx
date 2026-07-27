@@ -11,6 +11,9 @@ const mockSetKeepOpen = vi.hoisted(() => vi.fn());
 const mockSetLastMode = vi.hoisted(() => vi.fn());
 const mockToastSuccess = vi.hoisted(() => vi.fn());
 const mockUploadWithToast = vi.hoisted(() => vi.fn());
+// Uploads flow through the module-level coordinator, which calls
+// `api.uploadFile(file, ctx, signal)` (MUL-5181 L2).
+const mockApiUploadFile = vi.hoisted(() => vi.fn());
 const mockNavigationPush = vi.hoisted(() => vi.fn());
 const mockSetShared = vi.hoisted(() => vi.fn());
 const mockSetManual = vi.hoisted(() => vi.fn());
@@ -109,6 +112,7 @@ vi.mock("@tanstack/react-query", () => ({
 vi.mock("@multica/core/api", () => ({
   api: {
     quickCreateIssue: mockQuickCreateIssue,
+    uploadFile: mockApiUploadFile,
   },
   ApiError: class ApiError extends Error {
     body?: unknown;
@@ -179,7 +183,12 @@ vi.mock("@multica/core/runtimes", () => ({
   MIN_QUICK_CREATE_CLI_VERSION: "1.0.0",
 }));
 
-vi.mock("@multica/core/hooks/use-file-upload", () => ({
+vi.mock("@multica/core/hooks/use-file-upload", async () => ({
+  // Keep the real `toUploadResult` (the upload engine calls it on settle);
+  // only the hook itself is stubbed.
+  ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
+    "@multica/core/hooks/use-file-upload",
+  )),
   useFileUpload: () => ({ uploadWithToast: mockUploadWithToast, uploading: false }),
 }));
 
@@ -436,6 +445,23 @@ describe("AgentCreatePanel", () => {
     mockProjectsQuery.isSuccess = true;
     mockSquadsData.list = [];
     mockQuickCreateIssue.mockResolvedValue(undefined);
+    mockApiUploadFile.mockResolvedValue({
+      id: "019ec09d-6222-722b-bdfa-427b105d80be",
+      workspace_id: "ws-test",
+      issue_id: null,
+      comment_id: null,
+      chat_session_id: null,
+      chat_message_id: null,
+      uploader_type: "member",
+      uploader_id: "user-1",
+      filename: "shot.png",
+      url: "/uploads/shot.png",
+      download_url: "/api/attachments/019ec09d-6222-722b-bdfa-427b105d80be/download",
+      markdown_url: "/api/attachments/019ec09d-6222-722b-bdfa-427b105d80be/download",
+      content_type: "image/png",
+      size_bytes: 5,
+      created_at: "2026-06-12T00:00:00Z",
+    });
     mockUploadWithToast.mockResolvedValue({
       id: "019ec09d-6222-722b-bdfa-427b105d80be",
       workspace_id: "ws-test",
@@ -620,7 +646,7 @@ describe("AgentCreatePanel", () => {
     renderPanel({ onClose, isExpanded: false, setIsExpanded: vi.fn() });
 
     await user.click(screen.getByRole("button", { name: "Mock editor upload" }));
-    await waitFor(() => expect(mockUploadWithToast).toHaveBeenCalled());
+    await waitFor(() => expect(mockApiUploadFile).toHaveBeenCalled());
 
     const editor = screen.getByPlaceholderText(
       'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
@@ -780,7 +806,7 @@ describe("AgentCreatePanel", () => {
   describe("upload submit gate", () => {
     function startPendingUpload() {
       let release!: (result: unknown) => void;
-      mockUploadWithToast.mockImplementationOnce(
+      mockApiUploadFile.mockImplementationOnce(
         () => new Promise((resolve) => { release = resolve; }),
       );
       fireEvent.click(screen.getByRole("button", { name: "Mock editor upload" }));

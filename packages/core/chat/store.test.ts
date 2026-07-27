@@ -72,9 +72,14 @@ describe("chat store — legacy per-agent new-chat draft migration", () => {
 
     const store = createChatStore({ storage });
 
-    expect(store.getState().inputDraftAttachments[DRAFT_NEW_SESSION]?.map((a) => a.id)).toEqual([
-      "att-mine",
-    ]);
+    // Legacy bare Attachment rows load as `uploaded` entries (MUL-5181 L2).
+    expect(
+      store
+        .getState()
+        .inputDraftAttachments[DRAFT_NEW_SESSION]?.map((u) =>
+          u.status === "uploaded" ? u.attachment.id : u.clientUploadId,
+        ),
+    ).toEqual(["att-mine"]);
     expect(store.getState().inputDraftAttachments["__new__:agent-2"]).toBeUndefined();
   });
 

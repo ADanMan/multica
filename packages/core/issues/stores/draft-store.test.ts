@@ -92,21 +92,28 @@ describe("issue draft store — last assignee", () => {
     setShared({
       attachments: [
         {
-          id: "11111111-2222-3333-4444-555555555555",
-          workspace_id: "ws-1",
-          issue_id: null,
-          comment_id: null,
-          chat_session_id: null,
-          chat_message_id: null,
-          uploader_type: "member",
-          uploader_id: "alice",
+          clientUploadId: "11111111-2222-3333-4444-555555555555",
+          status: "uploaded",
           filename: "shot.png",
-          url: "https://cdn.example.test/shot.png",
-          download_url: "https://cdn.example.test/shot.png",
-          markdown_url: "https://app.example.test/api/attachments/11111111-2222-3333-4444-555555555555/download",
-          content_type: "image/png",
-          size_bytes: 123,
-          created_at: "2026-06-12T00:00:00Z",
+          size: 123,
+          contentType: "image/png",
+          attachment: {
+            id: "11111111-2222-3333-4444-555555555555",
+            workspace_id: "ws-1",
+            issue_id: null,
+            comment_id: null,
+            chat_session_id: null,
+            chat_message_id: null,
+            uploader_type: "member",
+            uploader_id: "alice",
+            filename: "shot.png",
+            url: "https://cdn.example.test/shot.png",
+            download_url: "https://cdn.example.test/shot.png",
+            markdown_url: "https://app.example.test/api/attachments/11111111-2222-3333-4444-555555555555/download",
+            content_type: "image/png",
+            size_bytes: 123,
+            created_at: "2026-06-12T00:00:00Z",
+          },
         },
       ],
     });
@@ -263,6 +270,50 @@ describe("issue draft store — legacy rehydrate", () => {
     expect(draft.manual.status).toBe("todo");
     expect(draft.agent.prompt).toBe("keep me");
     expect(draft.activeMode).toBe("agent");
+  });
+
+  it("normalizes pre-L2 shared attachments and coerces stale uploading placeholders", async () => {
+    localStorage.setItem(
+      "multica_issue_draft:gamma",
+      JSON.stringify({
+        state: {
+          draft: {
+            shared: {
+              attachments: [
+                // Pre-L2 build persisted a bare Attachment row.
+                {
+                  id: "att-1",
+                  filename: "old.png",
+                  url: "https://cdn.example.test/old.png",
+                  size_bytes: 7,
+                  content_type: "image/png",
+                },
+                // An upload that was still in flight when the app closed.
+                {
+                  clientUploadId: "c-flight",
+                  status: "uploading",
+                  filename: "mid.png",
+                  size: 9,
+                },
+              ],
+            },
+            manual: {},
+            agent: {},
+            activeMode: "manual",
+          },
+        },
+        version: 0,
+      }),
+    );
+
+    setCurrentWorkspace("gamma", "ws_c");
+    await flush();
+    await flush();
+
+    const { attachments } = useIssueDraftStore.getState().draft.shared;
+    expect(attachments.map((u) => u.status)).toEqual(["uploaded", "interrupted"]);
+    expect(attachments[0]?.filename).toBe("old.png");
+    expect(attachments[1]?.filename).toBe("mid.png");
   });
 });
 

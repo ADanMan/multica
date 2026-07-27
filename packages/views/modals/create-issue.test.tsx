@@ -37,6 +37,10 @@ const mockToastCustom = vi.hoisted(() => vi.fn());
 const mockToastDismiss = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
 const mockUploadWithToast = vi.hoisted(() => vi.fn());
+// Uploads flow through the module-level coordinator, which calls
+// `api.uploadFile(file, ctx, signal)` (MUL-5181 L2). Tests drive uploads by
+// mocking that call; it resolves a plain server Attachment row.
+const mockApiUploadFile = vi.hoisted(() => vi.fn());
 
 type DraftAttachment = {
   id: string;
@@ -56,12 +60,23 @@ type DraftAttachment = {
   created_at: string;
 };
 
+// Coordinator-owned upload entry persisted in the shared pool (MUL-5181 L2).
+type DraftUploadEntry = {
+  clientUploadId: string;
+  status: "uploading" | "uploaded" | "failed" | "interrupted";
+  filename: string;
+  size: number;
+  contentType?: string;
+  attachment?: DraftAttachment;
+  error?: string;
+};
+
 const emptyIssueDraft = () => ({
   shared: {
     projectId: undefined as string | undefined,
     priority: "none" as "none" | "low" | "medium" | "high" | "urgent",
     dueDate: null as string | null,
-    attachments: [] as DraftAttachment[],
+    attachments: [] as DraftUploadEntry[],
   },
   manual: {
     title: "",
@@ -212,7 +227,12 @@ vi.mock("@multica/core/properties", async (importOriginal) => {
   };
 });
 
-vi.mock("@multica/core/hooks/use-file-upload", () => ({
+vi.mock("@multica/core/hooks/use-file-upload", async () => ({
+  // Keep the real `toUploadResult` (the upload engine calls it on settle);
+  // only the hook itself is stubbed.
+  ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
+    "@multica/core/hooks/use-file-upload",
+  )),
   useFileUpload: () => ({ uploadWithToast: mockUploadWithToast }),
 }));
 
@@ -252,6 +272,7 @@ vi.mock("@multica/core/api", async () => {
     api: {
       listProperties: mockListProperties,
       setIssueProperty: mockSetIssueProperty,
+      uploadFile: mockApiUploadFile,
     },
     ApiError,
     parseWithFallback,
@@ -574,6 +595,23 @@ describe("CreateIssueModal", () => {
       link: "https://cdn.example.test/shot.png",
       markdownLink: "https://multica-api.copilothub.ai/api/attachments/11111111-2222-3333-4444-555555555555/download",
     });
+    mockApiUploadFile.mockResolvedValue({
+      id: "11111111-2222-3333-4444-555555555555",
+      workspace_id: "ws-test",
+      issue_id: null,
+      comment_id: null,
+      chat_session_id: null,
+      chat_message_id: null,
+      uploader_type: "member",
+      uploader_id: "user-1",
+      filename: "shot.png",
+      url: "https://cdn.example.test/shot.png",
+      download_url: "https://cdn.example.test/shot.png?Signature=fresh",
+      markdown_url: "https://multica-api.copilothub.ai/api/attachments/11111111-2222-3333-4444-555555555555/download",
+      content_type: "image/png",
+      size_bytes: 123,
+      created_at: "2026-06-12T00:00:00Z",
+    });
     mockCreateIssue.mockResolvedValue({
       id: "issue-123",
       identifier: "TES-123",
@@ -798,23 +836,14 @@ describe("CreateIssueModal", () => {
 
     await user.click(screen.getByRole("button", { name: "Upload file" }));
 
+    // Coordinator flow (MUL-5181 L2): a placeholder is written at pick time,
+    // then settles into an `uploaded` entry carrying the server row.
     await waitFor(() => {
-      expect(mockSetShared).toHaveBeenCalledWith({
-        attachments: [
-          expect.objectContaining({
-            id: "11111111-2222-3333-4444-555555555555",
-            filename: "shot.png",
-            download_url: "",
-          }),
-        ],
-      });
+      const uploads = mockDraftStore.draft.shared.attachments;
+      expect(uploads).toHaveLength(1);
+      expect(uploads[0]).toMatchObject({ status: "uploaded", filename: "shot.png" });
+      expect(uploads[0]?.attachment?.id).toBe("11111111-2222-3333-4444-555555555555");
     });
-    const draftAttachmentsCall = mockSetShared.mock.calls.find(
-      ([patch]) => Array.isArray(patch.attachments),
-    )?.[0] as { attachments?: Array<{ download_url: string }> } | undefined;
-    expect(draftAttachmentsCall?.attachments?.[0]?.download_url).not.toContain(
-      "Signature=",
-    );
   });
 
   it("reuses draft attachments after reopening manual create so pasted images can render and bind", async () => {
@@ -838,7 +867,16 @@ describe("CreateIssueModal", () => {
     };
     mockDraftStore.draft.manual.title = "Image draft";
     mockDraftStore.draft.manual.description = `![shot.png](${attachment.markdown_url})`;
-    mockDraftStore.draft.shared.attachments = [attachment];
+    mockDraftStore.draft.shared.attachments = [
+      {
+        clientUploadId: attachment.id,
+        status: "uploaded",
+        filename: attachment.filename,
+        size: attachment.size_bytes,
+        contentType: attachment.content_type,
+        attachment,
+      },
+    ];
 
     renderModal(<CreateIssueModal onClose={vi.fn()} />);
 
@@ -884,14 +922,24 @@ describe("CreateIssueModal", () => {
       url: "https://cdn.example.test/deleted.png",
       markdown_url: "https://multica-api.copilothub.ai/api/attachments/99999999-8888-7777-6666-555555555555/download",
     };
+    const wrap = (att: typeof referenced): DraftUploadEntry => ({
+      clientUploadId: att.id,
+      status: "uploaded",
+      filename: att.filename,
+      size: att.size_bytes,
+      contentType: att.content_type,
+      attachment: att,
+    });
     mockDraftStore.draft.manual.title = "Image draft";
     mockDraftStore.draft.manual.description = `![kept.png](${referenced.markdown_url})`;
-    mockDraftStore.draft.shared.attachments = [referenced, deleted];
+    mockDraftStore.draft.shared.attachments = [wrap(referenced), wrap(deleted)];
 
     renderModal(<CreateIssueModal onClose={vi.fn()} />);
 
     await waitFor(() => {
-      expect(mockSetShared).toHaveBeenCalledWith({ attachments: [referenced] });
+      expect(mockSetShared).toHaveBeenCalledWith({
+        attachments: [expect.objectContaining({ clientUploadId: referenced.id })],
+      });
     });
   });
 
@@ -1241,10 +1289,11 @@ describe("CreateIssueModal", () => {
   // title, and Switch to Agent would each fix the draft while an image was
   // still uploading, dropping it from the description with no warning.
   describe("upload submit gate", () => {
-    /** Attach a file whose upload stays in flight until the caller releases it. */
+    /** Attach a file whose upload stays in flight until the caller releases it.
+     *  Controls the coordinator's `api.uploadFile` promise (MUL-5181 L2). */
     function startPendingUpload() {
       let release!: (result: unknown) => void;
-      mockUploadWithToast.mockImplementationOnce(
+      mockApiUploadFile.mockImplementationOnce(
         () => new Promise((resolve) => { release = resolve; }),
       );
       fireEvent.click(screen.getByRole("button", { name: "Upload file" }));
@@ -1274,7 +1323,15 @@ describe("CreateIssueModal", () => {
       await waitFor(() => expect(createButton).toBeDisabled());
       expect(createButton).toHaveAttribute("aria-busy", "true");
 
-      await act(async () => { pending.release({ id: "att-1", url: "https://cdn/x.png" }); });
+      await act(async () => {
+        pending.release({
+          id: "att-1",
+          url: "https://cdn/x.png",
+          filename: "x.png",
+          size_bytes: 1,
+          content_type: "image/png",
+        });
+      });
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Create Issue" })).not.toBeDisabled(),
       );

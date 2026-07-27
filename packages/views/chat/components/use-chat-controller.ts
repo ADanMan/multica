@@ -15,9 +15,6 @@ import { projectListOptions } from "@multica/core/projects/queries";
 import { canAssignAgent } from "@multica/views/issues/components";
 import { api, dispatchReasonCode } from "@multica/core/api";
 import { useAgentPresenceDetail, useWorkspaceAgentAvailability } from "@multica/core/agents";
-// Direct module path, not the `../../editor` barrel: this controller is
-// headless, and the barrel would pull the whole Tiptap tree in behind it.
-import { useEditorUpload } from "../../editor/use-editor-upload";
 import {
   chatSessionsOptions,
   chatMessagesPageOptions,
@@ -369,8 +366,6 @@ export function useChatController(opts?: { isActive?: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- markRead ref stable
   }, [isActive, appForeground, activeSessionId, currentHasUnread]);
 
-  const { uploadWithToast } = useEditorUpload();
-
   const sessionPromiseRef = useRef<Promise<string | null> | null>(null);
   const ensureSession = useCallback(
     async (titleSeed: string): Promise<string | null> => {
@@ -431,13 +426,9 @@ export function useChatController(opts?: { isActive?: boolean }) {
     setActiveSession(null);
   }, [activeSessionId, sessionsLoaded, sessions, qc, setActiveSession]);
 
-  const handleUploadFile = useCallback(
-    async (file: File) => {
-      if (!activeAgent) return null;
-      return uploadWithToast(file);
-    },
-    [activeAgent, uploadWithToast],
-  );
+  // Upload transport moved into the coordinated-upload engine inside ChatInput
+  // (MUL-5181 L2); surfaces only forward whether the affordance exists.
+  const uploadEnabled = !!activeAgent;
 
   const cancelChatTask = useCallback(
     async (
@@ -829,7 +820,7 @@ export function useChatController(opts?: { isActive?: boolean }) {
     // actions
     handleSend,
     handleStop,
-    handleUploadFile,
+    uploadEnabled,
     handleNewChat,
     handleStartNewChat,
     handleSelectSession,

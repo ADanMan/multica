@@ -5,13 +5,13 @@ import type {
   IssuePriority,
   IssueAssigneeType,
   IssuePropertyValues,
-  Attachment,
 } from "../../types";
 import type { CreateMode } from "./create-mode-store";
 import type { QuickCreateActorType } from "./quick-create-store";
 import { createWorkspaceAwareStorage, registerForWorkspaceRehydration } from "../../platform/workspace-storage";
 import { defaultStorage } from "../../platform/storage";
 import { registerDraftCleanup } from "../../drafts/cleanup-registry";
+import { normalizeStoredUploads, type DraftUpload } from "../../drafts/draft-upload";
 
 // One logical Issue-Create draft (MUL-5181), split so switching between the
 // manual form and the agent form never destroys the other side's content.
@@ -35,11 +35,13 @@ export interface IssueCreateShared {
   projectId?: string;
   priority: IssuePriority;
   dueDate: string | null;
-  /** Uploaded attachments, referenced by the manual description OR the agent
-   *  prompt markdown. A single pool so an image survives a mode switch from
-   *  either side; each submit path sends only the ids its own content
-   *  references. */
-  attachments: Attachment[];
+  /** Uploads for the dialog (placeholders + completed), referenced by the
+   *  manual description OR the agent prompt markdown. A single pool so an
+   *  image survives a mode switch from either side; each submit path sends
+   *  only the ids its own content references. Coordinator-owned (MUL-5181 L2):
+   *  a placeholder written at pick time survives dialog close, and one still
+   *  `uploading` at load time is coerced to `interrupted` on rehydrate. */
+  attachments: DraftUpload[];
 }
 
 export interface IssueCreateManual {
@@ -132,7 +134,9 @@ function migrateDraft(raw: unknown): IssueCreateDraft {
         projectId: d.projectId as string | undefined,
         priority: (d.priority as IssuePriority) ?? "none",
         dueDate: (d.dueDate as string | null) ?? null,
-        attachments: Array.isArray(d.attachments) ? (d.attachments as Attachment[]) : [],
+        // Legacy builds persisted bare Attachment rows; normalize wraps them
+        // as `uploaded` placeholders (and coerces stale `uploading` ones).
+        attachments: normalizeStoredUploads(d.attachments),
       },
       manual: {
         ...emptyManual(),
@@ -153,8 +157,15 @@ function migrateDraft(raw: unknown): IssueCreateDraft {
     };
   }
 
+  const sharedRaw = (d.shared as Partial<IssueCreateShared> & { attachments?: unknown }) ?? {};
   return {
-    shared: { ...emptyShared(), ...((d.shared as Partial<IssueCreateShared>) ?? {}) },
+    shared: {
+      ...emptyShared(),
+      ...sharedRaw,
+      // Pre-L2 nested drafts stored bare Attachment rows; every load also
+      // coerces `uploading` placeholders to `interrupted` (bytes are gone).
+      attachments: normalizeStoredUploads(sharedRaw.attachments),
+    },
     manual: { ...emptyManual(), ...((d.manual as Partial<IssueCreateManual>) ?? {}) },
     agent: { ...emptyAgent(), ...((d.agent as Partial<IssueCreateAgent>) ?? {}) },
     activeMode: d.activeMode === "agent" ? "agent" : "manual",

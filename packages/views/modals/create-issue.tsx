@@ -30,7 +30,6 @@ import type {
   IssuePriority,
   IssueAssigneeType,
   IssuePropertyValue,
-  Attachment,
 } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import {
@@ -50,7 +49,9 @@ import {
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@multica/ui/components/ui/tooltip";
 import { Button } from "@multica/ui/components/ui/button";
 import { Switch } from "@multica/ui/components/ui/switch";
-import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useUploadGate, useEditorUpload, useComposerSubmit } from "../editor";
+import { ContentEditor, type ContentEditorRef, TitleEditor, type TitleEditorRef, useFileDropZone, FileDropOverlay, useUploadGate, useComposerSubmit } from "../editor";
+import { useIssueCreateUploads } from "./use-issue-create-uploads";
+import { ComposerUploadChips } from "../issues/components/composer-upload-chips";
 import { useShortcut } from "@multica/core/shortcuts";
 import { ShortcutKeycaps } from "../common/shortcut-keycaps";
 import { StatusIcon, StatusPicker, PriorityIcon, PriorityPicker, StagePicker, AssigneePicker, StartDatePicker, DueDatePicker, LabelPicker } from "../issues/components";
@@ -90,17 +91,6 @@ import {
 } from "../issues/components/pickers/custom-property-picker";
 import { IssuePickerModal } from "./issue-picker-modal";
 import { useT } from "../i18n";
-
-function toDraftAttachment(attachment: Attachment): Attachment {
-  return {
-    ...attachment,
-    // `download_url` is minted for the current API response and may be a
-    // short-lived signed URL. Drafts survive across dialog closes and app
-    // restarts, so persist only durable fields and let render/download paths
-    // re-resolve through id/markdown_url when needed.
-    download_url: "",
-  };
-}
 
 // ---------------------------------------------------------------------------
 // ManualCreatePanel — manual-mode body of the create-issue dialog. Renders
@@ -318,52 +308,48 @@ export function ManualCreatePanel({
     enabled: !!parentIssueId,
   });
 
-  const draftAttachments = draft.shared.attachments ?? [];
-
   // Set the persisted draft's active mode so a later reopen (and any reader of
   // the unified draft) knows which form the user is editing in.
   useEffect(() => {
     setActiveMode("manual");
   }, [setActiveMode]);
 
-  // Prune shared attachments whose markdown reference was deleted in an
+  // Prune completed uploads whose markdown reference was deleted in an
   // earlier editing session. Runs once on mount: at that point the persisted
   // manual description / agent prompt ARE the draft bodies (no editor edits
-  // have happened yet), so dropping records referenced by neither is safe.
-  // Check both bodies so an image pasted into the agent prompt isn't pruned
-  // just because it's absent from the manual description. Don't prune on
-  // description updates — an onUpdate flush can race a just-finished upload
-  // whose markdown link hasn't been inserted yet, and pruning there would drop
-  // a live attachment.
+  // have happened yet), so dropping `uploaded` records referenced by neither
+  // is safe. Placeholders (uploading / failed / interrupted) are always kept —
+  // they have no body reference yet and the status chips are their only UI.
+  // Don't prune on description updates — an onUpdate flush can race a
+  // just-finished upload whose markdown link hasn't been inserted yet, and
+  // pruning there would drop a live attachment.
   useEffect(() => {
     const { draft: current } = useIssueDraftStore.getState();
-    const attachments = current.shared.attachments ?? [];
-    const kept = attachments.filter(
-      (a) =>
-        contentReferencesAttachment(current.manual.description, a) ||
-        contentReferencesAttachment(current.agent.prompt, a),
+    const uploads = current.shared.attachments ?? [];
+    const kept = uploads.filter(
+      (u) =>
+        u.status !== "uploaded" ||
+        contentReferencesAttachment(current.manual.description, u.attachment) ||
+        contentReferencesAttachment(current.agent.prompt, u.attachment),
     );
-    if (kept.length !== attachments.length) setShared({ attachments: kept });
+    if (kept.length !== uploads.length) setShared({ attachments: kept });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const { uploadWithToast } = useEditorUpload();
   // Gate every action that fixes this draft: Create and the switch to agent
   // mode (which assist-inits the agent prompt from the description and would
   // carry a stripped body across).
   const uploadGate = useUploadGate(descEditorRef);
-  const handleUpload = async (file: File) => {
-    const result = await uploadWithToast(file);
-    if (result) {
-      const currentAttachments =
-        useIssueDraftStore.getState().draft.shared.attachments ?? [];
-      const attachments = currentAttachments.some((a) => a.id === result.id)
-        ? currentAttachments
-        : [...currentAttachments, toDraftAttachment(result)];
-      setShared({ attachments });
-    }
-    return result;
-  };
+  // Coordinator-owned uploads in the shared pool (MUL-5181, L2): a file picked
+  // here survives dialog close, aborts on logout, and reads `interrupted`
+  // after a reload. `gate` widens the editor gate with the pool's placeholders.
+  const {
+    uploads: draftUploads,
+    attachments: draftAttachments,
+    handleUpload,
+    removeUpload,
+    gate,
+  } = useIssueCreateUploads("manual", uploadGate, descEditorRef);
 
   // Sync field changes to the draft store — manual-only fields to the manual
   // slot, project / priority / due date to the shared slot.
@@ -455,7 +441,7 @@ export function ManualCreatePanel({
   // the body is read separately inside onSubmit.
   const composer = useComposerSubmit({
     editorRef: descEditorRef,
-    uploadGate,
+    uploadGate: gate,
     normalize: () => title.trim(),
     onSubmit: async (): Promise<boolean> => {
       try {
@@ -694,7 +680,7 @@ export function ManualCreatePanel({
   const switchToAgent = () => {
     // Serializing mid-upload packs a description that has already lost the
     // pending image into the agent prompt, so gate the switch too.
-    if (uploadGate.isBlocked()) return;
+    if (gate.isBlocked()) return;
     // Commit the shared fields to the draft so the agent panel reads them from
     // there. Local state can hold a value seeded from `data` (e.g. an opener's
     // project) that was never written through a picker, so a plain flip would
@@ -734,7 +720,7 @@ export function ManualCreatePanel({
   const submitState: "submitting" | "uploading" | "missing_title" | "ready" =
     submitting
       ? "submitting"
-      : uploadGate.uploading
+      : gate.uploading
         ? "uploading"
         : !title.trim()
           ? "missing_title"
@@ -859,6 +845,14 @@ export function ManualCreatePanel({
               />
               {descDragOver && <FileDropOverlay />}
             </div>
+
+            {draftUploads.some((u) => u.status !== "uploaded") && (
+              <ComposerUploadChips
+                uploads={draftUploads}
+                onRemove={removeUpload}
+                className="px-5 pb-1"
+              />
+            )}
 
             {/* Pre-trigger preview — a passive caption above the toolbar; reveals
                 when an agent assignee will pick the issue up. */}
@@ -1224,9 +1218,9 @@ export function ManualCreatePanel({
                 <button
                   type="button"
                   onClick={switchToAgent}
-                  disabled={uploadGate.uploading}
-                  aria-disabled={uploadGate.uploading || undefined}
-                  aria-busy={uploadGate.uploading || undefined}
+                  disabled={gate.uploading}
+                  aria-disabled={gate.uploading || undefined}
+                  aria-busy={gate.uploading || undefined}
                   title={t(($) => $.create_issue.switch_to_agent_tooltip)}
                   className="border-beam group flex shrink-0 items-center gap-1.5 text-xs px-2 py-1 rounded-sm text-muted-foreground bg-brand/5 hover:bg-brand/10 hover:text-foreground transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                 >

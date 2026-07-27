@@ -20,7 +20,6 @@ import { projectListOptions } from "@multica/core/projects/queries";
 import { canAssignAgent } from "@multica/views/issues/components";
 import { api } from "@multica/core/api";
 import { useAgentPresenceDetail, useWorkspaceAgentAvailability } from "@multica/core/agents";
-import { useEditorUpload } from "../../editor";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { useAppForeground } from "../../common/use-app-foreground";
 import {
@@ -310,8 +309,6 @@ export function ChatWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- markRead ref stable
   }, [isOpen, appForeground, activeSessionId, currentHasUnread]);
 
-  const { uploadWithToast } = useEditorUpload();
-
   // Lazy-creates a chat_session the first time the user needs an id —
   // either to send a message or to attach an uploaded file. Pulled out of
   // handleSend so the upload path (which fires before any text exists) can
@@ -380,17 +377,10 @@ export function ChatWindow() {
     ],
   );
 
-  const handleUploadFile = useCallback(
-    async (file: File) => {
-      if (!activeAgent) return null;
-      // Uploads are workspace-scoped drafts. Sending the message is the point
-      // where we create a chat session (if needed) and bind attachment_ids to
-      // the persisted chat_message row. This keeps a paste/drop from creating
-      // an empty chat session the user never sends.
-      return uploadWithToast(file);
-    },
-    [activeAgent, uploadWithToast],
-  );
+  // Upload transport moved into the coordinated-upload engine inside ChatInput
+  // (MUL-5181 L2); the host only says whether the affordance exists. Uploads
+  // remain workspace-scoped drafts — sending is still the point where a
+  // session is created (if needed) and attachment_ids bind to the message.
 
   const cancelChatTask = useCallback(
     async (
@@ -873,7 +863,7 @@ export function ChatWindow() {
         onSend={handleSend}
         restoreDraftRequest={restoreDraftRequest}
         onRestoreDraftApplied={handleRestoreDraftApplied}
-        onUploadFile={handleUploadFile}
+        uploadEnabled={!!activeAgent}
         onStop={handleStop}
         isRunning={!!pendingTaskId}
         disabled={isSessionArchived || isAgentArchived}
