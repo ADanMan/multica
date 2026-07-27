@@ -43,16 +43,24 @@
     "typecheck": {
       "dependsOn": ["^typecheck"]
     },
-    // `^typecheck` is load-bearing here, but not for ordering: a turbo task
-    // hash only covers a workspace dependency's sources if a task edge
-    // reaches them. Without this edge, editing packages/views left
+    // Hash-only transit task. No package implements a `cache-inputs` script,
+    // so every node resolves to <NONEXISTENT> and nothing is ever executed --
+    // but the edges still pull each dependency's file hashes into whatever
+    // depends on it. `dependsOn: ["^cache-inputs"]` makes that recursive, so
+    // the chain stays complete if a package ever gains a purely transitive
+    // dependency. This exists because a turbo task hash covers a workspace
+    // dependency's sources only when a task edge reaches them.
+    "cache-inputs": {
+      "dependsOn": ["^cache-inputs"]
+    },
+    // Without a dependency edge, editing packages/views or packages/ui left
     // `@multica/web#test` and `@multica/desktop#test` byte-identical in hash,
-    // so a cached pass would be replayed for code that changed underneath.
-    // `typecheck` is the one task every package defines, which is what makes
-    // it the usable edge -- `^test` would miss packages/ui, which has no test
-    // script. Harmless to omit while nothing was cached; not once it is.
+    // so a cached pass would be replayed over changed code. `^cache-inputs`
+    // closes that without side effects: `^typecheck` would also work but drags
+    // three real `tsc --noEmit` runs (~223 CPU-seconds) into the test job, and
+    // `^test` would serialise the suites behind each other.
     "test": {
-      "dependsOn": ["^typecheck"]
+      "dependsOn": ["^cache-inputs"]
     },
     // `lint` keeps no dependency edge: eslint here is not type-aware (no
     // `projectService` / `parserOptions.project` anywhere in
