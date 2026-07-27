@@ -1,0 +1,34 @@
+"use client";
+
+import { useCallback } from "react";
+import { useNavigation } from "./context";
+
+/**
+ * Leave a page whose subject no longer exists, returning the user to wherever
+ * they came from.
+ *
+ * Deleting an issue from its detail page is the canonical case: the user may
+ * have opened it from My Issues, a project's list, a search result or a pin,
+ * and every one of those is a better destination than a hardcoded workspace
+ * list. Going back is the only thing that knows which — no caller has to
+ * thread a "source view" through the URL or a store.
+ *
+ * `fallback` covers the case where there is nothing to go back to: a shared
+ * link opened cold, a new tab, a pasted URL. Stepping back from those would
+ * leave Multica entirely, so we navigate to `fallback` instead. Adapters that
+ * can't report history (test stubs, the desktop issue window) always take this
+ * branch, which is exactly the pre-existing behaviour.
+ *
+ * Always `replace`, never `push`: the page we are leaving is dead, so its URL
+ * must not stay in history for the back button to land on a 404.
+ */
+export function useBackOrReplace(): (fallback: string) => void {
+  const { back, replace, canGoBack } = useNavigation();
+  return useCallback(
+    (fallback: string) => {
+      if (canGoBack?.() === true) back();
+      else replace(fallback);
+    },
+    [back, replace, canGoBack],
+  );
+}

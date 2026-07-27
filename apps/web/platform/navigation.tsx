@@ -1,11 +1,16 @@
 "use client";
 
-import { Suspense, useEffect } from "react";
+import { Suspense, useCallback, useEffect } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   NavigationProvider,
   type NavigationAdapter,
 } from "@multica/views/navigation";
+import { createInAppHistoryTracker } from "./in-app-history";
+
+// Document-scoped, like the browser history it shadows: a remount must not
+// convince us there is somewhere to go back to.
+const inAppHistory = createInAppHistoryTracker();
 
 /**
  * Web half of the `multica:navigate` bridge — the event shared content
@@ -14,16 +19,16 @@ import {
  * equivalent is a router push in place. Without this the event has no listener
  * and such links do nothing at all.
  */
-function useInternalLinkHandler(router: ReturnType<typeof useRouter>) {
+function useInternalLinkHandler(push: (path: string) => void) {
   useEffect(() => {
     const handler = (e: Event) => {
       const path = (e as CustomEvent<{ path?: string }>).detail?.path;
       if (!path) return;
-      router.push(path);
+      push(path);
     };
     window.addEventListener("multica:navigate", handler);
     return () => window.removeEventListener("multica:navigate", handler);
-  }, [router]);
+  }, [push]);
 }
 
 function NavigationProviderInner({
@@ -34,12 +39,20 @@ function NavigationProviderInner({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  useInternalLinkHandler(router);
+  const push = useCallback(
+    (path: string) => {
+      inAppHistory.recordPush();
+      router.push(path);
+    },
+    [router],
+  );
+  useInternalLinkHandler(push);
 
   const adapter: NavigationAdapter = {
-    push: router.push,
+    push,
     replace: router.replace,
     back: router.back,
+    canGoBack: inAppHistory.canGoBack,
     pathname,
     searchParams: new URLSearchParams(searchParams.toString()),
     getShareableUrl: (path: string) =>
