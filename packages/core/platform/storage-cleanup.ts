@@ -10,6 +10,9 @@ import type { StorageAdapter } from "../types/storage";
 const WORKSPACE_SCOPED_KEYS = [
   "multica_issue_draft",
   "multica_issue_surface_views",
+  // Legacy: no store writes this key anymore (issue views moved to
+  // `multica_issue_surface_views`). Kept so existing entries still get cleaned
+  // up on workspace deletion / logout.
   "multica_issues_view",
   "multica_issues_scope",
   "multica_my_issues_view",
