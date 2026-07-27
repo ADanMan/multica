@@ -457,8 +457,12 @@ export function issueTableRowPageOptions(
     placeholderData: keepPreviousData,
     retry: false,
     // Dynamic useQueries observers can detach/reinstall as sibling branches
-    // enter the viewport. An errored page stays errored until explicit Retry.
-    refetchOnMount: false,
+    // enter the viewport. Keep an errored page errored until an explicit Retry,
+    // but — unlike `refetchOnMount: false` — let a successful-but-invalidated
+    // page refetch when its observer reattaches. Otherwise a row page that gets
+    // WS-invalidated while its observer is detached stays stranded stale under
+    // the global `staleTime: Infinity` default (correct count, missing issue).
+    retryOnMount: false,
   });
 }
 
