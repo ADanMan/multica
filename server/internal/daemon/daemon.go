@@ -55,6 +55,14 @@ var ErrNoRuntimesToRegister = errors.New("no agent runtimes could be registered"
 // recover the task on a fresh attempt.
 var errTaskPrepareTimeout = errors.New("task preparation timed out")
 
+// errSkillBundleUnavailable marks a task that died in preparation because the
+// daemon could not download one of the agent's skill bundles. Carrying it as a
+// sentinel — rather than leaving handleTask to pattern-match the wrapped
+// transport error — is what lets the failure land on the platform-side
+// skill_bundle_unavailable reason instead of agent_error.unknown, which is not
+// on the server's retry allowlist. (MUL-5370)
+var errSkillBundleUnavailable = errors.New("skill bundle unavailable")
+
 const (
 	taskSlotWaitTimeout      = 2 * time.Second
 	taskSlotCapacityBackoff  = 5 * time.Second
@@ -3399,6 +3407,14 @@ func taskRunFailureReason(err error) string {
 	if errors.Is(err, errTaskPrepareTimeout) {
 		return taskfailure.ReasonTimeout.String()
 	}
+	// Checked after the prepare deadline: when the whole prepare budget ran
+	// out, runTask has already collapsed the error into errTaskPrepareTimeout
+	// and that classification is the more accurate one. This branch is for the
+	// per-skill download deadline firing inside a prepare budget that still had
+	// room (MUL-5370).
+	if errors.Is(err, errSkillBundleUnavailable) {
+		return taskfailure.ReasonSkillBundleUnavailable.String()
+	}
 	return taskfailure.Classify(err.Error()).String()
 }
 
@@ -3947,9 +3963,18 @@ func (d *Daemon) ensureTaskSkillBundles(ctx context.Context, task *Task) error {
 	// that ultimately fails leaves the skills it did fetch cached for the next
 	// one. (GitHub #4505 / MUL-3650)
 	for _, ref := range misses {
+		started := time.Now()
 		bundle, err := d.resolveSkillBundle(ctx, task, ref)
 		if err != nil {
-			return fmt.Errorf("resolve skill bundles: %w", err)
+			// Name the skill, its declared size, and how long we actually
+			// waited. The bare "resolve skill bundles: context deadline
+			// exceeded" this replaced was indistinguishable from a generic
+			// network fault, and cost a community thread three hours of
+			// guesswork (MUL-5370): size + elapsed separate "this bundle is
+			// too big for the link" from "the link is dead".
+			return fmt.Errorf("%w: skill %q (id=%s, %d bytes) after %s: %w",
+				errSkillBundleUnavailable, ref.Name, ref.ID, ref.SizeBytes,
+				time.Since(started).Round(time.Millisecond), err)
 		}
 		resolved[skillRefKey(bundle.Source, bundle.ID)] = bundle
 	}

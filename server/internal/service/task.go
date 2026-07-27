@@ -3313,12 +3313,17 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 // the platform retry it directly (MUL-4910). It is resume-safe (not in
 // resumeUnsafeFailureReason), so the retry child inherits the session and
 // continues the truncated conversation rather than restarting from scratch.
+// skill_bundle_unavailable is retryable for the same reason: the agent process
+// never started, so there is nothing to be idempotent about, and every bundle
+// that did download is already cached on disk — a retry resumes from there
+// instead of re-fetching the whole set (MUL-5370).
 var retryableReasons = map[string]bool{
 	"runtime_offline":           true,
 	"runtime_recovery":          true,
 	"timeout":                   true,
 	"codex_semantic_inactivity": true,
-	string(taskfailure.ReasonAgentProviderNetwork): true,
+	string(taskfailure.ReasonAgentProviderNetwork):   true,
+	string(taskfailure.ReasonSkillBundleUnavailable): true,
 }
 
 // Transient provider stream cuts (provider_network) get a bespoke three-tier

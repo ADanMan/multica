@@ -102,6 +102,12 @@ func TestClassifyRules(t *testing.T) {
 		{"connectionrefused single", "ConnectionRefused", ReasonAgentProviderNetwork},
 		{"dns", "dns lookup failed", ReasonAgentProviderNetwork},
 		{"i/o timeout", "read tcp 1.2.3.4:443: i/o timeout", ReasonAgentProviderNetwork},
+		// MUL-5370: every Go-side context deadline used to land in
+		// agent_error.unknown, which is not on the retry allowlist — a
+		// transient stall became a terminal failure with a useless label.
+		{"context deadline exceeded", "context deadline exceeded", ReasonAgentProviderNetwork},
+		{"wrapped context deadline", `Post "https://api.example.com/v1": context deadline exceeded`, ReasonAgentProviderNetwork},
+		{"http client timeout", `Get "https://api.example.com": net/http: request canceled (Client.Timeout exceeded while awaiting headers)`, ReasonAgentProviderNetwork},
 
 		// 8. Model not found / unavailable.
 		{"model not found", "Error: model claude-3-opus-99 not found", ReasonAgentModelNotFoundOrUnavailable},
