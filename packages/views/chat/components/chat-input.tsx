@@ -171,13 +171,13 @@ export function ChatInput({
   //   - Draft restore (a cancelled run, a failed send): writes into
   //     `inputDraft`, and the editor's synchronized-value effect pushes it into
   //     the live instance. There is no second copy to drift or resurface.
-  //   - Session switch / lazy create: when the user uploads a file in a
-  //     brand-new chat, `handleUploadFile` awaits `ensureSession`, which flips
-  //     `activeSessionId` from null → uuid mid-upload. A session-keyed editor
-  //     would unmount right as the blob preview landed, dropping the image node
-  //     before file-upload.ts could swap in the CDN URL — the user would watch
-  //     the image flash on and vanish. Stable identity is what makes
-  //     first-upload-creates-session behave like every later upload.
+  //   - Session switch / lazy create: sending from a brand-new chat flips
+  //     `activeSessionId` from null → uuid while an upload's blob preview may
+  //     still be in the document. A session-keyed editor would unmount right
+  //     then, dropping the image node before file-upload.ts could swap in the
+  //     CDN URL — the user would watch the image flash on and vanish. Stable
+  //     identity is what makes first-upload-creates-session behave like every
+  //     later upload.
   // Embedded surfaces (Agent Builder) still pass `editorKeyOverride` to isolate
   // their own composer.
   const draftKey = draftKeyOverride ?? activeSessionId ?? DRAFT_NEW_SESSION;
@@ -251,6 +251,12 @@ export function ChatInput({
   // image would leave stuck (MUL-4808).
   const uploadGate = useUploadGate(editorRef);
 
+  // Reactive mirror of `editorDraftKeyRef` for the live-editor registry: a
+  // write-back may insert into this editor only while its DOCUMENT belongs to
+  // the settling draft, and a ref advance alone re-runs no effect. Updated by
+  // the adopt layout effect below, alongside the ref.
+  const [loadedDraftKey, setLoadedDraftKey] = useState(draftKey);
+
   // Store-backed accessors for one draft slot, buildable for ANY key: the
   // engine snapshots `resolveUploadTarget()` at pick time so an upload lands
   // in — and settles against — the draft the editor was HOLDING, even if the
@@ -281,6 +287,7 @@ export function ChatInput({
     gate,
   } = useCoordinatedUploads(uploadBinding, storeUploads, {}, uploadGate, editorRef, {
     resolveUploadTarget: () => makeUploadBinding(editorDraftKeyRef.current),
+    liveRegistryKey: `chat:${loadedDraftKey}`,
   });
 
   // Move the editor from the draft it holds to the draft that is selected.
@@ -325,6 +332,7 @@ export function ChatInput({
       commitDraft(loadedKey, pending);
     }
     editorDraftKeyRef.current = draftKey;
+    setLoadedDraftKey(draftKey);
     if (!deferredAdoptRef.current) return;
     deferredAdoptRef.current = false;
     const incoming = useChatStore.getState().inputDrafts[draftKey] ?? "";

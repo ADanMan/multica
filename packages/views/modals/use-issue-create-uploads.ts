@@ -16,7 +16,7 @@
  */
 
 import { useMemo, type RefObject } from "react";
-import type { DraftUpload } from "@multica/core/drafts";
+import { attachmentToDraftUpload, type DraftUpload } from "@multica/core/drafts";
 import { useIssueDraftStore } from "@multica/core/issues/stores";
 import type { CreateMode } from "@multica/core/issues/stores";
 import type { UploadGate } from "../editor/use-upload-gate";
@@ -58,18 +58,11 @@ export function useIssueCreateUploads(
       settleUpload: (id, att) => {
         const cur = sharedUploads();
         if (!cur.some((u) => u.clientUploadId === id)) return;
+        // attachmentToDraftUpload strips the response-scoped signed
+        // download_url before the row is persisted.
         setSharedUploads(
           cur.map((u) =>
-            u.clientUploadId === id
-              ? {
-                  clientUploadId: id,
-                  status: "uploaded",
-                  filename: att.filename,
-                  size: att.size_bytes,
-                  contentType: att.content_type || undefined,
-                  attachment: att,
-                }
-              : u,
+            u.clientUploadId === id ? { ...attachmentToDraftUpload(att), clientUploadId: id } : u,
           ),
         );
       },

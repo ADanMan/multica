@@ -42,6 +42,7 @@ import { toast } from "sonner";
 import { api } from "@multica/core/api";
 import {
   startUpload,
+  abortUpload,
   hasUploadingDraft,
   attachmentToDraftUpload,
   type DraftUpload,
@@ -195,6 +196,13 @@ export function useCoordinatedUploads(
      * is selected by the time the request finishes. Defaults to `binding`.
      */
     resolveUploadTarget?: () => UploadDraftBinding;
+    /**
+     * Registry key to register this mount's editor under, when it differs
+     * from `binding.registryKey`. Same divergence as above: a write-back must
+     * insert into the editor only if its DOCUMENT belongs to the settling
+     * draft, so composers with a pinnable editor register the LOADED key.
+     */
+    liveRegistryKey?: string;
   },
 ): CoordinatedUploads {
   const { t } = useT("editor");
@@ -217,7 +225,7 @@ export function useCoordinatedUploads(
     };
   }, []);
 
-  const registryKey = binding?.registryKey;
+  const registryKey = opts?.liveRegistryKey ?? binding?.registryKey;
   useEffect(() => {
     if (!registryKey) return;
     liveEditors.set(registryKey, editorRef);
@@ -336,6 +344,10 @@ export function useCoordinatedUploads(
 
   const removeUpload = useCallback(
     (clientUploadId: string) => {
+      // If the request is still in flight, cancel it — the placeholder is
+      // gone, so a late settle would only be discarded by the generation
+      // guard anyway. No-op for settled/failed entries.
+      abortUpload(clientUploadId);
       if (binding) binding.removeUpload(clientUploadId);
       else setLocalUploads((prev) => prev.filter((u) => u.clientUploadId !== clientUploadId));
     },

@@ -208,7 +208,9 @@ export const useIssueDraftStore = create<IssueDraftStore>()(
           manual.description ||
           agent.prompt ||
           Object.keys(manual.propertyValues).length > 0 ||
-          shared.attachments.length > 0
+          // Recoverable uploads only: a failed/interrupted remnant the user
+          // never dismissed must not pin the sidebar's draft dot forever.
+          shared.attachments.some((u) => u.status === "uploaded" || u.status === "uploading")
         );
       },
     }),

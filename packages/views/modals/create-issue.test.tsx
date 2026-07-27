@@ -36,7 +36,6 @@ const mockSetKeepOpen = vi.hoisted(() => vi.fn());
 const mockToastCustom = vi.hoisted(() => vi.fn());
 const mockToastDismiss = vi.hoisted(() => vi.fn());
 const mockToastError = vi.hoisted(() => vi.fn());
-const mockUploadWithToast = vi.hoisted(() => vi.fn());
 // Uploads flow through the module-level coordinator, which calls
 // `api.uploadFile(file, ctx, signal)` (MUL-5181 L2). Tests drive uploads by
 // mocking that call; it resolves a plain server Attachment row.
@@ -233,7 +232,7 @@ vi.mock("@multica/core/hooks/use-file-upload", async () => ({
   ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
     "@multica/core/hooks/use-file-upload",
   )),
-  useFileUpload: () => ({ uploadWithToast: mockUploadWithToast }),
+  useFileUpload: () => ({ uploadWithToast: vi.fn() }),
 }));
 
 // Hoisted ApiError class so both the vi.mock factory and the tests below
@@ -371,11 +370,6 @@ vi.mock("../editor", async () => {
   return {
     ...uploadGate,
     ...composer,
-    useEditorUpload: () => ({
-      uploadWithToast: mockUploadWithToast,
-      upload: vi.fn(),
-      uploading: false,
-    }),
     useFileDropZone: () => ({ isDragOver: false, dropZoneProps: {} }),
     FileDropOverlay: () => null,
     ContentEditor,
@@ -575,25 +569,6 @@ describe("CreateIssueModal", () => {
       next.manual.assigneeType = mockDraftStore.lastAssigneeType;
       next.manual.assigneeId = mockDraftStore.lastAssigneeId;
       mockDraftStore.draft = next;
-    });
-    mockUploadWithToast.mockResolvedValue({
-      id: "11111111-2222-3333-4444-555555555555",
-      workspace_id: "ws-test",
-      issue_id: null,
-      comment_id: null,
-      chat_session_id: null,
-      chat_message_id: null,
-      uploader_type: "member",
-      uploader_id: "user-1",
-      filename: "shot.png",
-      url: "https://cdn.example.test/shot.png",
-      download_url: "https://cdn.example.test/shot.png?Signature=fresh",
-      markdown_url: "https://multica-api.copilothub.ai/api/attachments/11111111-2222-3333-4444-555555555555/download",
-      content_type: "image/png",
-      size_bytes: 123,
-      created_at: "2026-06-12T00:00:00Z",
-      link: "https://cdn.example.test/shot.png",
-      markdownLink: "https://multica-api.copilothub.ai/api/attachments/11111111-2222-3333-4444-555555555555/download",
     });
     mockApiUploadFile.mockResolvedValue({
       id: "11111111-2222-3333-4444-555555555555",
@@ -844,6 +819,13 @@ describe("CreateIssueModal", () => {
       expect(uploads[0]).toMatchObject({ status: "uploaded", filename: "shot.png" });
       expect(uploads[0]?.attachment?.id).toBe("11111111-2222-3333-4444-555555555555");
     });
+    // The response-scoped signed download_url must never be persisted — the
+    // draft survives dialog closes, and a stale signature would 403 the
+    // preview on reopen. Durable render paths re-resolve via markdown_url.
+    expect(mockDraftStore.draft.shared.attachments[0]?.attachment?.download_url).toBe("");
+    expect(
+      mockDraftStore.draft.shared.attachments[0]?.attachment?.download_url,
+    ).not.toContain("Signature=");
   });
 
   it("reuses draft attachments after reopening manual create so pasted images can render and bind", async () => {
@@ -939,6 +921,49 @@ describe("CreateIssueModal", () => {
     await waitFor(() => {
       expect(mockSetShared).toHaveBeenCalledWith({
         attachments: [expect.objectContaining({ clientUploadId: referenced.id })],
+      });
+    });
+  });
+
+  it("mount prune keeps in-flight placeholders while dropping unreferenced uploaded rows", async () => {
+    // Reopen-while-uploading: the placeholder has no body reference yet (the
+    // chips are its only UI), so the mount prune must never touch it —
+    // dropping it here would let the settle hit the generation guard and
+    // silently discard the file.
+    const orphanRow = {
+      id: "99999999-8888-7777-6666-555555555555",
+      workspace_id: "ws-test",
+      issue_id: null,
+      comment_id: null,
+      chat_session_id: null,
+      chat_message_id: null,
+      uploader_type: "member",
+      uploader_id: "user-1",
+      filename: "orphan.png",
+      url: "https://cdn.example.test/orphan.png",
+      download_url: "",
+      markdown_url: "https://multica-api.copilothub.ai/api/attachments/99999999-8888-7777-6666-555555555555/download",
+      content_type: "image/png",
+      size_bytes: 5,
+      created_at: "2026-06-12T00:00:00Z",
+    };
+    mockDraftStore.draft.manual.title = "Reopened";
+    mockDraftStore.draft.shared.attachments = [
+      { clientUploadId: "c-flight", status: "uploading", filename: "mid.png", size: 9 },
+      {
+        clientUploadId: orphanRow.id,
+        status: "uploaded",
+        filename: orphanRow.filename,
+        size: orphanRow.size_bytes,
+        attachment: orphanRow,
+      },
+    ];
+
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(mockSetShared).toHaveBeenCalledWith({
+        attachments: [expect.objectContaining({ clientUploadId: "c-flight" })],
       });
     });
   });

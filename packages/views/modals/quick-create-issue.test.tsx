@@ -10,7 +10,6 @@ const mockSetQuickCreateFieldVisible = vi.hoisted(() => vi.fn());
 const mockSetKeepOpen = vi.hoisted(() => vi.fn());
 const mockSetLastMode = vi.hoisted(() => vi.fn());
 const mockToastSuccess = vi.hoisted(() => vi.fn());
-const mockUploadWithToast = vi.hoisted(() => vi.fn());
 // Uploads flow through the module-level coordinator, which calls
 // `api.uploadFile(file, ctx, signal)` (MUL-5181 L2).
 const mockApiUploadFile = vi.hoisted(() => vi.fn());
@@ -189,7 +188,7 @@ vi.mock("@multica/core/hooks/use-file-upload", async () => ({
   ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
     "@multica/core/hooks/use-file-upload",
   )),
-  useFileUpload: () => ({ uploadWithToast: mockUploadWithToast, uploading: false }),
+  useFileUpload: () => ({ uploadWithToast: vi.fn(), uploading: false }),
 }));
 
 vi.mock("../issues/components/pickers/assignee-picker", () => ({
@@ -310,11 +309,6 @@ vi.mock("../editor", async () => {
   return {
     ...uploadGate,
     ...composer,
-    useEditorUpload: () => ({
-      uploadWithToast: mockUploadWithToast,
-      upload: vi.fn(),
-      uploading: false,
-    }),
     ContentEditor,
     useFileDropZone: () => ({ isDragOver: false, dropZoneProps: {} }),
     FileDropOverlay: () => null,
@@ -406,9 +400,10 @@ vi.mock("sonner", () => ({
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../locales/en/common.json";
 import enModals from "../locales/en/modals.json";
+import enEditor from "../locales/en/editor.json";
 import { AgentCreatePanel } from "./quick-create-issue";
 
-const TEST_RESOURCES = { en: { common: enCommon, modals: enModals } };
+const TEST_RESOURCES = { en: { common: enCommon, modals: enModals, editor: enEditor } };
 
 function renderPanel(props: React.ComponentProps<typeof AgentCreatePanel>) {
   return render(
@@ -446,23 +441,6 @@ describe("AgentCreatePanel", () => {
     mockSquadsData.list = [];
     mockQuickCreateIssue.mockResolvedValue(undefined);
     mockApiUploadFile.mockResolvedValue({
-      id: "019ec09d-6222-722b-bdfa-427b105d80be",
-      workspace_id: "ws-test",
-      issue_id: null,
-      comment_id: null,
-      chat_session_id: null,
-      chat_message_id: null,
-      uploader_type: "member",
-      uploader_id: "user-1",
-      filename: "shot.png",
-      url: "/uploads/shot.png",
-      download_url: "/api/attachments/019ec09d-6222-722b-bdfa-427b105d80be/download",
-      markdown_url: "/api/attachments/019ec09d-6222-722b-bdfa-427b105d80be/download",
-      content_type: "image/png",
-      size_bytes: 5,
-      created_at: "2026-06-12T00:00:00Z",
-    });
-    mockUploadWithToast.mockResolvedValue({
       id: "019ec09d-6222-722b-bdfa-427b105d80be",
       workspace_id: "ws-test",
       issue_id: null,

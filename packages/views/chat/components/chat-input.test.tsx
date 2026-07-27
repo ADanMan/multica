@@ -253,9 +253,12 @@ beforeEach(() => {
     state.inputDrafts[key] = value;
   });
   state.appendToInputDraft.mockClear();
+  // Mirrors the real store: trailing whitespace trimmed before the separator.
   state.appendToInputDraft.mockImplementation((key: string, markdown: string) => {
     const existing = state.inputDrafts[key] ?? "";
-    state.inputDrafts[key] = existing.trim() ? `${existing}\n\n${markdown}` : markdown;
+    state.inputDrafts[key] = existing.trim()
+      ? `${existing.replace(/\s+$/, "")}\n\n${markdown}`
+      : markdown;
   });
   state.setInputDraftAttachments.mockClear();
   state.setInputDraftAttachments.mockImplementation((key: string, uploads: DraftUpload[]) => {
@@ -782,6 +785,27 @@ describe("ChatInput attachment wiring", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
     const [, ids] = onSend.mock.calls[0]!;
     expect(ids).toEqual(["att-slow"]);
+  });
+
+  it("keeps an in-flight placeholder while the user keeps typing", () => {
+    // commitDraft prunes uploaded rows the body no longer references; a
+    // placeholder has no body reference yet, so a keystroke must never prune
+    // it — that would drop the chip and strand the settle on the guard.
+    const state = useChatStore.getState() as unknown as {
+      inputDraftAttachments: Record<string, DraftUpload[]>;
+    };
+    state.inputDraftAttachments["__draft_new__"] = [
+      { clientUploadId: "c-flight", status: "uploading", filename: "up.png", size: 1 },
+    ];
+    renderInput();
+
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "still typing" } });
+
+    expect(state.inputDraftAttachments["__draft_new__"]).toHaveLength(1);
+    expect(state.inputDraftAttachments["__draft_new__"]?.[0]).toMatchObject({
+      status: "uploading",
+      clientUploadId: "c-flight",
+    });
   });
 
   it("does not render the file upload button when uploads are disabled", () => {
