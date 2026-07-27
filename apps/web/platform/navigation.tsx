@@ -31,6 +31,20 @@ function useInternalLinkHandler(push: (path: string) => void) {
   }, [push]);
 }
 
+/**
+ * Keep the in-app depth honest about history traversals — the browser's own
+ * Back/Forward buttons and `router.back()` both land here. Without it a push
+ * followed by a browser Back would still look like "there is a page behind
+ * us" while sitting on the entry the document opened at.
+ */
+function useHistoryTraversalTracking() {
+  useEffect(() => {
+    const onPopState = () => inAppHistory.recordTraversal();
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+}
+
 function NavigationProviderInner({
   children,
 }: {
@@ -47,6 +61,7 @@ function NavigationProviderInner({
     [router],
   );
   useInternalLinkHandler(push);
+  useHistoryTraversalTracking();
 
   const adapter: NavigationAdapter = {
     push,

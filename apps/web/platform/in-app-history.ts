@@ -10,9 +10,17 @@
  * The Navigation API answers exactly the right question: `entries()` spans
  * only the contiguous same-origin run around the current entry, so arriving
  * from an external site reports `canGoBack === false` even though the browser
- * technically has somewhere to go. Where it is unavailable we fall back to
- * counting the pushes this adapter performed in this document, which is zero
- * for every cold-open case.
+ * technically has somewhere to go.
+ *
+ * Where it is unavailable we track our own depth: how many in-app pushes are
+ * still "below" the current entry. A push adds one; any history traversal
+ * (browser Back/Forward, or our own `back()`) may have moved us off that
+ * entry, so it takes one away. Since reaching the document's first entry
+ * requires traversing back at least as many times as we pushed, a positive
+ * depth can never be claimed while sitting on it — the failure direction is
+ * always "report no history and use the fallback", never "step off the app".
+ * Going forward again is the cost: the depth stays spent, so we fall back
+ * where a step back would in fact have been fine.
  */
 
 /** Minimal shape of the Navigation API — not in TypeScript's DOM lib yet. */
@@ -32,14 +40,22 @@ export function probeNavigationApi(): boolean | undefined {
 export function createInAppHistoryTracker(
   probe: () => boolean | undefined = probeNavigationApi,
 ) {
-  let pushes = 0;
+  let depth = 0;
   return {
-    /** Call for every in-app push; a push is what creates something to go back to. */
+    /** An in-app push: the entry it creates has this page behind it. */
     recordPush(): void {
-      pushes += 1;
+      depth += 1;
+    },
+    /**
+     * A history traversal — `popstate`. We can't tell forward from back
+     * without the Navigation API, so assume the direction that can only cost
+     * us a `back()` we were entitled to, never one we weren't.
+     */
+    recordTraversal(): void {
+      depth = Math.max(0, depth - 1);
     },
     canGoBack(): boolean {
-      return probe() ?? pushes > 0;
+      return probe() ?? depth > 0;
     },
   };
 }

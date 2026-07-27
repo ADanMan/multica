@@ -19,8 +19,10 @@ import { useNavigation } from "./context";
  * can't report history (test stubs, the desktop issue window) always take this
  * branch, which is exactly the pre-existing behaviour.
  *
- * Always `replace`, never `push`: the page we are leaving is dead, so its URL
- * must not stay in history for the back button to land on a 404.
+ * Never `push`: the page we are leaving is dead, so its URL must not be left
+ * on the back stack for the back button to land on a 404. Stepping back still
+ * leaves it ahead of us in forward history — that is the browser's own
+ * contract, and reachable only by an explicit Forward.
  */
 export function useBackOrReplace(): (fallback: string) => void {
   const { back, replace, canGoBack } = useNavigation();
