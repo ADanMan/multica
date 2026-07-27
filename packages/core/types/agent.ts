@@ -169,15 +169,50 @@ export interface UpdateRuntimeProfileRequest {
   enabled?: boolean;
 }
 
-// Coarse classifier set by the backend when a task transitions to "failed".
-// Mirrors the migration-055 enum in agent_task_queue.failure_reason. Used by
-// the agent presence derivation and the UI failure-message lookup.
+// Classifier set by the backend when a task transitions to "failed".
+// Mirrors `server/pkg/taskfailure` — the source of truth.
+//
+// This list used to hold only the six coarse values from migration 055. The
+// backend moved to the refined taxonomy in MUL-2946 and this type was never
+// updated, so every `agent_error.*` value missed the UI's copy lookups and
+// rendered a generic "something went wrong" line instead — including the
+// skill-bundle stall in MUL-5370. Keep this in lock-step with the Go
+// constants, and route lookups through `resolveFailureReasonKey` so a value
+// added on the server before a client ships still degrades to its coarse
+// family rather than to nothing.
 export type TaskFailureReason =
-  | "agent_error"
-  | "timeout"
-  | "codex_semantic_inactivity"
+  // Platform / scheduler side (no `agent_error.` prefix).
+  | "queued_expired"
   | "runtime_offline"
   | "runtime_recovery"
+  | "timeout"
+  | "iteration_limit"
+  | "agent_blocked"
+  | "api_invalid_request"
+  | "skill_bundle_unavailable"
+  // Agent process side.
+  | "agent_error.provider_auth_or_access"
+  | "agent_error.provider_quota_limit"
+  | "agent_error.provider_capacity_or_rate_limit"
+  | "agent_error.provider_server_error"
+  | "agent_error.provider_network"
+  | "agent_error.process_failure"
+  | "agent_error.empty_or_unparseable_output"
+  | "agent_error.agent_timeout"
+  | "agent_error.context_overflow"
+  | "agent_error.missing_config"
+  | "agent_error.model_not_found_or_unavailable"
+  | "agent_error.runtime_version_unsupported"
+  | "agent_error.runtime_missing_executable"
+  | "agent_error.unknown"
+  // Operational values outside the canonical taxonomy, plus the legacy
+  // coarse `agent_error` still carried by rows written before MUL-2946.
+  | "agent_error"
+  | "codex_semantic_inactivity"
+  | "agent_fallback_message"
+  | "idle_watchdog"
+  | "local_directory_error"
+  | "cancelled"
   | "manual";
 
 // One daily bucket for the Agents-list ACTIVITY sparkline. The back-end

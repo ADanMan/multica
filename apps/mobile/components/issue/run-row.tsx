@@ -11,6 +11,7 @@
  * ok-plan-linked-taco.md.
  */
 import { Alert, Pressable, View } from "react-native";
+import { resolveFailureReasonKey } from "@multica/core/agents/failure-reason";
 import type { AgentTask, TaskFailureReason } from "@multica/core/types";
 import { Text } from "@/components/ui/text";
 import { ActorAvatar } from "@/components/ui/actor-avatar";
@@ -65,9 +66,14 @@ function StatusBadge({ task }: { task: AgentTask }) {
   const label = STATUS_LABEL[task.status] ?? task.status;
   const cls = STATUS_CLASS[task.status] ?? "text-muted-foreground";
   // For failed tasks, surface the failure_reason inline so users don't have
-  // to drill in. Reasons are coarse enums; missing/empty stays as just "Failed".
+  // to drill in. A refined reason this build doesn't name degrades to its
+  // coarse family; missing/empty/unrecognisable stays as just "Failed".
   if (task.status === "failed" && task.failure_reason) {
-    const reasonLabel = FAILURE_REASON_LABEL[task.failure_reason];
+    const reasonKey = resolveFailureReasonKey(
+      task.failure_reason,
+      FAILURE_REASON_LABEL,
+    );
+    const reasonLabel = reasonKey && FAILURE_REASON_LABEL[reasonKey];
     if (reasonLabel) {
       return (
         <Text className={`text-xs ${cls}`}>
@@ -150,11 +156,36 @@ const STATUS_CLASS: Record<AgentTask["status"], string> = {
   cancelled: "text-muted-foreground",
 };
 
-const FAILURE_REASON_LABEL: Record<TaskFailureReason, string> = {
-  agent_error: "Agent error",
-  timeout: "Timeout",
-  codex_semantic_inactivity: "Codex inactivity",
+// Partial by design — read through resolveFailureReasonKey so an unnamed
+// `agent_error.*` degrades to the family line instead of disappearing.
+const FAILURE_REASON_LABEL: Partial<Record<TaskFailureReason, string>> = {
+  queued_expired: "Queue expired",
   runtime_offline: "Runtime offline",
   runtime_recovery: "Runtime recovery",
+  timeout: "Timeout",
+  iteration_limit: "Iteration limit",
+  agent_blocked: "Needs input",
+  api_invalid_request: "Request rejected",
+  skill_bundle_unavailable: "Skill download failed",
+  agent_error: "Agent error",
+  "agent_error.provider_auth_or_access": "Auth failed",
+  "agent_error.provider_quota_limit": "Quota exhausted",
+  "agent_error.provider_capacity_or_rate_limit": "Rate-limited",
+  "agent_error.provider_server_error": "Provider error",
+  "agent_error.provider_network": "Network error",
+  "agent_error.process_failure": "Process crashed",
+  "agent_error.empty_or_unparseable_output": "Unreadable output",
+  "agent_error.agent_timeout": "Agent timeout",
+  "agent_error.context_overflow": "Context overflow",
+  "agent_error.missing_config": "Config missing",
+  "agent_error.model_not_found_or_unavailable": "Model unavailable",
+  "agent_error.runtime_version_unsupported": "CLI too old",
+  "agent_error.runtime_missing_executable": "CLI not found",
+  "agent_error.unknown": "Agent error",
+  codex_semantic_inactivity: "Codex inactivity",
+  agent_fallback_message: "Fallback message",
+  idle_watchdog: "Went idle",
+  local_directory_error: "Directory unavailable",
+  cancelled: "Cancelled",
   manual: "Manual",
 };

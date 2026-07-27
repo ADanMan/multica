@@ -62,6 +62,7 @@
     "./agents": "./agents/index.ts",
     "./agents/queries": "./agents/queries.ts",
     "./agents/derive-presence": "./agents/derive-presence.ts",
+    "./agents/failure-reason": "./agents/failure-reason.ts",
     "./agents/use-agent-presence": "./agents/use-agent-presence.ts",
     "./agents/visibility-label": "./agents/visibility-label.ts",
     "./agents/stores": "./agents/stores/index.ts",

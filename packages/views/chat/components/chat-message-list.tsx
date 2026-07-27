@@ -25,6 +25,7 @@ import { RichContentScrollRootProvider } from "../../rich-content/scroll-root";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { AttachmentList } from "../../issues/components/comment-card";
 import type { AgentAvailability } from "@multica/core/agents";
+import { resolveFailureReasonKey } from "@multica/core/agents";
 import type {
   ChatMessage,
   ChatPendingTask,
@@ -602,19 +603,41 @@ function FailureBubble({
   // Chat gets its own friendly, reassuring copy per failure reason — plain
   // language + a "try again" nudge — instead of the terse developer labels
   // (`failureReasonLabel`) used on the agent-detail / execution-log surfaces.
-  // An unknown reason (a future enum value this build doesn't ship yet) falls
-  // back to a generic friendly line. The raw error stays tucked under the
-  // collapsible below for anyone who wants the technical detail.
-  const chatFailureCopy: Record<TaskFailureReason, string> = {
+  // The raw error stays tucked under the collapsible below for anyone who
+  // wants the technical detail.
+  //
+  // Partial by design: the backend taxonomy is larger than the set worth
+  // writing distinct chat copy for. `resolveFailureReasonKey` degrades a
+  // refined reason to its `agent_error` family, so an entry only earns its
+  // place here when it can say something the family line can't — usually a
+  // different next step (re-auth, top up, check the network). Only a reason
+  // with no family copy at all reaches the generic fallback.
+  const chatFailureCopy: Partial<Record<TaskFailureReason, string>> = {
     agent_error: t(($) => $.message_list.failure.agent_error),
     timeout: t(($) => $.message_list.failure.timeout),
     codex_semantic_inactivity: t(($) => $.message_list.failure.codex_semantic_inactivity),
     runtime_offline: t(($) => $.message_list.failure.runtime_offline),
     runtime_recovery: t(($) => $.message_list.failure.runtime_recovery),
     manual: t(($) => $.message_list.failure.manual),
+    cancelled: t(($) => $.message_list.failure.manual),
+    skill_bundle_unavailable: t(($) => $.message_list.failure.skill_bundle_unavailable),
+    "agent_error.provider_network": t(($) => $.message_list.failure.provider_network),
+    "agent_error.provider_auth_or_access": t(($) => $.message_list.failure.provider_auth_or_access),
+    "agent_error.provider_quota_limit": t(($) => $.message_list.failure.provider_quota_limit),
+    "agent_error.provider_capacity_or_rate_limit": t(
+      ($) => $.message_list.failure.provider_capacity_or_rate_limit,
+    ),
+    "agent_error.context_overflow": t(($) => $.message_list.failure.context_overflow),
+    "agent_error.runtime_missing_executable": t(
+      ($) => $.message_list.failure.runtime_missing_executable,
+    ),
+    "agent_error.runtime_version_unsupported": t(
+      ($) => $.message_list.failure.runtime_version_unsupported,
+    ),
   };
+  const copyKey = resolveFailureReasonKey(reason, chatFailureCopy);
   const label =
-    chatFailureCopy[reason as TaskFailureReason] ??
+    (copyKey && chatFailureCopy[copyKey]) ??
     t(($) => $.message_list.failure.fallback);
 
   return (
