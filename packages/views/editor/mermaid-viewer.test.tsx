@@ -30,12 +30,15 @@ const SVG = '<svg viewBox="0 0 1000 500"><text>mock diagram</text></svg>';
 const VIEWER_DOC = "<!doctype html><html><body>mock</body></html>";
 const LAYOUT = { width: 1000, height: 500 };
 
-// The canvas measures itself with getBoundingClientRect, which jsdom always
-// reports as 0x0. Without a real viewport the transform math has nothing to
-// fit against and every gesture is a no-op, so pin a deterministic size.
+// The canvas measures itself from its layout box and converts pointer
+// coordinates through its client rect; jsdom reports both as 0. Without a real
+// viewport the transform math has nothing to fit against and every gesture is
+// a no-op, so pin a deterministic size for both.
 const VIEWPORT = { width: 800, height: 400 };
 
 function stubViewportSize() {
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(VIEWPORT.width);
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(VIEWPORT.height);
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
     bottom: VIEWPORT.height,
     height: VIEWPORT.height,
@@ -75,7 +78,7 @@ function canvas(): HTMLElement {
 }
 
 function content(): HTMLElement {
-  return document.querySelector<HTMLElement>(".mermaid-viewer-content")!;
+  return document.querySelector<HTMLElement>(".zoom-canvas-content")!;
 }
 
 /** Reads the applied scale back out of the inline transform. */
