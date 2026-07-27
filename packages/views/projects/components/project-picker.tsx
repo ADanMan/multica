@@ -81,10 +81,7 @@ export function ProjectPicker({
     <div className="group/project relative inline-flex min-w-0">
       <PropertyPicker
         open={open}
-        onOpenChange={(v: boolean) => {
-          setOpen(v);
-          if (!v) setFilter("");
-        }}
+        onOpenChange={setOpen}
         width="w-52"
         align={align}
         searchable

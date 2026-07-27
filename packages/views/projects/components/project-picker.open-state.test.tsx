@@ -147,4 +147,26 @@ describe("ProjectPicker search", () => {
     expect(screen.getByText("No results")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /mobile web/i })).not.toBeInTheDocument();
   });
+
+  // Regression: selecting a row closes the popover by calling `setOpen(false)`
+  // directly, which never routes through PropertyPicker's own open-change
+  // handler — the only place that used to reset the query. The stale search
+  // term survived into the next open and kept the rest of the list hidden.
+  it("resets the search term after selecting a match and reopening", async () => {
+    const user = userEvent.setup();
+
+    render(<CreateDialogHarness onUpdate={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /no project/i }));
+    await user.type(await screen.findByPlaceholderText("Search projects..."), "mobile");
+    await user.click(await screen.findByRole("button", { name: /mobile web/i }));
+    await expectClosed();
+
+    // Reopen: the input must be empty and the full list restored.
+    await user.click(screen.getByRole("button", { name: /mobile web/i }));
+    const reopened = await screen.findByPlaceholderText("Search projects...");
+    expect(reopened).toHaveValue("");
+    expect(screen.getByRole("button", { name: /launch command center/i })).toBeInTheDocument();
+    expect(screen.getByText("数据透明化")).toBeInTheDocument();
+  });
 });
