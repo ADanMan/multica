@@ -76,10 +76,10 @@ export function attachmentToDraftUpload(attachment: Attachment): UploadedDraftUp
     size: attachment.size_bytes,
     contentType: attachment.content_type || undefined,
     // `download_url` is minted for the current API response and may be a
-    // short-lived signed URL. Draft uploads survive dialog closes and app
-    // restarts, so persist only durable fields — render/download paths
-    // re-resolve through id/markdown_url (and content-editor's session merge
-    // backfills an empty download_url from the live upload result).
+    // short-lived signed URL; draft uploads survive dialog closes and app
+    // restarts, so it is stripped here. `url`/`markdown_url` stay as the
+    // durable render/download paths, and content-editor's session merge
+    // backfills an empty download_url from the live upload result.
     attachment: { ...attachment, download_url: "" },
   };
 }

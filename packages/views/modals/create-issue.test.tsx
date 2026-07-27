@@ -226,14 +226,6 @@ vi.mock("@multica/core/properties", async (importOriginal) => {
   };
 });
 
-vi.mock("@multica/core/hooks/use-file-upload", async () => ({
-  // Keep the real `toUploadResult` (the upload engine calls it on settle);
-  // only the hook itself is stubbed.
-  ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
-    "@multica/core/hooks/use-file-upload",
-  )),
-  useFileUpload: () => ({ uploadWithToast: vi.fn() }),
-}));
 
 // Hoisted ApiError class so both the vi.mock factory and the tests below
 // can construct/instanceof-check the same identity. vi.mock is hoisted, so
@@ -823,9 +815,6 @@ describe("CreateIssueModal", () => {
     // draft survives dialog closes, and a stale signature would 403 the
     // preview on reopen. Durable render paths re-resolve via markdown_url.
     expect(mockDraftStore.draft.shared.attachments[0]?.attachment?.download_url).toBe("");
-    expect(
-      mockDraftStore.draft.shared.attachments[0]?.attachment?.download_url,
-    ).not.toContain("Signature=");
   });
 
   it("reuses draft attachments after reopening manual create so pasted images can render and bind", async () => {

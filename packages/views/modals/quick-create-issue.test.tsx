@@ -182,14 +182,6 @@ vi.mock("@multica/core/runtimes", () => ({
   MIN_QUICK_CREATE_CLI_VERSION: "1.0.0",
 }));
 
-vi.mock("@multica/core/hooks/use-file-upload", async () => ({
-  // Keep the real `toUploadResult` (the upload engine calls it on settle);
-  // only the hook itself is stubbed.
-  ...(await vi.importActual<typeof import("@multica/core/hooks/use-file-upload")>(
-    "@multica/core/hooks/use-file-upload",
-  )),
-  useFileUpload: () => ({ uploadWithToast: vi.fn(), uploading: false }),
-}));
 
 vi.mock("../issues/components/pickers/assignee-picker", () => ({
   canAssignAgent: () => true,

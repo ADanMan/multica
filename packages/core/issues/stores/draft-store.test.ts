@@ -317,6 +317,43 @@ describe("issue draft store — legacy rehydrate", () => {
   });
 });
 
+describe("issue draft store — hasDraft upload semantics", () => {
+  beforeEach(() => {
+    useIssueDraftStore.setState(RESET_STATE);
+  });
+
+  const placeholder = (status: "uploading" | "uploaded" | "failed" | "interrupted") =>
+    ({
+      clientUploadId: `c-${status}`,
+      status,
+      filename: "f.png",
+      size: 1,
+      ...(status === "uploaded"
+        ? {
+            attachment: {
+              id: "att-1",
+              filename: "f.png",
+              url: "https://cdn.example.test/f.png",
+            },
+          }
+        : {}),
+    }) as never;
+
+  it("counts uploaded and uploading entries as recoverable draft intent", () => {
+    const { setShared, hasDraft } = useIssueDraftStore.getState();
+    setShared({ attachments: [placeholder("uploading")] });
+    expect(hasDraft()).toBe(true);
+    setShared({ attachments: [placeholder("uploaded")] });
+    expect(hasDraft()).toBe(true);
+  });
+
+  it("ignores failed/interrupted remnants so they cannot pin the sidebar dot", () => {
+    const { setShared, hasDraft } = useIssueDraftStore.getState();
+    setShared({ attachments: [placeholder("failed"), placeholder("interrupted")] });
+    expect(hasDraft()).toBe(false);
+  });
+});
+
 describe("issue draft store — logout cleanup", () => {
   beforeEach(() => {
     localStorage.clear();

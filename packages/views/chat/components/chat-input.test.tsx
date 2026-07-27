@@ -13,6 +13,9 @@ import enEditor from "../../locales/en/editor.json";
 // mocking that call; it resolves a server Attachment row (makeUpload's extra
 // link/markdownLink fields are ignored by the engine, which re-derives them).
 const mockApiUploadFile = vi.hoisted(() => vi.fn());
+// Observability for the write-back insert path: a settle whose mount died
+// delivers into the live editor through this method.
+const insertMarkdownSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
   api: { uploadFile: mockApiUploadFile },
@@ -136,6 +139,12 @@ vi.mock("../../editor", async () => ({
         }
       },
       hasActiveUploads: () => uploadingRef.current > 0,
+      insertMarkdownAtEnd: (md: string) => {
+        insertMarkdownSpy(md);
+        valueRef.current = `${valueRef.current}\n\n${md}`.trim();
+        onUpdate?.(valueRef.current);
+        return true;
+      },
       // This mock emits onUpdate synchronously, so a pending debounced update
       // never exists and there is nothing to hand back. The real debounce (and
       // the draft-switch flush that depends on it) is covered against the real
@@ -330,6 +339,7 @@ beforeEach(() => {
   mockApiUploadFile.mockImplementation(async () =>
     makeUpload({ id: "att-1", link: "https://cdn.example/att-1.png", filename: "img.png" }),
   );
+  insertMarkdownSpy.mockReset();
 });
 
 function renderInput(props: Partial<React.ComponentProps<typeof ChatInput>> = {}) {
@@ -785,6 +795,71 @@ describe("ChatInput attachment wiring", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
     const [, ids] = onSend.mock.calls[0]!;
     expect(ids).toEqual(["att-slow"]);
+  });
+
+  it("delivers a dead mount's settle into the editor still HOLDING that draft, not the selected one", async () => {
+    const state = useChatStore.getState() as unknown as {
+      activeSessionId: string | null;
+      inputDrafts: Record<string, string>;
+      inputDraftAttachments: Record<string, DraftUpload[]>;
+    };
+
+    // Mount #1 composes to session-a and starts an upload that outlives it.
+    state.activeSessionId = "session-a";
+    let resolveA!: (v: UploadResult) => void;
+    mockApiUploadFile.mockImplementationOnce(
+      () => new Promise<UploadResult>((r) => (resolveA = r)),
+    );
+    const first = render(element({}));
+    await act(async () => {
+      dropHandlers.onDrop?.([new File(["x"], "a.png", { type: "image/png" })]);
+      await Promise.resolve();
+    });
+    first.unmount();
+
+    // Mount #2 also loads session-a, then gets PINNED to it by its own upload
+    // while the user switches selection to session-b: loaded=A, selected=B.
+    let resolveB!: (v: UploadResult) => void;
+    mockApiUploadFile.mockImplementationOnce(
+      () => new Promise<UploadResult>((r) => (resolveB = r)),
+    );
+    const second = render(element({}));
+    await act(async () => {
+      dropHandlers.onDrop?.([new File(["y"], "b.png", { type: "image/png" })]);
+      await Promise.resolve();
+    });
+    state.activeSessionId = "session-b";
+    second.rerender(element({}));
+
+    // Mount #1's upload settles. Its target draft is session-a — which mount
+    // #2's editor is HOLDING (not showing as selected). The registry must be
+    // keyed by the LOADED draft, so the insert reaches that document; keying
+    // by selection would misroute or drop it.
+    await act(async () => {
+      resolveA(
+        makeUpload({
+          id: "att-pinned",
+          link: "/api/attachments/att-pinned/download",
+          filename: "a.png",
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(insertMarkdownSpy).toHaveBeenCalledWith(
+      expect.stringContaining("/api/attachments/att-pinned/download"),
+    );
+    expect(state.inputDrafts["session-a"] ?? "").toContain(
+      "/api/attachments/att-pinned/download",
+    );
+    // The selected-but-not-loaded draft must not receive the link.
+    expect(state.inputDrafts["session-b"] ?? "").not.toContain("att-pinned");
+
+    await act(async () => {
+      resolveB(makeUpload({ id: "att-b", link: "/api/attachments/att-b/download", filename: "b.png" }));
+      await Promise.resolve();
+    });
   });
 
   it("keeps an in-flight placeholder while the user keeps typing", () => {
