@@ -32,11 +32,13 @@
     "typecheck": {
       "dependsOn": ["^typecheck"]
     },
-    "test": {
-      "dependsOn": ["^typecheck"]
-    },
-    "lint": {
-      "dependsOn": ["^typecheck"]
-    }
+    // `test` and `lint` deliberately have no `^typecheck` dependency. No
+    // package emits build artifacts (core/ui/views export raw .ts that the
+    // consumer transpiles), so depending on a dependency's `tsc --noEmit`
+    // bought nothing but head-of-line blocking: the heaviest task in the
+    // graph, `@multica/views:test`, sat idle until core/ui typechecked.
+    // Type errors still fail CI through the `typecheck` task itself.
+    "test": {},
+    "lint": {}
   }
 }

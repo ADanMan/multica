@@ -75,7 +75,19 @@ jobs:
             echo "frontend=false" >> "$GITHUB_OUTPUT"
           fi
 
-  frontend:
+  # The frontend validation is split across two runners on purpose. Both
+  # `@multica/web:build` (a webpack production build) and `@multica/views:test`
+  # (259 jsdom files) are CPU-saturating, and a standard runner only has
+  # 4 vCPUs. Running them in one job made them starve each other: the views
+  # suite needs ~104s wall when it owns 4 cores but took ~500s sharing them,
+  # and the identical webpack compile went from ~26s to ~342s. Splitting buys
+  # a second 4-vCPU box rather than reducing the work; total runner-minutes go
+  # up slightly, wall-clock feedback time goes down.
+  #
+  # The split is weighted, not even: the test group is by far the heavier half
+  # (~575 CPU-seconds vs ~250 for build + typecheck + lint), so it gets a
+  # runner to itself and everything else shares the other one.
+  frontend-build:
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -112,14 +124,67 @@ jobs:
           pnpm generate:reserved-slugs
           git diff --exit-code -- packages/core/paths/reserved-slugs.ts
 
-      - name: Build, type check, lint, and test
+      - name: Build, type check, and lint
         if: ${{ needs.changes.outputs.frontend == 'true' }}
         # Mobile lives in a parallel mobile-verify workflow (path-filtered
         # to apps/mobile/** + packages/core/**) so it doesn't add
         # ~50s of expo-lint + tsc to every web/desktop PR. Keep this
         # filter in sync with the root package.json scripts, which also
         # exclude @multica/mobile.
-        run: pnpm exec turbo build typecheck lint test --filter='!@multica/docs' --filter='!@multica/mobile'
+        run: pnpm exec turbo build typecheck lint --filter='!@multica/docs' --filter='!@multica/mobile'
+
+  frontend-test:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        run: pnpm install
+
+      - name: Test
+        if: ${{ needs.changes.outputs.frontend == 'true' }}
+        # Same filter rationale as frontend-build. Type errors are not this
+        # job's responsibility — the `typecheck` task in frontend-build owns
+        # them, which is why `test` no longer depends on `^typecheck`.
+        run: pnpm exec turbo test --filter='!@multica/docs' --filter='!@multica/mobile'
+
+  # Aggregate gate. `frontend` is the status-check name the repository's
+  # branch rules refer to, so it has to survive the split above: this job
+  # keeps reporting under that name and simply fails when either half fails.
+  # It also inherits the old contract that the check goes green (rather than
+  # staying pending) on PRs the path filter excluded — both halves succeed
+  # trivially in that case because every step is gated off.
+  frontend:
+    needs: [frontend-build, frontend-test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check frontend job results
+        env:
+          BUILD_RESULT: ${{ needs.frontend-build.result }}
+          TEST_RESULT: ${{ needs.frontend-test.result }}
+        run: |
+          echo "frontend-build: $BUILD_RESULT"
+          echo "frontend-test:  $TEST_RESULT"
+          if [ "$BUILD_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ]; then
+            echo "::error::frontend validation failed"
+            exit 1
+          fi
 
   backend:
     runs-on: ubuntu-latest
