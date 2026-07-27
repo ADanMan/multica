@@ -2012,6 +2012,12 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					src.SessionID.Valid && src.RuntimeID == task.RuntimeID {
 					resp.PriorSessionID = src.SessionID.String
 				}
+				// MUL-5305: if the source task withheld its Codex session because
+				// the rollout was missing, this rerun has nothing resumable from it
+				// — disclose the gap rather than silently starting fresh.
+				if src.SessionRolloutMissing {
+					resp.PriorSessionResumeUnavailable = true
+				}
 			}
 		} else if !task.ForceFreshSession {
 			// Non-rerun follow-up on the same issue: resume the most recent
@@ -2175,6 +2181,13 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					if prior.WorkDir.Valid && resp.PriorWorkDir == "" {
 						resp.PriorWorkDir = prior.WorkDir.String
 					}
+				}
+				// MUL-5305: if the most recent terminal task on this chat session
+				// withheld its Codex session (rollout missing), we resumed an older
+				// session (or none) above — disclose the continuity gap so the next
+				// turn tells the user the most recent turn's context is missing.
+				if missing, err := h.Queries.GetLatestChatTaskRolloutMissing(r.Context(), cs.ID); err == nil && missing {
+					resp.PriorSessionResumeUnavailable = true
 				}
 			}
 			// Resolve the user-message input batch for this run. A task-owned
@@ -2911,7 +2924,11 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, _ := json.Marshal(req)
-	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir)
+	// MUL-5305: SessionRolloutMissing is applied inside CompleteTask's terminal
+	// transaction (force session_id NULL + flag the row), so an auto-retry the
+	// same commit creates and wakes can never observe the withheld pointer or a
+	// missing continuity-gap flag.
+	task, err := h.TaskService.CompleteTask(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.SessionRolloutMissing)
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized
@@ -2921,17 +2938,6 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("complete task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	// MUL-5305: the daemon withheld this Codex session (its rollout was missing).
-	// Force the resume pointer NULL and flag the continuity gap so the next claim
-	// falls back to an older good session yet still discloses the loss. Best
-	// effort — the session_id was already sent empty, so a failure here only
-	// costs the disclosure, not correctness.
-	if req.SessionRolloutMissing {
-		if err := h.Queries.MarkTaskSessionRolloutMissing(r.Context(), parseUUID(taskID)); err != nil {
-			slog.Warn("mark task session rollout missing failed", "task_id", taskID, "error", err)
-		}
 	}
 
 	h.emitIssueExecutedOnFirstCompletion(r, task)
@@ -3551,21 +3557,16 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason)
+	// MUL-5305: SessionRolloutMissing is applied inside FailTask's terminal
+	// transaction — forcing session_id NULL (overriding the COALESCE that would
+	// keep a stale mid-flight pin) and flagging the row in the same commit that
+	// creates and wakes the auto-retry, so the retry can never claim the withheld
+	// pointer or miss the continuity gap.
+	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason, req.SessionRolloutMissing)
 	if err != nil {
 		slog.Warn("fail task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	// MUL-5305: the daemon withheld this Codex session (its rollout was missing).
-	// Force the resume pointer NULL — overriding FailAgentTask's COALESCE, which
-	// would otherwise keep a stale mid-flight pin — and flag the continuity gap
-	// so the next claim discloses the loss. Best effort; failure only costs the
-	// disclosure.
-	if req.SessionRolloutMissing {
-		if err := h.Queries.MarkTaskSessionRolloutMissing(r.Context(), parseUUID(taskID)); err != nil {
-			slog.Warn("mark task session rollout missing failed", "task_id", taskID, "error", err)
-		}
 	}
 	h.TaskService.NotifyTaskFinished(*task)
 

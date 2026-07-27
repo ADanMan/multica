@@ -665,8 +665,17 @@ WHERE id = $1 AND status = 'dispatched'
 RETURNING *;
 
 -- name: CompleteAgentTask :one
+-- session_rollout_missing (MUL-5305): when true the daemon withheld this task's
+-- Codex session because its rollout was never written to the store. Forcing
+-- session_id NULL and flagging the row happen in THIS terminal transaction so an
+-- auto-retry created and woken by the same commit can never observe the bad
+-- pointer or a missing gap flag.
 UPDATE agent_task_queue
-SET status = 'completed', completed_at = now(), result = $2, session_id = $3, work_dir = $4, prepare_lease_expires_at = NULL
+SET status = 'completed', completed_at = now(), result = $2,
+    session_id = CASE WHEN sqlc.arg('session_rollout_missing') THEN NULL ELSE $3 END,
+    work_dir = $4,
+    session_rollout_missing = sqlc.arg('session_rollout_missing'),
+    prepare_lease_expires_at = NULL
 WHERE id = $1 AND status = 'running'
 RETURNING *;
 
@@ -724,17 +733,6 @@ WHERE agent_id = $1 AND issue_id = $2
 ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
 LIMIT 1;
 
--- name: MarkTaskSessionRolloutMissing :exec
--- The daemon withheld this task's Codex session because its rollout was never
--- written to the per-issue store (MUL-5305). Clear the resume pointer so the
--- (agent_id, issue_id) lookup skips this row, and flag the gap so the next
--- claim can still disclose the loss even while resuming an older good session.
--- session_id is forced NULL (not COALESCE-merged) so a stale mid-flight pin can
--- never survive a withheld terminal report.
-UPDATE agent_task_queue
-SET session_id = NULL, session_rollout_missing = TRUE
-WHERE id = $1;
-
 -- name: GetLatestTaskRolloutMissing :one
 -- Reports whether the most recent terminal task for (agent_id, issue_id)
 -- withheld its Codex session because the rollout was missing (MUL-5305). When
@@ -744,6 +742,18 @@ WHERE id = $1;
 -- most-recent row, so the disclosure fires once and then clears.
 SELECT COALESCE(session_rollout_missing, FALSE) FROM agent_task_queue
 WHERE agent_id = $1 AND issue_id = $2
+  AND status IN ('completed', 'failed')
+  AND started_at IS NOT NULL
+ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
+LIMIT 1;
+
+-- name: GetLatestChatTaskRolloutMissing :one
+-- Chat-session counterpart of GetLatestTaskRolloutMissing (MUL-5305): reports
+-- whether the most recent terminal task on this chat session withheld its Codex
+-- session because the rollout was missing. When true the next chat claim resumed
+-- an older session (or none), so it must disclose the continuity gap.
+SELECT COALESCE(session_rollout_missing, FALSE) FROM agent_task_queue
+WHERE chat_session_id = $1
   AND status IN ('completed', 'failed')
   AND started_at IS NOT NULL
 ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
@@ -771,13 +781,20 @@ LIMIT 1;
 --
 -- failure_reason is a coarse classifier consumed by the auto-retry path;
 -- 'agent_error' is the safe default when the daemon doesn't supply one.
+--
+-- session_rollout_missing (MUL-5305): when true the daemon withheld this task's
+-- Codex session (its rollout was missing). Force session_id NULL — overriding
+-- the COALESCE that would otherwise preserve a stale mid-flight pin — and flag
+-- the row, in the SAME transaction that creates and wakes the auto-retry, so the
+-- retry can never claim the bad pointer or miss the continuity gap.
 UPDATE agent_task_queue
 SET status = 'failed',
     completed_at = now(),
     error = $2,
     failure_reason = COALESCE(sqlc.narg('failure_reason'), 'agent_error'),
-    session_id = COALESCE(sqlc.narg('session_id'), session_id),
+    session_id = CASE WHEN sqlc.arg('session_rollout_missing') THEN NULL ELSE COALESCE(sqlc.narg('session_id'), session_id) END,
     work_dir = COALESCE(sqlc.narg('work_dir'), work_dir),
+    session_rollout_missing = sqlc.arg('session_rollout_missing'),
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory')
 RETURNING *;

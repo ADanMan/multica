@@ -1228,24 +1228,35 @@ func (q *Queries) ClearAgentThinkingLevel(ctx context.Context, id pgtype.UUID) (
 
 const completeAgentTask = `-- name: CompleteAgentTask :one
 UPDATE agent_task_queue
-SET status = 'completed', completed_at = now(), result = $2, session_id = $3, work_dir = $4, prepare_lease_expires_at = NULL
+SET status = 'completed', completed_at = now(), result = $2,
+    session_id = CASE WHEN $5 THEN NULL ELSE $3 END,
+    work_dir = $4,
+    session_rollout_missing = $5,
+    prepare_lease_expires_at = NULL
 WHERE id = $1 AND status = 'running'
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing
 `
 
 type CompleteAgentTaskParams struct {
-	ID        pgtype.UUID `json:"id"`
-	Result    []byte      `json:"result"`
-	SessionID pgtype.Text `json:"session_id"`
-	WorkDir   pgtype.Text `json:"work_dir"`
+	ID                    pgtype.UUID `json:"id"`
+	Result                []byte      `json:"result"`
+	SessionID             pgtype.Text `json:"session_id"`
+	WorkDir               pgtype.Text `json:"work_dir"`
+	SessionRolloutMissing bool        `json:"session_rollout_missing"`
 }
 
+// session_rollout_missing (MUL-5305): when true the daemon withheld this task's
+// Codex session because its rollout was never written to the store. Forcing
+// session_id NULL and flagging the row happen in THIS terminal transaction so an
+// auto-retry created and woken by the same commit can never observe the bad
+// pointer or a missing gap flag.
 func (q *Queries) CompleteAgentTask(ctx context.Context, arg CompleteAgentTaskParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, completeAgentTask,
 		arg.ID,
 		arg.Result,
 		arg.SessionID,
 		arg.WorkDir,
+		arg.SessionRolloutMissing,
 	)
 	var i AgentTaskQueue
 	err := row.Scan(
@@ -2228,19 +2239,21 @@ SET status = 'failed',
     completed_at = now(),
     error = $2,
     failure_reason = COALESCE($3, 'agent_error'),
-    session_id = COALESCE($4, session_id),
-    work_dir = COALESCE($5, work_dir),
+    session_id = CASE WHEN $4 THEN NULL ELSE COALESCE($5, session_id) END,
+    work_dir = COALESCE($6, work_dir),
+    session_rollout_missing = $4,
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'running', 'waiting_local_directory')
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing
 `
 
 type FailAgentTaskParams struct {
-	ID            pgtype.UUID `json:"id"`
-	Error         pgtype.Text `json:"error"`
-	FailureReason pgtype.Text `json:"failure_reason"`
-	SessionID     pgtype.Text `json:"session_id"`
-	WorkDir       pgtype.Text `json:"work_dir"`
+	ID                    pgtype.UUID `json:"id"`
+	Error                 pgtype.Text `json:"error"`
+	FailureReason         pgtype.Text `json:"failure_reason"`
+	SessionRolloutMissing bool        `json:"session_rollout_missing"`
+	SessionID             pgtype.Text `json:"session_id"`
+	WorkDir               pgtype.Text `json:"work_dir"`
 }
 
 // Marks a task as failed. session_id and work_dir are merged via COALESCE so
@@ -2252,11 +2265,18 @@ type FailAgentTaskParams struct {
 //
 // failure_reason is a coarse classifier consumed by the auto-retry path;
 // 'agent_error' is the safe default when the daemon doesn't supply one.
+//
+// session_rollout_missing (MUL-5305): when true the daemon withheld this task's
+// Codex session (its rollout was missing). Force session_id NULL — overriding
+// the COALESCE that would otherwise preserve a stale mid-flight pin — and flag
+// the row, in the SAME transaction that creates and wakes the auto-retry, so the
+// retry can never claim the bad pointer or miss the continuity gap.
 func (q *Queries) FailAgentTask(ctx context.Context, arg FailAgentTaskParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, failAgentTask,
 		arg.ID,
 		arg.Error,
 		arg.FailureReason,
+		arg.SessionRolloutMissing,
 		arg.SessionID,
 		arg.WorkDir,
 	)
@@ -2853,6 +2873,26 @@ func (q *Queries) GetLastTaskStartedAtForIssueAndAgent(ctx context.Context, arg 
 	var started_at pgtype.Timestamptz
 	err := row.Scan(&started_at)
 	return started_at, err
+}
+
+const getLatestChatTaskRolloutMissing = `-- name: GetLatestChatTaskRolloutMissing :one
+SELECT COALESCE(session_rollout_missing, FALSE) FROM agent_task_queue
+WHERE chat_session_id = $1
+  AND status IN ('completed', 'failed')
+  AND started_at IS NOT NULL
+ORDER BY COALESCE(completed_at, started_at, dispatched_at, created_at) DESC
+LIMIT 1
+`
+
+// Chat-session counterpart of GetLatestTaskRolloutMissing (MUL-5305): reports
+// whether the most recent terminal task on this chat session withheld its Codex
+// session because the rollout was missing. When true the next chat claim resumed
+// an older session (or none), so it must disclose the continuity gap.
+func (q *Queries) GetLatestChatTaskRolloutMissing(ctx context.Context, chatSessionID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, getLatestChatTaskRolloutMissing, chatSessionID)
+	var session_rollout_missing bool
+	err := row.Scan(&session_rollout_missing)
+	return session_rollout_missing, err
 }
 
 const getLatestTaskRoleForIssueAndAgent = `-- name: GetLatestTaskRoleForIssueAndAgent :one
@@ -4358,23 +4398,6 @@ func (q *Queries) MarkChatFinalizeDeferred(ctx context.Context, id pgtype.UUID) 
 		&i.SessionRolloutMissing,
 	)
 	return i, err
-}
-
-const markTaskSessionRolloutMissing = `-- name: MarkTaskSessionRolloutMissing :exec
-UPDATE agent_task_queue
-SET session_id = NULL, session_rollout_missing = TRUE
-WHERE id = $1
-`
-
-// The daemon withheld this task's Codex session because its rollout was never
-// written to the per-issue store (MUL-5305). Clear the resume pointer so the
-// (agent_id, issue_id) lookup skips this row, and flag the gap so the next
-// claim can still disclose the loss even while resuming an older good session.
-// session_id is forced NULL (not COALESCE-merged) so a stale mid-flight pin can
-// never survive a withheld terminal report.
-func (q *Queries) MarkTaskSessionRolloutMissing(ctx context.Context, id pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, markTaskSessionRolloutMissing, id)
-	return err
 }
 
 const mergeCommentIntoPendingTask = `-- name: MergeCommentIntoPendingTask :one

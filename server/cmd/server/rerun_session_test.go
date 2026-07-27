@@ -161,9 +161,11 @@ func TestGetLastTaskSessionFallsBackWhenLatestSessionBlanked(t *testing.T) {
 // is missing (the #5934 case — the user waits for each turn to finish) must (1)
 // NOT be handed to the next follow-up as its resume pointer, and (2) NOT be
 // resumed silently — the next claim must still disclose the continuity gap. It
-// exercises MarkTaskSessionRolloutMissing (the withhold) + GetLastTaskSession
-// (falls back to the older good session) + GetLatestTaskRolloutMissing (the
-// disclosure signal buildClaimedTaskResponse reads).
+// drives the REAL terminal write (CompleteAgentTask with session_rollout_missing,
+// which clears session_id and flags the row in one statement) rather than a
+// manual marker, then checks GetLastTaskSession (falls back to the older good
+// session) + GetLatestTaskRolloutMissing (the disclosure signal
+// buildClaimedTaskResponse reads).
 func TestCompletedTaskRolloutMissingWithholdsAndDisclosesGap(t *testing.T) {
 	if testPool == nil {
 		t.Skip("no database connection")
@@ -183,20 +185,36 @@ func TestCompletedTaskRolloutMissingWithholdsAndDisclosesGap(t *testing.T) {
 		t.Fatalf("insert older completed task: %v", err)
 	}
 
-	// Newer COMPLETED turn whose rollout was missing: it recorded a session id,
-	// which is exactly the pointer the reported bug propagates to the next run.
+	// Newer turn still 'running' with a mid-flight-pinned session — exactly the
+	// pointer the reported bug propagates. CompleteAgentTask below finishes it
+	// with session_rollout_missing=true (the daemon found no rollout).
 	var newerTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, completed_at, session_id, work_dir)
-		VALUES ($1, $2, $3, 'completed', 0, now() - interval '1 minute', now() - interval '1 minute', 'NEW-ROLLOUT-MISSING', '/tmp/newer')
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, session_id, work_dir)
+		VALUES ($1, $2, $3, 'running', 0, now() - interval '1 minute', 'NEW-ROLLOUT-MISSING', '/tmp/newer')
 		RETURNING id
 	`, agentID, runtimeID, issueID).Scan(&newerTaskID); err != nil {
-		t.Fatalf("insert newer completed task: %v", err)
+		t.Fatalf("insert newer running task: %v", err)
 	}
 
-	// The daemon withheld it (rollout missing): clear the pointer + flag the gap.
-	if err := queries.MarkTaskSessionRolloutMissing(ctx, pgtype.UUID{Bytes: parseUUIDBytes(newerTaskID), Valid: true}); err != nil {
-		t.Fatalf("MarkTaskSessionRolloutMissing: %v", err)
+	// The real terminal write withholds the session and flags the row atomically.
+	done, err := queries.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
+		ID:                    pgtype.UUID{Bytes: parseUUIDBytes(newerTaskID), Valid: true},
+		Result:                []byte(`{"output":"done"}`),
+		SessionID:             pgtype.Text{String: "NEW-ROLLOUT-MISSING", Valid: true},
+		WorkDir:               pgtype.Text{String: "/tmp/newer", Valid: true},
+		SessionRolloutMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("CompleteAgentTask: %v", err)
+	}
+	// The terminal SQL forced the pinned session NULL and flagged the row in one
+	// statement — not two writes that a concurrent retry could interleave.
+	if done.SessionID.Valid {
+		t.Fatalf("expected withheld session_id to be NULL, got %q", done.SessionID.String)
+	}
+	if !done.SessionRolloutMissing {
+		t.Fatal("expected session_rollout_missing to be set on the terminal row")
 	}
 
 	// (1) The bad session is NOT handed out — resume falls back to the older good one.
@@ -221,6 +239,56 @@ func TestCompletedTaskRolloutMissingWithholdsAndDisclosesGap(t *testing.T) {
 	}
 	if !missing {
 		t.Fatal("expected the continuity gap to be flagged so the next claim discloses it")
+	}
+}
+
+// TestFailedTaskRolloutMissingForcesNullOverMidFlightPin covers the failure-path
+// half of MUL-5305 Must-fix 1: FailAgentTask normally COALESCE-preserves a
+// mid-flight-pinned session, which would let an auto-retry created in the SAME
+// transaction inherit a rollout-missing pointer. With session_rollout_missing
+// the terminal UPDATE forces session_id NULL and flags the row in ONE statement,
+// so there is no window between the fail committing and a separate marker where
+// the retry could observe the bad pointer or a false gap flag.
+func TestFailedTaskRolloutMissingForcesNullOverMidFlightPin(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+	queries := db.New(testPool)
+
+	// Running task with a mid-flight-pinned session, as UpdateAgentTaskSession
+	// would have left it before the run failed with no rollout on disk.
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, started_at, session_id, work_dir)
+		VALUES ($1, $2, $3, 'running', 0, now() - interval '1 minute', 'PINNED-BUT-NO-ROLLOUT', '/tmp/wd')
+		RETURNING id
+	`, agentID, runtimeID, issueID).Scan(&taskID); err != nil {
+		t.Fatalf("insert running task: %v", err)
+	}
+
+	// The daemon withheld it: FailTask sends an empty session_id (Valid:false)
+	// AND session_rollout_missing=true. The CASE must win over the COALESCE.
+	failed, err := queries.FailAgentTask(ctx, db.FailAgentTaskParams{
+		ID:                    pgtype.UUID{Bytes: parseUUIDBytes(taskID), Valid: true},
+		Error:                 pgtype.Text{String: "runtime went offline", Valid: true},
+		FailureReason:         pgtype.Text{String: "timeout", Valid: true},
+		SessionID:             pgtype.Text{Valid: false},
+		WorkDir:               pgtype.Text{Valid: false},
+		SessionRolloutMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("FailAgentTask: %v", err)
+	}
+	if failed.SessionID.Valid {
+		t.Fatalf("expected the mid-flight pin to be forced NULL, got %q", failed.SessionID.String)
+	}
+	if !failed.SessionRolloutMissing {
+		t.Fatal("expected session_rollout_missing to be set on the failed row")
 	}
 }
 
