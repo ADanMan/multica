@@ -274,6 +274,7 @@ export function createKoDict(allowSignup: boolean): LandingDict {
           title: "Lark 미디어, 이미지 확대, 더 안정적인 작업",
           changes: [],
           features: [
+            "PR 카드에 CI 상태와 해당 PR을 병합할 수 있는지가 실시간으로 표시됩니다.",
             "이제 Lark에서 보낸 이미지와 동영상이 첨부 파일로 들어옵니다.",
             "이제 이미지 첨부 미리보기를 이동하고 확대할 수 있습니다.",
             "이제 프로젝트 선택에 검색이 추가되어 한 번에 더 많은 프로젝트를 볼 수 있습니다.",
@@ -300,7 +301,6 @@ export function createKoDict(allowSignup: boolean): LandingDict {
           title: "PR 실시간 상태와 Claude Opus 5",
           changes: [],
           features: [
-            "PR 카드에 CI 상태와 해당 PR을 병합할 수 있는지가 실시간으로 표시됩니다.",
             "이제 Claude Opus 5로 에이전트를 만들 수 있습니다.",
           ],
           improvements: [

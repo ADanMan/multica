@@ -299,6 +299,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
         title: "Lark 图片视频、图片缩放与更稳的任务",
         changes: [],
         features: [
+          "PR 卡片现在会显示实时的 CI 状态，以及这个 PR 是否可以合并了。",
           "Lark 里发的图片和视频现在会作为附件带进来了。",
           "现在可以对图片附件预览进行平移和缩放了。",
           "项目选择器现在支持搜索，一次能看到更多项目。",
@@ -325,7 +326,6 @@ export function createZhDict(allowSignup: boolean): LandingDict {
         title: "PR 实时状态，新增 Claude Opus 5",
         changes: [],
         features: [
-          "PR 卡片现在会显示实时的 CI 状态，以及这个 PR 是否可以合并了。",
           "现在可以基于 Claude Opus 5 搭建智能体了。",
         ],
         improvements: [

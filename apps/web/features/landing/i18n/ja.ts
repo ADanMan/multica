@@ -275,6 +275,7 @@ export function createJaDict(allowSignup: boolean): LandingDict {
           title: "Lark のメディア、画像ズーム、より安定したタスク",
           changes: [],
           features: [
+            "PR カードに CI の状態と、その PR がマージ可能かどうかがリアルタイムで表示されます。",
             "Lark で送られた画像や動画が添付ファイルとして取り込まれるようになりました。",
             "画像添付のプレビューを移動・ズームできるようになりました。",
             "プロジェクトの選択に検索が付き、一度に多くのプロジェクトを表示できるようになりました。",
@@ -301,7 +302,6 @@ export function createJaDict(allowSignup: boolean): LandingDict {
           title: "PR のリアルタイム状態と Claude Opus 5",
           changes: [],
           features: [
-            "PR カードに CI の状態と、その PR がマージ可能かどうかがリアルタイムで表示されます。",
             "Claude Opus 5 でエージェントを構築できるようになりました。",
           ],
           improvements: [

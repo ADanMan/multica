@@ -299,6 +299,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         title: "Lark media, image zoom, and steadier agent tasks",
         changes: [],
         features: [
+          "Pull request cards now show live CI status and whether a PR is ready to merge.",
           "Lark now brings in images and videos from chat as attachments.",
           "You can now pan and zoom image attachment previews.",
           "The project picker now has search and shows more projects at once.",
@@ -325,7 +326,6 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         title: "Live PR status and Claude Opus 5",
         changes: [],
         features: [
-          "Pull request cards now show live CI status and whether a PR is ready to merge.",
           "You can now build agents on Claude Opus 5.",
         ],
         improvements: [
