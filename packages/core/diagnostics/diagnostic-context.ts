@@ -34,49 +34,134 @@ export function resetDiagnosticContext(): void {
   route = null;
 }
 
+// The known route shapes, mirroring `packages/core/paths/paths.ts` (the single
+// path builder every navigation goes through) and the routers that consume it.
+// Bucketing matches against these STRUCTURALLY: a `:param` slot is whatever
+// occupies that position, whether it is a UUID, an issue key, `p1`, `skl_123`
+// or a percent-encoded string.
+//
+// Guessing from the shape of a segment instead would leak every id that does
+// not look like an id — project, skill, agent, runtime and attachment ids are
+// all arbitrary strings. `paths.ts` also URL-encodes them, so an id containing
+// a slash arrives as one already-escaped segment and must not be mistaken for
+// two path segments.
+//
+// A route added to `paths.ts` without being added here is not a leak: an
+// unmatched path is masked below rather than passed through. The parity test in
+// diagnostic-context.test.ts walks the real builders and fails when one is
+// missing, so this list cannot silently fall behind.
+type RoutePattern = readonly string[];
+
+const WORKSPACE_ROUTES: readonly RoutePattern[] = [
+  ["issues"],
+  ["issues", ":id"],
+  ["projects"],
+  ["projects", ":id"],
+  ["autopilots"],
+  ["autopilots", ":id"],
+  ["agents"],
+  ["agents", "new"],
+  ["agents", ":id"],
+  ["members", ":id"],
+  ["squads"],
+  ["squads", ":id"],
+  ["inbox"],
+  ["chat"],
+  ["my-issues"],
+  ["usage"],
+  ["billing"],
+  ["runtimes"],
+  ["runtimes", ":id"],
+  ["runtimes", ":id", "runtime", ":runtimeId"],
+  ["skills"],
+  ["skills", ":id"],
+  ["settings"],
+  ["attachments", ":id", "preview"],
+];
+
+const GLOBAL_ROUTES: readonly RoutePattern[] = [
+  ["login"],
+  ["signup"],
+  ["logout"],
+  ["workspaces", "new"],
+  ["invite", ":id"],
+  ["invitations"],
+  ["onboarding"],
+  ["auth", "callback"],
+];
+
+const WORKSPACE_SECTIONS = new Set(WORKSPACE_ROUTES.map((route) => route[0]!));
+const GLOBAL_SECTIONS = new Set(GLOBAL_ROUTES.map((route) => route[0]!));
+
 /**
- * Collapse a concrete path to a route template: `/acme/issues/MUL-12` becomes
+ * Collapse a concrete path to its route template: `/acme/issues/MUL-12` becomes
  * `/:slug/issues/:id`. Diagnostics only need to know which screen the user was
- * on, and a template keeps resource identifiers out of telemetry while making
- * the field groupable in one query.
+ * on, and a template keeps workspace slugs and resource ids out of telemetry
+ * while making the field groupable in one query.
+ *
+ * A path that matches no known route is masked with `*` rather than reported —
+ * an unrecognized segment is exactly the case where we cannot tell an id from a
+ * page name, so it never travels.
  */
 export function bucketDiagnosticPath(path: string): string {
   const [pathname = ""] = path.split(/[?#]/);
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return "/";
 
-  const bucketed = segments.map((segment, index) => {
-    // The first segment of a workspace-scoped route is always the slug.
-    if (index === 0 && !isGlobalRootSegment(segment)) return ":slug";
-    return isResourceIdentifier(segment) ? ":id" : segment;
-  });
-  return `/${bucketed.join("/")}`;
+  const globalRoute = matchRoute(segments, GLOBAL_ROUTES);
+  if (globalRoute) return `/${globalRoute.join("/")}`;
+
+  // Reserved slugs mean a known global section can never also be a workspace,
+  // so an unmatched path under one keeps its section and masks the rest.
+  const first = segments[0]!;
+  if (GLOBAL_SECTIONS.has(first)) return `/${first}/*`;
+
+  // Everything else is workspace-scoped; the leading segment is the slug.
+  const rest = segments.slice(1);
+  if (rest.length === 0) return "/:slug";
+
+  const scoped = matchRoute(rest, WORKSPACE_ROUTES);
+  if (scoped) return `/:slug/${scoped.join("/")}`;
+
+  const section = rest[0]!;
+  return WORKSPACE_SECTIONS.has(section)
+    ? `/:slug/${section}/*`
+    : "/:slug/*";
 }
 
-// Pre-workspace routes are a closed set (see CLAUDE.md: single word or
-// /{noun}/{verb}); everything else at the root position is a workspace slug.
-const GLOBAL_ROOT_SEGMENTS = new Set([
-  "login",
-  "signup",
-  "inbox",
-  "invite",
-  "invitations",
-  "onboarding",
-  "workspaces",
-  "settings",
-]);
+/**
+ * Find the route this path follows. A `:param` slot accepts any single segment;
+ * every other slot must match literally. When several patterns fit, the most
+ * literal one wins, so `/agents/new` is the create page rather than an agent
+ * whose id happens to be "new".
+ */
+function matchRoute(
+  segments: readonly string[],
+  patterns: readonly RoutePattern[],
+): RoutePattern | null {
+  let best: RoutePattern | null = null;
+  let bestLiterals = -1;
 
-function isGlobalRootSegment(segment: string): boolean {
-  return GLOBAL_ROOT_SEGMENTS.has(segment);
-}
+  for (const pattern of patterns) {
+    if (pattern.length !== segments.length) continue;
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Human-readable issue keys such as MUL-5345.
-const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]*-\d+$/;
+    let literals = 0;
+    let matches = true;
+    for (let i = 0; i < pattern.length; i += 1) {
+      const slot = pattern[i]!;
+      if (slot.startsWith(":")) continue;
+      if (slot !== segments[i]) {
+        matches = false;
+        break;
+      }
+      literals += 1;
+    }
 
-function isResourceIdentifier(segment: string): boolean {
-  if (UUID_PATTERN.test(segment)) return true;
-  if (ISSUE_KEY_PATTERN.test(segment)) return true;
-  return /^\d+$/.test(segment);
+    if (matches && literals > bestLiterals) {
+      best = pattern;
+      bestLiterals = literals;
+    }
+  }
+
+  return best;
 }
