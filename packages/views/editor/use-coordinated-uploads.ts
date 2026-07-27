@@ -31,7 +31,6 @@
 
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -89,6 +88,12 @@ export interface UploadDraftBinding {
 // own mount is gone (the upload outlived the composer) hand the finished link
 // to the editor a REOPENED composer mounted for the same target.
 const liveEditors = new Map<string, RefObject<ContentEditorRef | null>>();
+
+/** Test-only: registry keys currently registered. Lets timing tests assert
+ *  registration is part of the COMMIT (layout), not a passive task later. */
+export function __liveEditorRegistryKeysForTest(): string[] {
+  return [...liveEditors.keys()];
+}
 
 /** Markdown for a finished upload. Mirrors the shape the in-editor swap
  *  produces (`extensions/file-upload.ts`: image node for images, fileCard link
@@ -225,8 +230,14 @@ export function useCoordinatedUploads(
     };
   }, []);
 
-  const registryKey = opts?.liveRegistryKey ?? binding?.registryKey;
-  useEffect(() => {
+  // Registration only exists for a persisted target; a liveRegistryKey with
+  // no binding would register an editor nothing can ever look up.
+  const registryKey = binding ? (opts?.liveRegistryKey ?? binding.registryKey) : undefined;
+  // Layout effect for the same reason as mountedRef: chat's adopt swaps the
+  // editor's document (and its loaded key) synchronously during commit, and a
+  // passive re-registration one task later leaves a settle window where the
+  // old key still maps to an editor now holding another draft's document.
+  useLayoutEffect(() => {
     if (!registryKey) return;
     liveEditors.set(registryKey, editorRef);
     return () => {
@@ -344,10 +355,15 @@ export function useCoordinatedUploads(
 
   const removeUpload = useCallback(
     (clientUploadId: string) => {
-      // If the request is still in flight, cancel it — the placeholder is
-      // gone, so a late settle would only be discarded by the generation
-      // guard anyway. No-op for settled/failed entries.
-      abortUpload(clientUploadId);
+      // Defensive cancel for a placeholder removed while still in flight: its
+      // request has no destination left, so don't let it run to completion.
+      // Today's chips expose ✕ only for failed/interrupted entries, so this
+      // fires only if a future caller removes an `uploading` one. Guarded on
+      // OUR tracking so a stray id can never abort another surface's upload.
+      const tracked = binding ? binding.getUploads() : localUploadsRef.current;
+      if (tracked.some((u) => u.clientUploadId === clientUploadId && u.status === "uploading")) {
+        abortUpload(clientUploadId);
+      }
       if (binding) binding.removeUpload(clientUploadId);
       else setLocalUploads((prev) => prev.filter((u) => u.clientUploadId !== clientUploadId));
     },

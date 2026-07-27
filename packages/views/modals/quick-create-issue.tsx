@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftRight,
   CalendarDays,
@@ -39,7 +39,7 @@ import {
   useIssueCreateSettingsStore,
   type QuickCreateField,
 } from "@multica/core/issues/stores/issue-create-settings-store";
-import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
+import { useIssueDraftStore, type IssueCreateDraft } from "@multica/core/issues/stores/draft-store";
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
 import {
   runtimeListOptions,
@@ -373,6 +373,18 @@ export function AgentCreatePanel({
   // (single-flight ref, submit-time upload re-check, lock+spin, await→boolean,
   // clear only on acceptance). The prompt IS the editor content, so this maps
   // onto the hook directly.
+  // Stale-submit guard (MUL-5181 P0): the issue draft is a SINGLETON store.
+  // A late success from a dialog the user closed mid-submit must not clear a
+  // newer draft typed after reopening — see ManualCreatePanel for the rule.
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const submittedDraftRef = useRef<IssueCreateDraft | null>(null);
+
   const composer = useComposerSubmit({
     editorRef,
     uploadGate: gate,
@@ -380,6 +392,7 @@ export function AgentCreatePanel({
       // The button already disables on !actor / versionBlocked, but the
       // ⌘+Enter path bypasses it — re-guard here and keep the draft in place.
       if (!actor || versionBlocked) return false;
+      submittedDraftRef.current = useIssueDraftStore.getState().draft;
       const activeAttachmentIds = pendingAttachments
         .filter((a) => contentReferencesAttachment(md, a))
         .map((a) => a.id);
@@ -444,8 +457,13 @@ export function AgentCreatePanel({
     },
     onAccepted: () => {
       // A successful create ends this whole draft (shared + manual + agent);
-      // last-successful actor/project preferences were saved above.
-      clearDraft();
+      // last-successful actor/project preferences were saved above. Clear it
+      // only if this panel is still up OR nobody replaced the draft since the
+      // submit snapshot — a stale request may only consume what it submitted.
+      const untouched =
+        useIssueDraftStore.getState().draft === submittedDraftRef.current;
+      if (mountedRef.current || untouched) clearDraft();
+      if (!mountedRef.current) return;
       if (keepOpen) {
         // Stay open for continuous creation — clear the editor so the user can
         // immediately type the next prompt.

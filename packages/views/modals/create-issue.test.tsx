@@ -1302,6 +1302,71 @@ describe("CreateIssueModal", () => {
   // MUL-4808 — manual create had no upload gate at all: Create, Enter on the
   // title, and Switch to Agent would each fix the draft while an image was
   // still uploading, dropping it from the description with no warning.
+  // MUL-5181 P0: the issue draft is a SINGLETON store. A submit that outlives
+  // its dialog may only consume the draft it submitted — never one the user
+  // typed after closing and reopening.
+  describe("stale-submit draft guard", () => {
+    function renderManualPanel() {
+      return renderModal(
+        <ManualCreatePanel
+          onClose={vi.fn()}
+          onSwitchMode={vi.fn()}
+          isExpanded={false}
+          setIsExpanded={vi.fn()}
+        />,
+      );
+    }
+
+    async function startPendingCreate() {
+      let resolveCreate!: (v: unknown) => void;
+      mockCreateIssue.mockImplementationOnce(
+        () => new Promise((resolve) => { resolveCreate = resolve; }),
+      );
+      const user = userEvent.setup();
+      const view = renderManualPanel();
+      await user.type(screen.getByPlaceholderText("Issue title"), "Draft A");
+      fireEvent.keyDown(screen.getByPlaceholderText("Issue title"), {
+        key: "Enter",
+        metaKey: true,
+      });
+      await waitFor(() => expect(mockCreateIssue).toHaveBeenCalled());
+      return {
+        view,
+        finish: () =>
+          act(async () => {
+            resolveCreate({ id: "issue-9", identifier: "TES-9", title: "Draft A", status: "todo", labels: [] });
+            await Promise.resolve();
+          }),
+      };
+    }
+
+    it("a late success does NOT clear a draft replaced after the dialog closed", async () => {
+      const { view, finish } = await startPendingCreate();
+
+      view.unmount();
+      // The user reopened the dialog and typed draft B — the singleton store
+      // now holds a different draft object than the submit snapshot.
+      mockDraftStore.draft = {
+        ...emptyIssueDraft(),
+        manual: { ...emptyIssueDraft().manual, title: "Draft B" },
+      };
+
+      await finish();
+
+      expect(mockClearDraft).not.toHaveBeenCalled();
+      expect(mockDraftStore.draft.manual.title).toBe("Draft B");
+    });
+
+    it("a late success still clears an untouched draft", async () => {
+      const { view, finish } = await startPendingCreate();
+
+      view.unmount();
+      await finish();
+
+      expect(mockClearDraft).toHaveBeenCalled();
+    });
+  });
+
   describe("upload submit gate", () => {
     /** Attach a file whose upload stays in flight until the caller releases it.
      *  Controls the coordinator's `api.uploadFile` promise (MUL-5181 L2). */

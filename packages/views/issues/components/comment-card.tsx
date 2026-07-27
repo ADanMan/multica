@@ -414,12 +414,24 @@ function useEditAttachmentState(
   // only concerns folded into onSubmit — the cancel-race guard, the no-op
   // short-circuit, and the failure toast. The hook owns the empty guard,
   // upload re-check, single-flight, and lock/spin via `submitting`.
+  // Stale-submit guard (MUL-5181 P0) — see CommentInput. The edit hook lives
+  // in CommentRow, so "unmounted" here means the issue detail closed.
+  const editMountedRef = useRef(true);
+  useEffect(() => {
+    editMountedRef.current = true;
+    return () => {
+      editMountedRef.current = false;
+    };
+  }, []);
+  const submittedEntryRef = useRef<unknown>(null);
+
   const { submitting: saving, submit: saveEdit } = useComposerSubmit({
     editorRef,
     uploadGate: gate,
     onSubmit: async (trimmed) => {
       // A save racing a just-pressed Cancel must never reach the server.
       if (cancelledRef.current) return false;
+      submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
       const activeIds = collectActiveAttachmentIds(
         trimmed,
         [...(entry.attachments ?? []), ...pendingAttachments],
@@ -454,7 +466,18 @@ function useEditAttachmentState(
         return false;
       }
     },
-    onAccepted: resetState,
+    onAccepted: () => {
+      if (!editMountedRef.current) {
+        // Dead mount: clear only the exact draft entry this save consumed.
+        const store = useCommentDraftStore.getState();
+        const live = store.drafts[draftKey];
+        if (live === undefined || live === submittedEntryRef.current) {
+          store.clearDraft(draftKey);
+        }
+        return;
+      }
+      resetState();
+    },
   });
 
   return {

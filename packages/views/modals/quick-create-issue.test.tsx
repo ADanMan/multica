@@ -609,6 +609,58 @@ describe("AgentCreatePanel", () => {
     });
   });
 
+  // MUL-5181 P0: a submit that outlives its dialog may only consume the draft
+  // it submitted — never one typed after closing and reopening.
+  it("a late quick-create success does NOT clear a draft replaced after close", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    mockQuickCreateIssue.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
+    );
+    const view = renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+    const editor = screen.getByPlaceholderText(
+      'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
+    );
+    fireEvent.change(editor, { target: { value: "Draft A prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/i }));
+    await waitFor(() => expect(mockQuickCreateIssue).toHaveBeenCalled());
+
+    view.unmount();
+    mockIssueDraftStore.draft = {
+      ...emptyIssueDraft(),
+      agent: { ...emptyIssueDraft().agent, prompt: "Draft B prompt" },
+    };
+
+    await act(async () => {
+      resolveCreate(undefined);
+      await Promise.resolve();
+    });
+
+    expect(mockClearDraft).not.toHaveBeenCalled();
+    expect(mockIssueDraftStore.draft.agent.prompt).toBe("Draft B prompt");
+  });
+
+  it("a late quick-create success still clears an untouched draft", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    mockQuickCreateIssue.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
+    );
+    const view = renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+    const editor = screen.getByPlaceholderText(
+      'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
+    );
+    fireEvent.change(editor, { target: { value: "Draft A prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/i }));
+    await waitFor(() => expect(mockQuickCreateIssue).toHaveBeenCalled());
+
+    view.unmount();
+    await act(async () => {
+      resolveCreate(undefined);
+      await Promise.resolve();
+    });
+
+    expect(mockClearDraft).toHaveBeenCalled();
+  });
+
   it("passes referenced upload attachment ids to quick-create", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

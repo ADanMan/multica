@@ -115,10 +115,23 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
   // guards empty/in-flight, re-checks the upload gate, locks + spins via
   // `submitting`, and clears only once the server accepts — a failed send keeps
   // the draft instead of silently dropping it.
+  // Stale-submit guard (MUL-5181 P0): if this composer unmounts mid-submit
+  // (issue detail closed) and the user reopens and types a new draft under the
+  // same key, the late success may only clear the draft it submitted.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const submittedEntryRef = useRef<unknown>(null);
+
   const { submitting, submit } = useComposerSubmit({
     editorRef,
     uploadGate: gate,
     onSubmit: (content) => {
+      submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
       // Bind only uploads the BODY still references (MUL-5181): deleting an
       // inline image really unbinds it. Uploads that finished after a close
       // are written back into the body by the settle handler, so surviving
@@ -136,6 +149,15 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
       );
     },
     onAccepted: () => {
+      if (!mountedRef.current) {
+        // Dead mount: clear only the exact draft entry this submit consumed.
+        const store = useCommentDraftStore.getState();
+        const live = store.drafts[draftKey];
+        if (live === undefined || live === submittedEntryRef.current) {
+          store.clearDraft(draftKey);
+        }
+        return;
+      }
       editorRef.current?.clearContent();
       setContent("");
       setIsEmpty(true);

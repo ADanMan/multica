@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigation } from "../navigation";
 import {
@@ -61,7 +61,7 @@ import { useIssueTriggerPreview } from "../issues/hooks/use-issue-trigger-previe
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
+import { useIssueDraftStore, type IssueCreateDraft } from "@multica/core/issues/stores/draft-store";
 import { useCreateModeStore } from "@multica/core/issues/stores/create-mode-store";
 import { useQuickCreateStore } from "@multica/core/issues/stores/quick-create-store";
 import {
@@ -439,11 +439,26 @@ export function ManualCreatePanel({
   // editor body — a title-only issue is valid — so `normalize` ignores the
   // description markdown and feeds the title through as the empty-guard/content;
   // the body is read separately inside onSubmit.
+  // Stale-submit guard (MUL-5181 P0): the issue draft is a SINGLETON store.
+  // If the user closes the dialog mid-submit, reopens it, and types draft B,
+  // the late success of draft A must not clear B. Snapshot the draft's object
+  // identity at submit; a still-mounted panel clears unconditionally (the
+  // form is what the user sees), a dead one clears only an untouched draft.
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const submittedDraftRef = useRef<IssueCreateDraft | null>(null);
+
   const composer = useComposerSubmit({
     editorRef: descEditorRef,
     uploadGate: gate,
     normalize: () => title.trim(),
     onSubmit: async (): Promise<boolean> => {
+      submittedDraftRef.current = useIssueDraftStore.getState().draft;
       try {
       const description = descEditorRef.current?.getMarkdown()?.trim() || undefined;
       const activeAttachmentIds = draftAttachments
@@ -642,9 +657,14 @@ export function ManualCreatePanel({
     }
   },
     onAccepted: () => {
-      setLastAssignee(assigneeType, assigneeId);
-      setLastMode("manual");
-      clearDraft();
+      const untouched =
+        useIssueDraftStore.getState().draft === submittedDraftRef.current;
+      if (mountedRef.current || untouched) {
+        setLastAssignee(assigneeType, assigneeId);
+        setLastMode("manual");
+        clearDraft();
+      }
+      if (!mountedRef.current) return;
       if (keepOpen) {
         resetForNextIssue();
       } else {

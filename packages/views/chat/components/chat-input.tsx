@@ -251,6 +251,16 @@ export function ChatInput({
   // image would leave stuck (MUL-4808).
   const uploadGate = useUploadGate(editorRef);
 
+  // Liveness of THIS mount, read by late send commits (layout so the flip is
+  // part of the unmount commit, not a passive task later).
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // Reactive mirror of `editorDraftKeyRef` for the live-editor registry: a
   // write-back may insert into this editor only while its DOCUMENT belongs to
   // the settling draft, and a ref advance alone re-runs no effect. Updated by
@@ -446,6 +456,11 @@ export function ChatInput({
       // activeSessionId synchronously, so reading it after onSend would point
       // at the new session and leave the old draft orphaned.
       const keyAtSend = draftKey;
+      // Stale-submit guard (MUL-5181 P0): snapshot the sent draft's persisted
+      // value. If this composer unmounts mid-send (floating window closed) and
+      // a reopened one types new text under the same key, the late success may
+      // only clear what it actually sent.
+      const draftValueAtSend = useChatStore.getState().inputDrafts[keyAtSend];
       let committed = false;
       const commitInput = (options?: { extraDraftKeys?: string[]; clearEditor?: boolean }) => {
         if (committed) return;
@@ -469,8 +484,12 @@ export function ChatInput({
           setIsEmpty(true);
         }
         // The sent draft's data is cleared regardless — the message is on its
-        // way, so its persisted draft must not resurface.
-        clearInputDraft(keyAtSend);
+        // way, so its persisted draft must not resurface. A DEAD mount clears
+        // only if nobody replaced the draft since the send snapshot.
+        const liveDraft = useChatStore.getState().inputDrafts[keyAtSend];
+        if (mountedRef.current || liveDraft === undefined || liveDraft === draftValueAtSend) {
+          clearInputDraft(keyAtSend);
+        }
         for (const key of options?.extraDraftKeys ?? []) {
           if (key !== keyAtSend) clearInputDraft(key);
         }

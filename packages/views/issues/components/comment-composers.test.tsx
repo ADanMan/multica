@@ -346,6 +346,47 @@ describe("comment composers", () => {
     expect(screen.getByTestId("editor").closest("[aria-busy]")).toBeNull();
   });
 
+  // MUL-5181 P0: a submit that outlives its composer may only clear the draft
+  // it submitted — never one typed after the composer unmounted and reopened.
+  it("a late comment success does NOT clear a draft typed after unmount", async () => {
+    let resolveSubmit!: (v: boolean) => void;
+    const onSubmit = vi.fn(() => new Promise<boolean>((r) => { resolveSubmit = r; }));
+    const view = renderCommentInput(onSubmit);
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "draft A" } });
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    view.unmount();
+    // A reopened composer typed draft B under the same key.
+    useCommentDraftStore.getState().setDraft("new:issue-1", "draft B");
+
+    await act(async () => {
+      resolveSubmit(true);
+      await Promise.resolve();
+    });
+
+    expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toBe("draft B");
+  });
+
+  it("a late comment success still clears an untouched draft", async () => {
+    let resolveSubmit!: (v: boolean) => void;
+    const onSubmit = vi.fn(() => new Promise<boolean>((r) => { resolveSubmit = r; }));
+    const view = renderCommentInput(onSubmit);
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "draft A" } });
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    view.unmount();
+    await act(async () => {
+      resolveSubmit(true);
+      await Promise.resolve();
+    });
+
+    expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toBeUndefined();
+  });
+
   it("keeps the draft when the send fails (no optimistic clear)", async () => {
     const onSubmit = vi.fn().mockResolvedValue(false);
     const { container } = renderCommentInput(onSubmit);

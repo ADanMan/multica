@@ -131,10 +131,23 @@ function ReplyInput({
 
   // Await-then-render send (see CommentInput): the shared hook keeps the text,
   // locks + spins, and clears only once the server accepts it.
+  // Stale-submit guard — see CommentInput.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const submittedEntryRef = useRef<unknown>(null);
+
   const { submitting, submit } = useComposerSubmit({
     editorRef,
     uploadGate: gate,
     onSubmit: (content) => {
+      if (draftKey) {
+        submittedEntryRef.current = useCommentDraftStore.getState().drafts[draftKey];
+      }
       // Bind only uploads the body still references (see CommentInput):
       // deleting an inline image really unbinds it; close-surviving uploads
       // are written back into the body by the settle handler.
@@ -151,6 +164,16 @@ function ReplyInput({
       );
     },
     onAccepted: () => {
+      if (!mountedRef.current) {
+        // Dead mount: clear only the exact draft entry this submit consumed.
+        if (!draftKey) return;
+        const store = useCommentDraftStore.getState();
+        const live = store.drafts[draftKey];
+        if (live === undefined || live === submittedEntryRef.current) {
+          store.clearDraft(draftKey);
+        }
+        return;
+      }
       editorRef.current?.clearContent();
       setContent("");
       setIsEmpty(true);
