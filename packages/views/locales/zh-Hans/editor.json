@@ -41,8 +41,7 @@
     "zoom_in": "放大",
     "zoom_out": "缩小",
     "zoom_fit": "适应窗口",
-    "zoom_actual": "实际大小",
-    "reset_view": "重置视图"
+    "zoom_actual": "实际大小"
   },
   "attachment": {
     "download_failed": "下载链接获取失败，请稍后重试。",

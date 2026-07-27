@@ -41,8 +41,7 @@
     "zoom_in": "拡大",
     "zoom_out": "縮小",
     "zoom_fit": "画面に合わせる",
-    "zoom_actual": "実際のサイズ",
-    "reset_view": "表示をリセット"
+    "zoom_actual": "実際のサイズ"
   },
   "attachment": {
     "download_failed": "ダウンロードリンクを取得できませんでした。しばらくしてからもう一度お試しください。",

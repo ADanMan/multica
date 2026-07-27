@@ -18,7 +18,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -71,13 +70,10 @@ export interface ZoomCanvasApi {
    * and wheel/pinch must track the input 1:1 and are never animated.
    */
   isAnimated: boolean;
-  /** True when the view already matches the default fit — lets Reset disable itself. */
-  isFitted: boolean;
   zoomIn: () => void;
   zoomOut: () => void;
   zoomToActualSize: () => void;
   fit: () => void;
-  reset: () => void;
   handlePointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
   handlePointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
   handlePointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -388,16 +384,6 @@ export function useZoomCanvas({ content }: UseZoomCanvasOptions): ZoomCanvasApi 
     [localPoint],
   );
 
-  const isFitted = useMemo(() => {
-    if (!ready) return true;
-    const fitted = computeFitTransform(contentSize, viewport);
-    return (
-      Math.abs(fitted.scale - transform.scale) < 0.001 &&
-      nearlyEqual(fitted.x, transform.x) &&
-      nearlyEqual(fitted.y, transform.y)
-    );
-  }, [ready, contentSize, viewport, transform]);
-
   return {
     setViewportNode,
     transform,
@@ -408,12 +394,10 @@ export function useZoomCanvas({ content }: UseZoomCanvasOptions): ZoomCanvasApi 
     canZoomOut: transform.scale > computeMinScale(contentSize, viewport) + 0.001,
     isPanning,
     isAnimated,
-    isFitted,
     zoomIn,
     zoomOut,
     zoomToActualSize,
     fit,
-    reset: fit,
     handlePointerDown,
     handlePointerMove,
     handlePointerUp,

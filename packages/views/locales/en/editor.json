@@ -41,8 +41,7 @@
     "zoom_in": "Zoom in",
     "zoom_out": "Zoom out",
     "zoom_fit": "Fit to view",
-    "zoom_actual": "Actual size",
-    "reset_view": "Reset view"
+    "zoom_actual": "Actual size"
   },
   "attachment": {
     "download_failed": "Couldn't fetch a download link. Try again in a moment.",

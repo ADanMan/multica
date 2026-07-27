@@ -41,8 +41,7 @@
     "zoom_in": "확대",
     "zoom_out": "축소",
     "zoom_fit": "화면에 맞추기",
-    "zoom_actual": "실제 크기",
-    "reset_view": "보기 초기화"
+    "zoom_actual": "실제 크기"
   },
   "attachment": {
     "download_failed": "다운로드 링크를 가져오지 못했습니다. 잠시 후 다시 시도하세요.",

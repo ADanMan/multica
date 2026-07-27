@@ -233,7 +233,7 @@ describe("MermaidViewer zoom controls", () => {
     expect(screen.getByText("100%")).toBeInTheDocument();
   });
 
-  it("restores the fitted view with Reset after panning away", () => {
+  it("restores the fitted view with Fit to view after panning away", () => {
     render(<Harness />);
     const fitted = currentTranslate();
 
@@ -242,19 +242,10 @@ describe("MermaidViewer zoom controls", () => {
     fireEvent.pointerUp(canvas(), { pointerId: 1, clientX: 200, clientY: 120 });
     expect(currentTranslate()).not.toEqual(fitted);
 
-    fireEvent.click(screen.getByRole("button", { name: "Reset view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fit to view" }));
 
     expect(currentTranslate().x).toBeCloseTo(fitted.x, 5);
     expect(currentTranslate().y).toBeCloseTo(fitted.y, 5);
-  });
-
-  it("disables Reset when the view is already fitted, and enables it once moved", () => {
-    render(<Harness />);
-    expect(screen.getByRole("button", { name: "Reset view" })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
-
-    expect(screen.getByRole("button", { name: "Reset view" })).toBeEnabled();
   });
 
   it("stops at 400% and disables Zoom in at the ceiling", () => {

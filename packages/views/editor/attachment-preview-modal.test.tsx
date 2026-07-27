@@ -109,7 +109,6 @@ vi.mock("../i18n", () => ({
           zoom_out: "Zoom out",
           zoom_fit: "Fit to view",
           zoom_actual: "Actual size",
-          reset_view: "Reset view",
         },
         attachment: {
           preview: "Preview",
