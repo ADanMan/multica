@@ -66,9 +66,15 @@ describe("DiagnosticRouteReporter", () => {
     expect(setRendererRouteContext).toHaveBeenCalledWith({
       surface: "tab",
       path: "/:slug/issues",
-      workspaceSlug: "acme",
-      tabId: "tab-1",
     });
+  });
+
+  it("never sends the workspace slug or tab id — this payload reaches telemetry", () => {
+    render(<DiagnosticRouteReporter />);
+
+    const sent = JSON.stringify(setRendererRouteContext.mock.calls);
+    expect(sent).not.toContain("acme");
+    expect(sent).not.toContain("tab-1");
   });
 
   it("publishes the same route to the in-renderer freeze watchdog", () => {
@@ -116,8 +122,6 @@ describe("DiagnosticRouteReporter", () => {
     expect(setRendererRouteContext).toHaveBeenCalledWith({
       surface: "tab",
       path: "/:slug/issues",
-      workspaceSlug: "acme",
-      tabId: "tab-1",
       operation: "parse-markdown-chunked",
     });
   });

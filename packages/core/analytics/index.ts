@@ -257,10 +257,16 @@ export interface CaptureEventOptions {
    */
   sendInstantly?: boolean;
   /**
-   * Fired once the event has been handed to posthog.capture. This marks
-   * hand-off, NOT delivery confirmation, and never fires on a build with
-   * analytics disabled — callers that persist state until acknowledgement need
-   * their own expiry path.
+   * Fired once the event has been handed to posthog.capture.
+   *
+   * This is HAND-OFF, not delivery: the request may still be in flight, and
+   * posthog-js exposes no delivery callback to wait on. Never treat it as
+   * permission to discard the only copy of something — a caller that deletes
+   * persisted state here loses it whenever the app dies between hand-off and
+   * the wire (see freeze-flush.ts, which waits out a grace window instead).
+   *
+   * It also never fires on a build with analytics disabled, so anything
+   * waiting on it needs an expiry path of its own.
    */
   onCaptured?: () => void;
 }

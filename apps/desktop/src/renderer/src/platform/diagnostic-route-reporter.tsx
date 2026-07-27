@@ -34,7 +34,8 @@ import type { RendererRouteContextInput } from "../../../shared/renderer-route-c
 export function DiagnosticRouteReporter() {
   const user = useAuthStore((s) => s.user);
   const overlay = useWindowOverlayStore((s) => s.overlay);
-  const { slug: activeWorkspaceSlug, tabId: activeTabId } = useActiveTabIdentity();
+  // The slug decides whether a workspace is mounted at all; it is never sent.
+  const { slug: activeWorkspaceSlug } = useActiveTabIdentity();
   // The tab url carries search/hash too; bucketing drops both, so telemetry
   // never sees a filter value or an anchor.
   const activeTabUrl = useActiveTabUrl();
@@ -53,17 +54,16 @@ export function DiagnosticRouteReporter() {
     });
     setDiagnosticRoute(surface.path);
 
+    // Only the bucketed template travels. The slug and tab id stay in this
+    // process: they identify a workspace and a session, and this payload ends
+    // up in telemetry.
     const context: RendererRouteContextInput = {
       surface: surface.kind,
       path: surface.path,
-      ...(activeWorkspaceSlug && surface.kind === "tab"
-        ? { workspaceSlug: activeWorkspaceSlug }
-        : {}),
-      ...(activeTabId && surface.kind === "tab" ? { tabId: activeTabId } : {}),
     };
     contextRef.current = context;
     send(context, lastSentRef);
-  }, [user, overlay, activeWorkspaceSlug, activeTabId, activeTabUrl]);
+  }, [user, overlay, activeWorkspaceSlug, activeTabUrl]);
 
   // A marked operation must reach main before the thread it is about to block:
   // `ipcRenderer.send` is asynchronous and travels on the IPC thread, so it
