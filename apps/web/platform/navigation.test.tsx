@@ -6,8 +6,8 @@
  * deployment's own origin. Desktop answers it by opening a tab; the web must
  * answer it with a router push, or those links silently do nothing.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { act, render } from "@testing-library/react";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
+import { render } from "@testing-library/react";
 
 const router = vi.hoisted(() => ({
   push: vi.fn(),
@@ -29,10 +29,6 @@ function navigate(path: string) {
   window.dispatchEvent(
     new CustomEvent("multica:navigate", { detail: { path } }),
   );
-}
-
-function popstate() {
-  window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
 function renderAdapter(): () => NavigationAdapter {
@@ -84,59 +80,46 @@ describe("WebNavigationProvider internal link bridge", () => {
 
 /**
  * `canGoBack` decides whether a page whose subject was just deleted steps back
- * or replaces with a fallback. Getting it wrong in the optimistic direction
- * walks the user out of Multica, so the wiring — not just the tracker — needs
- * covering. jsdom has no Navigation API, which is exactly the fallback path.
+ * or replaces with a fallback. A wrong `true` walks the user out of Multica,
+ * so the adapter must expose the browser's own answer and nothing derived.
  */
-describe("WebNavigationProvider in-app history", () => {
-  // The tracker is document-scoped, so normalize it instead of assuming a
-  // fresh module: traversals clamp at zero, so draining always lands on "no
-  // in-app history" no matter what earlier tests pushed.
-  function drainToColdOpen() {
-    for (let i = 0; i < 5; i += 1) popstate();
-  }
+describe("WebNavigationProvider canGoBack", () => {
+  const win = window as unknown as { navigation?: unknown };
 
-  it("reports no history for a cold open", () => {
+  afterEach(() => {
+    delete win.navigation;
+  });
+
+  it("passes through the Navigation API's answer", () => {
+    win.navigation = { canGoBack: true };
+
+    expect(renderAdapter()().canGoBack!()).toBe(true);
+  });
+
+  it("reads the answer live rather than freezing it at render", () => {
+    win.navigation = { canGoBack: true };
     const adapter = renderAdapter();
-    drainToColdOpen();
+
+    win.navigation = { canGoBack: false };
 
     expect(adapter().canGoBack!()).toBe(false);
   });
 
-  it("reports history once the user has navigated in-app", () => {
+  // Regression (PR review, twice): a count of `push` calls stood in for real
+  // history here. It could not — Next drops a push to `replaceState` when the
+  // canonical URL is unchanged, so a push that committed no entry still made
+  // this claim `true`. Calling push must not move this answer at all.
+  it("is unmoved by a push that committed no history entry", () => {
+    win.navigation = { canGoBack: false };
     const adapter = renderAdapter();
-    drainToColdOpen();
 
-    act(() => adapter().push("/acme/issues/MUL-1"));
+    adapter().push("/acme/issues");
 
-    expect(adapter().canGoBack!()).toBe(true);
-  });
-
-  // Regression (PR review): a push followed by the browser's own Back button
-  // left the user on the entry the document opened at while `canGoBack` still
-  // said true — `back()` from there leaves the app.
-  it("reports no history after a browser Back undoes the push", () => {
-    const adapter = renderAdapter();
-    drainToColdOpen();
-
-    act(() => adapter().push("/acme/issues/MUL-1"));
-    popstate();
-
+    expect(router.push).toHaveBeenCalledWith("/acme/issues");
     expect(adapter().canGoBack!()).toBe(false);
   });
 
-  it("stops tracking traversals once unmounted", () => {
-    const adapter = renderAdapter();
-    drainToColdOpen();
-    act(() => adapter().push("/acme/issues/MUL-1"));
-
-    const { unmount } = render(
-      <WebNavigationProvider>{null}</WebNavigationProvider>,
-    );
-    unmount();
-    // The remaining mounted provider still listens, so this must still count.
-    popstate();
-
-    expect(adapter().canGoBack!()).toBe(false);
+  it("reports false where the browser cannot answer, so callers use the fallback", () => {
+    expect(renderAdapter()().canGoBack!()).toBe(false);
   });
 });

@@ -15,9 +15,14 @@ import { useNavigation } from "./context";
  *
  * `fallback` covers the case where there is nothing to go back to: a shared
  * link opened cold, a new tab, a pasted URL. Stepping back from those would
- * leave Multica entirely, so we navigate to `fallback` instead. Adapters that
- * can't report history (test stubs, the desktop issue window) always take this
- * branch, which is exactly the pre-existing behaviour.
+ * leave Multica entirely, so we navigate to `fallback` instead.
+ *
+ * It also covers every platform that cannot answer the question — the desktop
+ * issue window, test stubs, and browsers with no Navigation API. That branch
+ * is the behaviour those surfaces had before this hook existed, so a platform
+ * going quiet costs the user a better destination and nothing more. Only ever
+ * answer `canGoBack` from something that knows; a hopeful guess here is what
+ * puts a user outside the app.
  *
  * Never `push`: the page we are leaving is dead, so its URL must not be left
  * on the back stack for the back button to land on a 404. Stepping back still

@@ -1,16 +1,12 @@
 "use client";
 
-import { Suspense, useCallback, useEffect } from "react";
+import { Suspense, useEffect } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   NavigationProvider,
   type NavigationAdapter,
 } from "@multica/views/navigation";
-import { createInAppHistoryTracker } from "./in-app-history";
-
-// Document-scoped, like the browser history it shadows: a remount must not
-// convince us there is somewhere to go back to.
-const inAppHistory = createInAppHistoryTracker();
+import { canGoBackInApp } from "./in-app-history";
 
 /**
  * Web half of the `multica:navigate` bridge — the event shared content
@@ -19,30 +15,16 @@ const inAppHistory = createInAppHistoryTracker();
  * equivalent is a router push in place. Without this the event has no listener
  * and such links do nothing at all.
  */
-function useInternalLinkHandler(push: (path: string) => void) {
+function useInternalLinkHandler(router: ReturnType<typeof useRouter>) {
   useEffect(() => {
     const handler = (e: Event) => {
       const path = (e as CustomEvent<{ path?: string }>).detail?.path;
       if (!path) return;
-      push(path);
+      router.push(path);
     };
     window.addEventListener("multica:navigate", handler);
     return () => window.removeEventListener("multica:navigate", handler);
-  }, [push]);
-}
-
-/**
- * Keep the in-app depth honest about history traversals — the browser's own
- * Back/Forward buttons and `router.back()` both land here. Without it a push
- * followed by a browser Back would still look like "there is a page behind
- * us" while sitting on the entry the document opened at.
- */
-function useHistoryTraversalTracking() {
-  useEffect(() => {
-    const onPopState = () => inAppHistory.recordTraversal();
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [router]);
 }
 
 function NavigationProviderInner({
@@ -53,21 +35,13 @@ function NavigationProviderInner({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const push = useCallback(
-    (path: string) => {
-      inAppHistory.recordPush();
-      router.push(path);
-    },
-    [router],
-  );
-  useInternalLinkHandler(push);
-  useHistoryTraversalTracking();
+  useInternalLinkHandler(router);
 
   const adapter: NavigationAdapter = {
-    push,
+    push: router.push,
     replace: router.replace,
     back: router.back,
-    canGoBack: inAppHistory.canGoBack,
+    canGoBack: canGoBackInApp,
     pathname,
     searchParams: new URLSearchParams(searchParams.toString()),
     getShareableUrl: (path: string) =>
