@@ -245,6 +245,67 @@ describe("issueTableRowPageOptions", () => {
     unsubscribe2();
     qc.clear();
   });
+
+  it("does not auto-retry a background-refetch error on a page that still has data", async () => {
+    // The tricky case: a page loads OK, then an invalidation-triggered background
+    // refetch fails. TanStack flags such a page `isInvalidated: true` (see its
+    // "error" reducer), so it is stale AND errored while keeping the old data. A
+    // plain `refetchOnMount: true` would re-fire the failing request on every
+    // observer reattach; `retryOnMount: false` alone does NOT cover this path
+    // because it only guards no-data first-load errors. The `refetchOnMount`
+    // status guard is what keeps the errored page stable until an explicit Retry.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { staleTime: Infinity } },
+    });
+    const listIssueTableRows = vi
+      .fn<
+        (params: IssueTableRowsRequest) => Promise<IssueTableRowsResponse>
+      >()
+      .mockResolvedValueOnce(makeRowsResponse([makeIssue(1)])) // initial load
+      .mockRejectedValueOnce(new Error("refetch failed")) // background refetch
+      .mockResolvedValueOnce(makeRowsResponse([makeIssue(1), makeIssue(2)])); // explicit Retry
+    installFakeTableRowsApi(listIssueTableRows);
+
+    const options = issueTableRowPageOptions(WS_ID, request);
+
+    const observer1 = new QueryObserver(qc, options);
+    const unsubscribe1 = observer1.subscribe(() => {});
+    await vi.waitFor(() => {
+      expect(observer1.getCurrentResult().status).toBe("success");
+      expect(rowIssueIds(observer1.getCurrentResult().data)).toEqual([
+        "issue-1",
+      ]);
+    });
+
+    // Invalidate while the observer is active: the background refetch fires and
+    // fails, leaving the page errored-with-data and flagged invalidated.
+    void qc.invalidateQueries({ queryKey: options.queryKey }).catch(() => {});
+    await vi.waitFor(() => {
+      expect(observer1.getCurrentResult().status).toBe("error");
+    });
+    expect(listIssueTableRows).toHaveBeenCalledTimes(2);
+    expect(rowIssueIds(observer1.getCurrentResult().data)).toEqual(["issue-1"]);
+    expect(qc.getQueryState(options.queryKey)?.isInvalidated).toBe(true);
+
+    // Detach + reattach must NOT re-fire the failing request.
+    unsubscribe1();
+    const observer2 = new QueryObserver(qc, options);
+    const unsubscribe2 = observer2.subscribe(() => {});
+    expect(observer2.getCurrentResult().status).toBe("error");
+    expect(observer2.getCurrentResult().fetchStatus).toBe("idle");
+    expect(listIssueTableRows).toHaveBeenCalledTimes(2);
+
+    // Only an explicit Retry re-runs it — and then the fresh page renders.
+    await observer2.refetch();
+    expect(listIssueTableRows).toHaveBeenCalledTimes(3);
+    expect(rowIssueIds(observer2.getCurrentResult().data)).toEqual([
+      "issue-1",
+      "issue-2",
+    ]);
+
+    unsubscribe2();
+    qc.clear();
+  });
 });
 
 describe("projectGanttIssuesOptions", () => {
