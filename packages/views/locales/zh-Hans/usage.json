@@ -60,7 +60,9 @@
     "agent_rate": "{{failed}} / {{total}} · {{rate}}",
     "no_data": "所选时间范围内没有失败的运行。",
     "show_reasons": "展开错误码",
-    "hide_reasons": "收起错误码"
+    "hide_reasons": "收起错误码",
+    "show_all": "展开全部 {{count}} 个",
+    "show_less": "只看前 {{count}} 个"
   },
   "leaderboard": {
     "title": "排行榜",

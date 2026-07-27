@@ -60,7 +60,9 @@
     "agent_rate": "{{failed}} / {{total}} · {{rate}}",
     "no_data": "No failed runs in this window.",
     "show_reasons": "Show error codes",
-    "hide_reasons": "Hide error codes"
+    "hide_reasons": "Hide error codes",
+    "show_all": "Show all {{count}}",
+    "show_less": "Show top {{count}}"
   },
   "leaderboard": {
     "title": "Leaderboard",

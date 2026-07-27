@@ -14,6 +14,10 @@ import type { NavigationAdapter } from "../../navigation";
 // dashboard options builders runs for real, so the key is the production key.
 const queryKeys = vi.hoisted(() => [] as unknown[][]);
 const dashboardDataRef = vi.hoisted(() => ({ current: false }));
+// Swaps the by-agent fixture for one with enough agents to exercise the
+// top-offenders cap. Kept off by default so the other tests keep their exact
+// 4-of-10 arithmetic.
+const manyAgentsRef = vi.hoisted(() => ({ current: false }));
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -33,7 +37,12 @@ vi.mock("@tanstack/react-query", async () => {
         // resolve agent-1 to a name and render its drill-down link.
         if (opts.queryKey[0] === "workspaces" && opts.queryKey[2] === "agents") {
           return {
-            data: [{ id: "agent-1", name: "Agent One" }],
+            data: manyAgentsRef.current
+              ? Array.from({ length: 12 }, (_, i) => ({
+                  id: `bulk-${i}`,
+                  name: `Bulk Agent ${i}`,
+                }))
+              : [{ id: "agent-1", name: "Agent One" }],
             isLoading: false,
             isSuccess: true,
           };
@@ -84,7 +93,21 @@ vi.mock("@tanstack/react-query", async () => {
                       { date: todayIso(), failure_reason: "timeout", task_count: 1 },
                     ]
                   : kind === "failures-by-agent"
-                    ? [
+                    ? manyAgentsRef.current
+                      ? Array.from({ length: 12 }, (_, i) => [
+                          {
+                            agent_id: `bulk-${i}`,
+                            failure_reason: "",
+                            task_count: 100,
+                          },
+                          {
+                            agent_id: `bulk-${i}`,
+                            failure_reason: "timeout",
+                            // Descending so rank order is unambiguous.
+                            task_count: 12 - i,
+                          },
+                        ]).flat()
+                      : [
                         { agent_id: "agent-1", failure_reason: "", task_count: 6 },
                         {
                           agent_id: "agent-1",
@@ -336,6 +359,58 @@ describe("DashboardPage — the Errors list never exposes an agent the viewer ca
     // Anonymous, and therefore not a link — there is no page to open.
     expect(
       byAgent.queryByRole("link", { name: /Other agents/ }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage — Errors card placement and density", () => {
+  beforeEach(() => {
+    queryKeys.length = 0;
+    dashboardDataRef.current = true;
+    manyAgentsRef.current = false;
+    tzRef.current = "UTC";
+    cleanup();
+  });
+
+  it("renders the Errors card after the leaderboard, at the bottom of the page", () => {
+    // Spend is the headline; failures are the follow-up question you ask
+    // after seeing who is spending. Asserting document order rather than a
+    // class name keeps this about the reading sequence.
+    renderDashboard();
+
+    // By heading, not by text: "Errors" also names the trend-chart toggle.
+    const leaderboard = screen.getByRole("heading", { name: "Leaderboard" });
+    const errors = screen.getByRole("heading", { name: "Errors" });
+
+    expect(
+      leaderboard.compareDocumentPosition(errors) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("caps the offender list and expands it on demand", async () => {
+    manyAgentsRef.current = true;
+    const user = userEvent.setup();
+    renderDashboard();
+
+    const list = () => screen.getByRole("list", { name: "Top offenders" });
+    // 12 agents have failures, but an unbounded list is what made this card
+    // taller than the rest of the page put together.
+    expect(within(list()).getAllByRole("listitem")).toHaveLength(8);
+    // The toggle is the truncation signal — its label carries the full count,
+    // so the cap is never silent.
+    await user.click(screen.getByRole("button", { name: "Show all 12" }));
+    expect(within(list()).getAllByRole("listitem")).toHaveLength(12);
+
+    await user.click(screen.getByRole("button", { name: "Show top 8" }));
+    expect(within(list()).getAllByRole("listitem")).toHaveLength(8);
+  });
+
+  it("shows no expand affordance when every offender already fits", () => {
+    renderDashboard();
+
+    expect(
+      screen.queryByRole("button", { name: /Show all/ }),
     ).not.toBeInTheDocument();
   });
 });

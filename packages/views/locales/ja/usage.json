@@ -60,7 +60,9 @@
     "agent_rate": "{{failed}} / {{total}} · {{rate}}",
     "no_data": "この期間に失敗した実行はありません。",
     "show_reasons": "エラーコードを表示",
-    "hide_reasons": "エラーコードを隠す"
+    "hide_reasons": "エラーコードを隠す",
+    "show_all": "全 {{count}} 件を表示",
+    "show_less": "上位 {{count}} 件のみ"
   },
   "leaderboard": {
     "title": "リーダーボード",

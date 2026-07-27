@@ -595,6 +595,15 @@ export function DashboardPage() {
                 lessThanMinuteLabel={t(($) => $.duration.less_than_minute)}
               />
 
+              {/* Per-agent leaderboard — user picks the ranking metric;
+                  the progress bar and column emphasis follow the metric. */}
+              <Leaderboard
+                rows={visibleAgentRows}
+                agents={agents}
+                deletedAgentCount={deletedAgentCount}
+                lessThanMinuteLabel={t(($) => $.duration.less_than_minute)}
+              />
+
               {/* Failure breakdown — what broke and who it broke for. Rendered
                   unconditionally (not only when failures exist) so "no failed
                   runs" is an answer the page gives rather than an absence the
@@ -605,15 +614,6 @@ export function DashboardPage() {
                 reasonRows={failureReasonRows}
                 agentRows={agentFailureRows}
                 agents={agents}
-              />
-
-              {/* Per-agent leaderboard — user picks the ranking metric;
-                  the progress bar and column emphasis follow the metric. */}
-              <Leaderboard
-                rows={visibleAgentRows}
-                agents={agents}
-                deletedAgentCount={deletedAgentCount}
-                lessThanMinuteLabel={t(($) => $.duration.less_than_minute)}
               />
             </>
           )}
@@ -859,14 +859,24 @@ function useFailureClassLabel(): (c: FailureClass) => string {
   };
 }
 
+// How many offenders the list shows before collapsing the tail behind a
+// toggle. The list is ranked by absolute failure count, so the tail is
+// agents that failed once or twice — real, but not what anyone opens this
+// card to see. Eight keeps the card roughly as tall as the class summary
+// plus a header, instead of running to 30+ rows on a busy workspace.
+const TOP_OFFENDER_LIMIT = 8;
+
 /**
  * Failure breakdown for the selected window: what class of thing broke, and
  * which agents it broke for.
  *
- * Two ranked lists rather than a second chart — with seven classes and an
- * unbounded agent list, bar length plus an exact number is easier to read
- * than more stacked colour, and it leaves room for the raw error codes
- * behind a disclosure.
+ * Laid out as two stacked full-width sections rather than side-by-side
+ * columns. The two halves have structurally different lengths — classes are
+ * capped at seven and usually show three or four, while the agent list is
+ * unbounded — so a 2-column grid left one side stranded next to a column of
+ * whitespace. Stacking also lets each section use the full width for what it
+ * actually needs: proportion for the classes, a leaderboard-shaped row for
+ * the agents.
  */
 function ErrorsBreakdown({
   totals,
@@ -884,9 +894,12 @@ function ErrorsBreakdown({
   const { t } = useT("usage");
   const classLabel = useFailureClassLabel();
   const [showReasons, setShowReasons] = useState(false);
+  const [showAllAgents, setShowAllAgents] = useState(false);
 
-  const maxClass = classRows.reduce((m, r) => Math.max(m, r.count), 0);
   const maxAgent = agentRows.reduce((m, r) => Math.max(m, r.failed), 0);
+  const visibleAgents = showAllAgents
+    ? agentRows
+    : agentRows.slice(0, TOP_OFFENDER_LIMIT);
 
   return (
     <div className="rounded-lg border bg-card">
@@ -904,9 +917,9 @@ function ErrorsBreakdown({
       </div>
 
       {totals.failed === 0 ? null : (
-        <div className="grid grid-cols-1 divide-y md:grid-cols-2 md:divide-x md:divide-y-0">
-          <div className="min-w-0 p-4">
-            <div className="mb-2 flex items-center justify-between gap-2">
+        <>
+          <div className="border-b p-4">
+            <div className="mb-2.5 flex items-center justify-between gap-2">
               <h5 className="text-xs font-medium text-muted-foreground">
                 {t(($) => $.errors.by_class)}
               </h5>
@@ -921,64 +934,31 @@ function ErrorsBreakdown({
               </button>
             </div>
             {showReasons ? (
-              // Raw failure_reason values, unlocalised on purpose: they are
-              // the backend's wire enum, and an operator pasting one into a
-              // log search or an issue needs the exact string.
-              <ul aria-label={t(($) => $.errors.by_class)} className="space-y-1.5">
-                {reasonRows.map((row) => (
-                  <li
-                    key={row.reason}
-                    className="flex items-center justify-between gap-2"
-                  >
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span
-                        aria-hidden
-                        className="h-2 w-2 shrink-0 rounded-[2px]"
-                        style={{
-                          backgroundColor: FAILURE_CLASS_COLOR[row.failureClass],
-                        }}
-                      />
-                      <code className="truncate text-xs text-muted-foreground">
-                        {row.reason}
-                      </code>
-                    </span>
-                    <span className="shrink-0 text-xs tabular-nums">
-                      {row.count}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <ReasonList rows={reasonRows} />
             ) : (
-              <ul aria-label={t(($) => $.errors.by_class)} className="space-y-2">
-                {classRows.map((row) => (
-                  <li key={row.failureClass} className="space-y-1">
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate">{classLabel(row.failureClass)}</span>
-                      <span className="shrink-0 tabular-nums text-muted-foreground">
-                        {row.count}
-                      </span>
-                    </div>
-                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-full rounded-full transition-[width] duration-300 ease-out"
-                        style={{
-                          width: `${maxClass > 0 ? (row.count / maxClass) * 100 : 0}%`,
-                          backgroundColor: FAILURE_CLASS_COLOR[row.failureClass],
-                        }}
-                      />
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              <ClassComposition rows={classRows} classLabel={classLabel} />
             )}
           </div>
 
-          <div className="min-w-0 p-4">
-            <h5 className="mb-2 text-xs font-medium text-muted-foreground">
-              {t(($) => $.errors.by_agent)}
-            </h5>
-            <ul aria-label={t(($) => $.errors.by_agent)} className="space-y-2">
-              {agentRows.map((row) => (
+          <div className="p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h5 className="text-xs font-medium text-muted-foreground">
+                {t(($) => $.errors.by_agent)}
+              </h5>
+              {agentRows.length > TOP_OFFENDER_LIMIT ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAllAgents((v) => !v)}
+                  className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  {showAllAgents
+                    ? t(($) => $.errors.show_less, { count: TOP_OFFENDER_LIMIT })
+                    : t(($) => $.errors.show_all, { count: agentRows.length })}
+                </button>
+              ) : null}
+            </div>
+            <ul aria-label={t(($) => $.errors.by_agent)} className="divide-y">
+              {visibleAgents.map((row) => (
                 <AgentFailureItem
                   key={row.agentId}
                   row={row}
@@ -989,12 +969,113 @@ function ErrorsBreakdown({
               ))}
             </ul>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
 }
 
+/**
+ * Class breakdown as one 100%-stacked bar plus a legend.
+ *
+ * Replaces seven stacked progress bars. The question this answers is "what is
+ * the mix", and a single bar shows share-of-total directly — with separate
+ * bars the reader has to compare lengths and mentally total them. It also
+ * collapses ~340px of vertical space into ~70px, which is what let the card
+ * stop being a column of whitespace.
+ */
+function ClassComposition({
+  rows,
+  classLabel,
+}: {
+  rows: FailureClassRow[];
+  classLabel: (c: FailureClass) => string;
+}) {
+  const { t } = useT("usage");
+  const total = rows.reduce((sum, r) => sum + r.count, 0);
+  if (total === 0) return null;
+
+  return (
+    <div className="space-y-2.5">
+      {/* Segments are ordered by count desc (the aggregator's order), so the
+          bar reads heaviest-first left to right. */}
+      <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
+        {rows.map((row) => (
+          <div
+            key={row.failureClass}
+            className="h-full transition-[width] duration-300 ease-out"
+            style={{
+              width: `${(row.count / total) * 100}%`,
+              backgroundColor: FAILURE_CLASS_COLOR[row.failureClass],
+            }}
+          />
+        ))}
+      </div>
+      <ul
+        aria-label={t(($) => $.errors.by_class)}
+        className="flex flex-wrap items-center gap-x-4 gap-y-1.5"
+      >
+        {rows.map((row) => (
+          <li key={row.failureClass} className="flex items-center gap-1.5">
+            <span
+              aria-hidden
+              className="h-2 w-2 shrink-0 rounded-[2px]"
+              style={{ backgroundColor: FAILURE_CLASS_COLOR[row.failureClass] }}
+            />
+            <span className="text-xs">{classLabel(row.failureClass)}</span>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {row.count}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Raw `failure_reason` values behind the class summary. Unlocalised on
+ * purpose: they are the backend's wire enum, and an operator pasting one into
+ * a log search or an issue needs the exact string.
+ *
+ * Two columns on wide viewports — the list runs to ~20 rows at its longest,
+ * and the card now has the full page width to spend on it.
+ */
+function ReasonList({ rows }: { rows: FailureReasonRow[] }) {
+  const { t } = useT("usage");
+  return (
+    <ul
+      aria-label={t(($) => $.errors.by_class)}
+      className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2"
+    >
+      {rows.map((row) => (
+        <li key={row.reason} className="flex items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-2">
+            <span
+              aria-hidden
+              className="h-2 w-2 shrink-0 rounded-[2px]"
+              style={{ backgroundColor: FAILURE_CLASS_COLOR[row.failureClass] }}
+            />
+            <code className="truncate text-xs text-muted-foreground">
+              {row.reason}
+            </code>
+          </span>
+          <span className="shrink-0 text-xs tabular-nums">{row.count}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * One offender row, shaped like the leaderboard row directly above this card:
+ * identity, then a proportional bar, then the numbers.
+ *
+ * Was two lines (name+stats over a full-width bar), which at 30 agents made
+ * the card taller than the rest of the page combined. Folding the bar into
+ * its own grid column halves the height and lines the numbers up into a
+ * scannable column.
+ */
 function AgentFailureItem({
   row,
   name,
@@ -1036,27 +1117,18 @@ function AgentFailureItem({
   );
 
   return (
-    <li className="space-y-1">
-      <div className="flex items-center justify-between gap-2">
-        {name ? (
-          <AppLink
-            href={`${wsPaths.agentDetail(row.agentId)}?view=overview`}
-            newTabTitle={name}
-            className="min-w-0 hover:underline"
-          >
-            {label}
-          </AppLink>
-        ) : (
-          label
-        )}
-        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-          {t(($) => $.errors.agent_rate, {
-            failed: row.failed,
-            total: row.total,
-            rate: formatRate(row.failed, row.total),
-          })}
-        </span>
-      </div>
+    <li className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_auto] items-center gap-3 py-2">
+      {name ? (
+        <AppLink
+          href={`${wsPaths.agentDetail(row.agentId)}?view=overview`}
+          newTabTitle={name}
+          className="min-w-0 hover:underline"
+        >
+          {label}
+        </AppLink>
+      ) : (
+        label
+      )}
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full transition-[width] duration-300 ease-out"
@@ -1066,6 +1138,13 @@ function AgentFailureItem({
           }}
         />
       </div>
+      <span className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
+        {t(($) => $.errors.agent_rate, {
+          failed: row.failed,
+          total: row.total,
+          rate: formatRate(row.failed, row.total),
+        })}
+      </span>
     </li>
   );
 }
