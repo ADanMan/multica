@@ -346,6 +346,38 @@ describe("comment composers", () => {
     expect(screen.getByTestId("editor").closest("[aria-busy]")).toBeNull();
   });
 
+  // Regression: the tab-switch flush re-writes IDENTICAL content mid-flight;
+  // that must not read as "edited during the request" — the posted comment's
+  // draft still clears (it previously resurrected with Send re-enabled).
+  it("a tab switch during the send does not resurrect the posted draft", async () => {
+    let resolveSubmit!: (v: boolean) => void;
+    const onSubmit = vi.fn(() => new Promise<boolean>((r) => { resolveSubmit = r; }));
+    renderCommentInput(onSubmit);
+    activateComposer("comment-composer-shell");
+    fireEvent.change(screen.getByTestId("editor"), { target: { value: "draft A" } });
+    fireEvent.keyDown(screen.getByTestId("editor"), { key: "Enter", metaKey: true });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    // Backgrounding the tab fires the visibility flush with unchanged content.
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    fireEvent(document, new Event("visibilitychange"));
+
+    await act(async () => {
+      resolveSubmit(true);
+      await Promise.resolve();
+    });
+
+    expect(useCommentDraftStore.getState().getDraft("new:issue-1")).toBeUndefined();
+
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+  });
+
   // MUL-5181 P0: the editor stays interactive during a send — text typed
   // while draft A is in flight must survive A's success, in store AND editor.
   it("text typed while a comment send is in flight survives the success", async () => {

@@ -155,6 +155,10 @@ function CommentInput({ issueId, onSubmit }: CommentInputProps) {
       // Success may only consume the entry it submitted (MUL-5181 P0): edits
       // made while the request was in flight — or by a reopened composer after
       // this one unmounted — survive both in the store and in the editor.
+      // Flush the pending debounce first so typing still inside the window is
+      // judged correctly (a no-op flush preserves entry identity).
+      const lateMd = editorRef.current?.flushPendingUpdate?.();
+      if (lateMd != null) setDraft(draftKey, lateMd);
       const store = useCommentDraftStore.getState();
       const live = store.drafts[draftKey];
       const untouched = live === undefined || live === submittedEntryRef.current;

@@ -168,6 +168,8 @@ function ReplyInput({
     onAccepted: () => {
       // Success may only consume the entry it submitted — see CommentInput.
       if (draftKey) {
+        const lateMd = editorRef.current?.flushPendingUpdate?.();
+        if (lateMd != null) setDraft(draftKey, lateMd);
         const store = useCommentDraftStore.getState();
         const live = store.drafts[draftKey];
         const untouched = live === undefined || live === submittedEntryRef.current;

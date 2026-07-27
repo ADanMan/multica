@@ -439,11 +439,10 @@ export function ManualCreatePanel({
   // editor body — a title-only issue is valid — so `normalize` ignores the
   // description markdown and feeds the title through as the empty-guard/content;
   // the body is read separately inside onSubmit.
-  // Stale-submit guard (MUL-5181 P0): the issue draft is a SINGLETON store.
-  // If the user closes the dialog mid-submit, reopens it, and types draft B,
-  // the late success of draft A must not clear B. Snapshot the draft's object
-  // identity at submit; a still-mounted panel clears unconditionally (the
-  // form is what the user sees), a dead one clears only an untouched draft.
+  // Stale-submit guard (MUL-5181 P0): the issue draft is a SINGLETON store
+  // and the editors stay interactive during a request. Snapshot the draft's
+  // object identity at submit; success clears ONLY an untouched draft —
+  // whether the edit came mid-flight or from a reopened dialog.
   const mountedRef = useRef(true);
   useLayoutEffect(() => {
     mountedRef.current = true;
@@ -662,17 +661,21 @@ export function ManualCreatePanel({
     }
   },
     onAccepted: () => {
+      // These preferences derive from the SUBMITTED values, not the live
+      // draft — an issue was created, so record them regardless of the guard.
+      setLastAssignee(assigneeType, assigneeId);
+      setLastMode("manual");
       // Success may only consume the draft it submitted (MUL-5181 P0): any
       // edit after the submit snapshot — typing while the request is in
       // flight, or a reopened dialog — survives, and the dialog then stays
-      // open on the newer draft instead of closing/resetting over it.
+      // open on the newer draft instead of closing/resetting over it. Flush
+      // the editor's pending debounce first so mid-flight typing still inside
+      // the debounce window is judged correctly.
+      const lateDesc = descEditorRef.current?.flushPendingUpdate?.();
+      if (lateDesc != null) setManual({ description: lateDesc });
       const untouched =
         useIssueDraftStore.getState().draft === submittedDraftRef.current;
-      if (untouched) {
-        setLastAssignee(assigneeType, assigneeId);
-        setLastMode("manual");
-        clearDraft();
-      }
+      if (untouched) clearDraft();
       if (!mountedRef.current || !untouched) return;
       if (keepOpen) {
         resetForNextIssue();

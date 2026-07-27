@@ -464,6 +464,10 @@ export function ChatInput({
         // into) a DIFFERENT draft — clearing it or blurring would wipe that
         // visible input. Only scrub the editor when the user is still on the
         // session they sent from.
+        // Flush typing still inside the debounce window before judging: it
+        // belongs to the LOADED document and must count as a mid-flight edit.
+        const lateMd = editorRef.current?.flushPendingUpdate?.();
+        if (lateMd != null) commitDraft(editorDraftKeyRef.current, lateMd);
         const liveDraft = useChatStore.getState().inputDrafts[keyAtSend];
         const untouched = liveDraft === undefined || liveDraft === draftValueAtSend;
         if (options?.clearEditor !== false && untouched) {

@@ -122,6 +122,14 @@ function writeDraft(
     delete next[key];
     return next;
   }
+  // Idempotent on identical writes: the composers' visibilitychange/pagehide
+  // flush re-writes the same content on every tab switch, and the stale-submit
+  // guard compares entry identity — a fresh-but-equal entry would read as "the
+  // user edited during the request" and wrongly keep a submitted draft alive.
+  const existing = drafts[key];
+  if (existing && existing.content === content && existing.attachments === uploads) {
+    return drafts;
+  }
   return { ...drafts, [key]: { content, attachments: uploads, updatedAt: Date.now() } };
 }
 

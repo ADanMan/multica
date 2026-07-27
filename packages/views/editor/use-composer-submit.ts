@@ -4,8 +4,8 @@
  * The unified await-then-render send contract for every composer (MUL-5181).
  *
  * Before this hook, comment-input, reply-input, comment-card (edit),
- * create-issue, quick-create, project, and feedback each hand-copied the same
- * six-step "pessimistic submit": read markdown, guard empty/in-flight, re-read
+ * create-issue, and quick-create each hand-copied the same six-step
+ * "pessimistic submit": read markdown, guard empty/in-flight, re-read
  * the upload gate, lock + spin, await the server, and clear only on success
  * (keep the draft on failure). The copies drifted — some guarded single-flight
  * with a ref, some with a state boolean a render behind; some re-checked the

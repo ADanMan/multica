@@ -251,6 +251,20 @@ describe("comment draft store — upload lifecycle", () => {
     expect(s.getAttachments(KEY).map((a) => a.id)).toEqual(["att-1"]);
   });
 
+  it("an identical setDraft is a no-op that preserves entry identity", () => {
+    // The stale-submit guard compares entry identity; the composers' tab-switch
+    // flush re-writes identical content mid-flight and must not mint a new
+    // entry (that would read as an edit and keep a submitted draft alive).
+    const s = useCommentDraftStore.getState();
+    s.setDraft(KEY, "same words");
+    const before = useCommentDraftStore.getState().drafts[KEY];
+    s.setDraft(KEY, "same words");
+    expect(useCommentDraftStore.getState().drafts[KEY]).toBe(before);
+
+    s.setDraft(KEY, "different words");
+    expect(useCommentDraftStore.getState().drafts[KEY]).not.toBe(before);
+  });
+
   it("appendToDraftContent lands a fragment after existing text, keeping uploads", () => {
     const s = useCommentDraftStore.getState();
     s.setDraft(KEY, "wip text");

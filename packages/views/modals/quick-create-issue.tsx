@@ -461,9 +461,12 @@ export function AgentCreatePanel({
     },
     onAccepted: () => {
       // A successful create ends this whole draft (shared + manual + agent);
-      // last-successful actor/project preferences were saved above. Clear it
-      // only if this panel is still up OR nobody replaced the draft since the
-      // submit snapshot — a stale request may only consume what it submitted.
+      // last-successful actor/project preferences were saved in onSubmit.
+      // Success may only consume the draft it submitted: flush the editor's
+      // pending debounce first, then clear only an untouched draft — edits
+      // made mid-flight or by a reopened dialog survive.
+      const latePrompt = editorRef.current?.flushPendingUpdate?.();
+      if (latePrompt != null) setAgent({ prompt: latePrompt });
       const untouched =
         useIssueDraftStore.getState().draft === submittedDraftRef.current;
       if (untouched) clearDraft();

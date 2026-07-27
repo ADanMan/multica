@@ -472,6 +472,8 @@ function useEditAttachmentState(
     onAccepted: () => {
       // Success may only consume the entry it submitted: edits made during the
       // save survive, and the editor then STAYS in edit mode on them.
+      const lateMd = editorRef.current?.flushPendingUpdate?.();
+      if (lateMd != null) setDraft(draftKey, lateMd);
       const store = useCommentDraftStore.getState();
       const live = store.drafts[draftKey];
       const untouched = live === undefined || live === submittedEntryRef.current;
