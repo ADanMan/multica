@@ -36,4 +36,11 @@ export interface NavigationAdapter {
    * Read it through `useBackOrReplace()` rather than calling it directly.
    */
   canGoBack?: () => boolean;
+  /**
+   * Optional: step forward through history, the inverse of `back()`. Web wires
+   * this to `router.forward`; desktop to the active tab's virtual history. It is
+   * optional because not every adapter (e.g. an isolated popout window) owns a
+   * forward stack — callers must invoke it via `forward?.()`.
+   */
+  forward?: () => void;
 }
