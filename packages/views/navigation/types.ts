@@ -38,9 +38,13 @@ export interface NavigationAdapter {
   canGoBack?: () => boolean;
   /**
    * Optional: step forward through history, the inverse of `back()`. Web wires
-   * this to `router.forward`; desktop to the active tab's virtual history. It is
-   * optional because not every adapter (e.g. an isolated popout window) owns a
-   * forward stack — callers must invoke it via `forward?.()`.
+   * this to `router.forward`; the desktop shell to the active tab's virtual
+   * history. It is optional because not every adapter owns a forward stack: the
+   * dedicated issue window steps back with `navigate(-1)` and has no forward
+   * counterpart to offer. That window does not mount `<GlobalShortcuts>`, so
+   * today the history chords never reach it — the optionality keeps the adapter
+   * contract honest rather than serving a live no-op. Callers must still invoke
+   * it via `forward?.()`.
    */
   forward?: () => void;
 }
