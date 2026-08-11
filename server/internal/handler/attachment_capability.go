@@ -58,10 +58,15 @@ const (
 	attachmentCapabilityKeyDomain = "attachment-download-capability:"
 
 	// attachmentCapabilityDownloadIntent is folded into a forced-attachment
-	// ("download button") capability's signed message so it is domain-separated
-	// from the default load-intent capability: a load link can never be redeemed
-	// as a forced-attachment download, nor the reverse. It rides the URL as
-	// dl=1; the empty intent is the historical load-intent link, byte-identical.
+	// ("download button") capability's signed message. This is deliberate
+	// headroom, not a fix for a current threat: today the load-intent and
+	// download-intent links are minted in the same response, and flipping a load
+	// link into a forced download only makes it *less* dangerous (inline is the
+	// risky disposition), so binding the intent stops nothing an attacker could
+	// exploit now. It is kept so that if a later intent ever grants more than the
+	// load link, the signature is already intent-bound and a lower-privilege link
+	// cannot be replayed as it. It rides the URL as dl=1; the empty (load) intent
+	// signs the historical three-field message, byte-identical.
 	attachmentCapabilityDownloadIntent = "attachment"
 )
 
@@ -97,8 +102,11 @@ func signAttachmentCapability(attachmentID string, exp int64) string {
 // and, for a non-empty intent, an extra domain-separation term. The load-intent
 // capability (intent "") signs exactly the historical three-field message, so
 // its signatures stay byte-identical to before; the download-intent capability
-// (attachmentCapabilityDownloadIntent) appends "|attachment", so neither link
-// can be redeemed as the other even though both cover the same id and expiry.
+// (attachmentCapabilityDownloadIntent) appends "|attachment". Binding the intent
+// is forward-looking headroom, not a current mitigation — flipping today's two
+// intents is not itself exploitable (see attachmentCapabilityDownloadIntent) —
+// but it keeps the signature honest if a future intent is ever more privileged
+// than the load link.
 func signAttachmentCapabilityIntent(attachmentID string, exp int64, intent string) string {
 	mac := hmac.New(sha256.New, attachmentCapabilitySigningKey())
 	mac.Write([]byte(attachmentCapabilityVersion))
