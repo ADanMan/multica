@@ -56,6 +56,13 @@ const (
 	// attachmentCapabilityKeyDomain separates this signing domain from
 	// every other HMAC the deployment derives from the same root secret.
 	attachmentCapabilityKeyDomain = "attachment-download-capability:"
+
+	// attachmentCapabilityDownloadIntent is folded into a forced-attachment
+	// ("download button") capability's signed message so it is domain-separated
+	// from the default load-intent capability: a load link can never be redeemed
+	// as a forced-attachment download, nor the reverse. It rides the URL as
+	// dl=1; the empty intent is the historical load-intent link, byte-identical.
+	attachmentCapabilityDownloadIntent = "attachment"
 )
 
 var (
@@ -83,12 +90,26 @@ func attachmentCapabilitySigningKey() []byte {
 // decimal timestamp, so no pair of (id, exp) values can be re-split into a
 // different pair that produces the same signed message.
 func signAttachmentCapability(attachmentID string, exp int64) string {
+	return signAttachmentCapabilityIntent(attachmentID, exp, "")
+}
+
+// signAttachmentCapabilityIntent signs the capability over (version, id, exp)
+// and, for a non-empty intent, an extra domain-separation term. The load-intent
+// capability (intent "") signs exactly the historical three-field message, so
+// its signatures stay byte-identical to before; the download-intent capability
+// (attachmentCapabilityDownloadIntent) appends "|attachment", so neither link
+// can be redeemed as the other even though both cover the same id and expiry.
+func signAttachmentCapabilityIntent(attachmentID string, exp int64, intent string) string {
 	mac := hmac.New(sha256.New, attachmentCapabilitySigningKey())
 	mac.Write([]byte(attachmentCapabilityVersion))
 	mac.Write([]byte("|"))
 	mac.Write([]byte(attachmentID))
 	mac.Write([]byte("|"))
 	mac.Write([]byte(strconv.FormatInt(exp, 10)))
+	if intent != "" {
+		mac.Write([]byte("|"))
+		mac.Write([]byte(intent))
+	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -108,13 +129,28 @@ func attachmentCapabilityPath(attachmentID string, now time.Time) string {
 		"&sig=" + signAttachmentCapability(attachmentID, exp)
 }
 
+// attachmentDownloadCapabilityPath builds the site-relative capability URL for a
+// forced-attachment ("download button") intent. Same short-lived, single-id
+// shape as attachmentCapabilityPath, plus dl=1 — which the redemption route
+// turns into a Content-Disposition: attachment. Kept separate, and separately
+// signed, so the load-intent link the preview path consumes keeps serving media
+// inline. Site-relative for the same reason: the inline-media re-sign hook only
+// upgrades absolute URLs, so it keeps ignoring this one.
+func attachmentDownloadCapabilityPath(attachmentID string, now time.Time) string {
+	exp := now.Add(attachmentCapabilityTTL).Unix()
+	return "/api/attachments/" + attachmentID + "/signed-download" +
+		"?exp=" + strconv.FormatInt(exp, 10) +
+		"&sig=" + signAttachmentCapabilityIntent(attachmentID, exp, attachmentCapabilityDownloadIntent) +
+		"&dl=1"
+}
+
 // verifyAttachmentCapability fails closed on every path: a missing field, an
 // unparseable expiry, an elapsed expiry, a malformed signature, and a
 // signature minted for a different attachment all return false.
 //
 // The signature covers the claimed expiry, so extending `exp` invalidates the
 // signature rather than extending the capability.
-func verifyAttachmentCapability(attachmentID, rawExp, rawSig string, now time.Time) bool {
+func verifyAttachmentCapability(attachmentID, rawExp, rawSig, intent string, now time.Time) bool {
 	if attachmentID == "" || rawExp == "" || rawSig == "" {
 		return false
 	}
@@ -129,7 +165,7 @@ func verifyAttachmentCapability(attachmentID, rawExp, rawSig string, now time.Ti
 	if err != nil {
 		return false
 	}
-	want, err := hex.DecodeString(signAttachmentCapability(attachmentID, exp))
+	want, err := hex.DecodeString(signAttachmentCapabilityIntent(attachmentID, exp, intent))
 	if err != nil {
 		return false
 	}
@@ -154,7 +190,14 @@ func verifyAttachmentCapability(attachmentID, rawExp, rawSig string, now time.Ti
 func (h *Handler) DownloadAttachmentWithCapability(w http.ResponseWriter, r *http.Request) {
 	attachmentID := chi.URLParam(r, "id")
 	query := r.URL.Query()
-	if !verifyAttachmentCapability(attachmentID, query.Get("exp"), query.Get("sig"), time.Now()) {
+	// dl=1 is the forced-attachment ("download button") intent. It is covered by
+	// a distinct signature, so a load-intent link cannot flip itself to a
+	// download by appending dl=1 — the verification below would fail.
+	intent := ""
+	if query.Get("dl") == "1" {
+		intent = attachmentCapabilityDownloadIntent
+	}
+	if !verifyAttachmentCapability(attachmentID, query.Get("exp"), query.Get("sig"), intent, time.Now()) {
 		// One generic rejection for every reason, so a caller cannot
 		// distinguish "expired" from "forged" from "wrong attachment"
 		// and use the difference to probe the signer.
@@ -182,5 +225,5 @@ func (h *Handler) DownloadAttachmentWithCapability(w http.ResponseWriter, r *htt
 	// query out of the outbound Referer.
 	w.Header().Set("Referrer-Policy", "no-referrer")
 
-	h.proxyAttachmentDownload(w, r, att, h.Storage.KeyFromURL(att.Url))
+	h.proxyAttachmentDownload(w, r, att, h.Storage.KeyFromURL(att.Url), intent == attachmentCapabilityDownloadIntent)
 }

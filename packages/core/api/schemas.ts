@@ -524,6 +524,11 @@ export const AttachmentResponseSchema = z.object({
   id: z.string(),
   url: z.string(),
   download_url: z.string(),
+  // Forced-attachment ("download button") URL — credential-free and, unlike
+  // `download_url`, always Content-Disposition: attachment across every storage
+  // mode. Optional: a server older than this field omits it, and callers fall
+  // back to `download_url` / the stable endpoint. Never persisted (short-lived).
+  attachment_download_url: z.string().optional(),
   markdown_url: z.string().optional().default(""),
   filename: z.string(),
   chat_session_id: z.string().nullable().optional(),
