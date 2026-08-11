@@ -157,8 +157,9 @@ describe("useDownloadAttachment (web)", () => {
   // #6092 mints a signed capability into `download_url` in proxy mode. A bare
   // `<a download>` navigation can authenticate to it with no Authorization
   // header and no session cookie, so the web path must prefer it over the
-  // cookie-gated slug endpoint that 401s to download.txt in token-mode /
-  // split-origin self-hosting.
+  // cookie-gated slug endpoint that 401s to download.txt in token-mode
+  // self-hosting, where auth is a bearer token in JS and a bare navigation
+  // carries no credential at all.
   it("navigates to the capability download_url in proxy mode, not the cookie-gated endpoint", async () => {
     getAttachmentMock.mockResolvedValueOnce({
       id: "att-1",
@@ -188,8 +189,10 @@ describe("useDownloadAttachment (web)", () => {
     expect(anchor!.getAttribute("href")).toBe(
       "/api/attachments/att-1/signed-download?exp=1735689600&sig=abc123",
     );
-    // The capability already scopes the request to one attachment and one
-    // user, so the workspace slug is no longer part of the URL.
+    // The capability is itself the credential and is signed over exactly one
+    // attachment id, so the workspace slug is no longer part of the URL. It is
+    // not bound to a user — the signature covers (version, attachment id,
+    // expiry) only — so it stays a bearer capability for its 60-second life.
     expect(anchor!.getAttribute("href")).not.toContain("workspace_slug");
   });
 

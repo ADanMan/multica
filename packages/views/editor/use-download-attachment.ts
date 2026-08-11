@@ -88,7 +88,7 @@ function hasDesktopDownloadBridge(): boolean {
  *   path and to obtain the capability `download_url`), then clicks a temporary
  *   anchor. It prefers the signed capability URL the backend mints in proxy
  *   mode — the one a bare `<a download>` navigation can authenticate without a
- *   header or cookie — and otherwise falls back to the same-origin
+ *   header or cookie — and otherwise falls back to the cookie-gated
  *   `/api/attachments/{id}/download?workspace_slug=...` endpoint. Either way the
  *   backend owns CloudFront / S3 presign / proxy selection and download
  *   Content-Disposition, so large files stay in the browser's native download
