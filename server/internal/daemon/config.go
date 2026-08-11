@@ -303,6 +303,25 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// The first-turn override only raises the first-turn watchdog, not the
+	// concurrent semantic-inactivity timer that the same first status:running
+	// arms. When the override exceeds the semantic timeout the effective
+	// first-item wait is truncated to the smaller value, and the resulting
+	// failure is classified as semantic inactivity rather than first-turn
+	// no-progress — which also disables the transient model-catalog startup
+	// retry (GH #3291). Warn the operator to raise the semantic timeout too.
+	if codexFirstTurnNoProgressTimeout > 0 {
+		effectiveSemanticTimeout := codexSemanticInactivityTimeout
+		if effectiveSemanticTimeout <= 0 {
+			effectiveSemanticTimeout = DefaultCodexSemanticInactivityTimeout
+		}
+		if codexFirstTurnNoProgressTimeout > effectiveSemanticTimeout {
+			slog.Warn("MULTICA_CODEX_FIRST_TURN_TIMEOUT exceeds the semantic-inactivity timeout; the effective first-turn wait is truncated to the semantic timeout and the model-catalog startup retry is disabled. Raise MULTICA_CODEX_SEMANTIC_INACTIVITY_TIMEOUT to match.",
+				"first_turn_timeout", codexFirstTurnNoProgressTimeout.String(),
+				"semantic_inactivity_timeout", effectiveSemanticTimeout.String(),
+			)
+		}
+	}
 
 	codexHandshakeTimeout, err := durationFromEnv("MULTICA_CODEX_HANDSHAKE_TIMEOUT", DefaultCodexHandshakeTimeout)
 	if err != nil {

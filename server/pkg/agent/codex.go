@@ -1917,14 +1917,21 @@ func stopTimer(timer *time.Timer) {
 	}
 }
 
-// codexFirstTurnNoProgressTimeout resolves the ceiling for how long the first
-// turn may stay silent after turn/started before the watchdog fails it.
+// codexFirstTurnNoProgressTimeout resolves the first-turn watchdog ceiling:
+// how long the first turn may stay silent after turn/started before that one
+// watchdog fails it. This is only the first-turn timer's own duration — NOT
+// the effective first-item wait. The semantic-inactivity timer is armed
+// concurrently (the same first status:running resets it and starts this one),
+// so the real wait is min(this, semanticInactivityTimeout, execution timeout).
+// Raising the override above the semantic timeout therefore does not extend the
+// wait unless the semantic timeout is raised too; LoadConfig warns when it does
+// not. See the run loop's competing-timer select for the interaction.
 //
-// An explicit configured override (MULTICA_CODEX_FIRST_TURN_TIMEOUT) wins
-// outright, upward included — that is the whole point of the knob: an operator
-// whose app-server is legitimately slow to its first event (a heavy MCP boot,
-// a cold model catalog) needs a way to raise a ceiling that the semantic
-// inactivity timeout alone can never lift (GH #3262 / #5959).
+// An explicit configured override (MULTICA_CODEX_FIRST_TURN_TIMEOUT) is honored
+// as-is, upward included: an operator whose app-server is legitimately slow to
+// its first event (a heavy MCP boot, a cold model catalog) can lift this ceiling
+// past the default that the semantic-inactivity timeout alone can never raise
+// (GH #3262 / #5959).
 //
 // With no override the behaviour is byte-identical to before: the default
 // ceiling, which the configured semantic-inactivity timeout can only ever

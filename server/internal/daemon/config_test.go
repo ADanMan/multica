@@ -477,6 +477,51 @@ func TestLoadConfig_CodexHandshakeTimeout(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_CodexFirstTurnNoProgressTimeout pins the env-only
+// MULTICA_CODEX_FIRST_TURN_TIMEOUT resolution (GH #3262 / #5959): unset and an
+// explicit "0" both mean "keep the backend default" (0 = unset), while a positive
+// value is honored verbatim. There is deliberately no Overrides/CLI parity — this
+// knob is environment-only.
+func TestLoadConfig_CodexFirstTurnNoProgressTimeout(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("MULTICA_CODEX_FIRST_TURN_TIMEOUT", "")
+
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig with unset: %v", err)
+	}
+	if cfg.CodexFirstTurnNoProgressTimeout != 0 {
+		t.Fatalf("CodexFirstTurnNoProgressTimeout = %s, want 0 when unset", cfg.CodexFirstTurnNoProgressTimeout)
+	}
+
+	t.Setenv("MULTICA_CODEX_FIRST_TURN_TIMEOUT", "30m")
+	cfg, err = LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig with env: %v", err)
+	}
+	if cfg.CodexFirstTurnNoProgressTimeout != 30*time.Minute {
+		t.Fatalf("CodexFirstTurnNoProgressTimeout = %s, want 30m from env", cfg.CodexFirstTurnNoProgressTimeout)
+	}
+
+	t.Setenv("MULTICA_CODEX_FIRST_TURN_TIMEOUT", "0")
+	cfg, err = LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig with zero env: %v", err)
+	}
+	if cfg.CodexFirstTurnNoProgressTimeout != 0 {
+		t.Fatalf("CodexFirstTurnNoProgressTimeout = %s, want 0 for explicit zero", cfg.CodexFirstTurnNoProgressTimeout)
+	}
+}
+
 func TestLoadConfig_OpenCodeIdleWatchdog(t *testing.T) {
 	stageFakeAgent(t)
 	t.Setenv("MULTICA_OPENCODE_IDLE_WATCHDOG", "")
