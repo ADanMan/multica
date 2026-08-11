@@ -25,12 +25,20 @@ function attachmentDownloadEndpoint(
 //
 // In proxy mode the backend puts a signed, single-attachment capability into
 // `download_url` (a site-relative `/api/attachments/{id}/signed-download?...`
-// URL, added in #6092). It carries its own credential in the query string and
-// forces an attachment Content-Disposition server-side, so a top-level
-// `<a download>` navigation can open it with no `Authorization` header and no
-// session cookie. That is exactly the token-mode / split-origin case where the
-// cookie-gated unified endpoint 401s and the browser saves the error body as
-// `download.txt`.
+// URL, added in #6092). It carries its own credential in the query string, so a
+// top-level `<a download>` navigation authenticates on its own — no
+// `Authorization` header, no session cookie — which is what clears the 401 that
+// otherwise makes the browser save the error body as `download.txt`. That 401
+// is the token-mode case: auth is a bearer token held in JS, so a bare
+// navigation to the cookie-gated slug endpoint sends no credential at all.
+//
+// The capability does NOT force an attachment disposition — it streams through
+// `proxyAttachmentDownload` → `storage.ContentDisposition`, which returns
+// `inline` for image/video/audio/PDF. What makes the browser download rather
+// than preview is the request staying same-origin combined with the `download`
+// attribute. `resolvePublicFileUrl` leaves this URL same-origin whenever the app
+// reaches the API on its own origin; if it resolves cross-origin AND the file is
+// media, the capability previews in-tab instead — a row #6712 still tracks.
 //
 // Absolute CloudFront / S3 `download_url`s are deliberately NOT used here: they
 // are cross-origin and inline-tuned, so an `<a download>` to them previews the
@@ -136,11 +144,11 @@ export function useDownloadAttachment(): (attachmentId: string) => Promise<void>
           return;
         }
         // Prefer the capability URL when the server minted one. A top-level
-        // `<a download>` navigation sends no `Authorization` header, and in
-        // token-mode / split-origin self-hosting the SameSite=Strict host-only
-        // session cookie does not apply either, so the cookie-gated slug
-        // endpoint 401s and the browser saves the error body as `download.txt`.
-        // The capability URL authenticates that bare navigation on its own.
+        // `<a download>` navigation sends no `Authorization` header, so in
+        // token-mode — where auth is a bearer token in JS rather than a cookie —
+        // the cookie-gated slug endpoint 401s and the browser saves the error
+        // body as `download.txt`. The capability URL carries its own credential
+        // in the query string, so it authenticates that bare navigation itself.
         const capability = capabilityDownloadUrl(fresh.download_url);
         if (capability) {
           triggerBrowserDownload(capability);

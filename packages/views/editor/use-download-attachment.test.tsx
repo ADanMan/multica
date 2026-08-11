@@ -224,9 +224,13 @@ describe("useDownloadAttachment (web)", () => {
     );
   });
 
-  // The capability carries its own identity, so a missing workspace slug —
-  // which aborts the legacy slug fallback below — must not block the download.
-  it("downloads via the capability even when the workspace slug is missing", async () => {
+  // Ordering guard, not a reachable user scenario: `api.getAttachment` resolves
+  // workspace context server-side and 400s when there is none, so the preflight
+  // would fail before this branch in real use. What this pins is purely the
+  // client-side order — `capabilityDownloadUrl` is consulted before the
+  // `workspaceSlug` guard — so a capability download never depends on the slug
+  // the legacy fallback needs.
+  it("consults the capability before the workspace-slug guard", async () => {
     useWorkspaceSlugMock.mockReturnValueOnce(null);
     getAttachmentMock.mockResolvedValueOnce({
       id: "att-1",
