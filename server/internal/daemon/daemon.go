@@ -6244,14 +6244,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		idleWatchdogTimeout = d.cfg.OpenCodeIdleWatchdog
 	}
 	execOpts := agent.ExecOptions{
-		Cwd:                       env.WorkDir,
-		Model:                     model,
-		ThreadName:                deriveTaskThreadName(task),
-		Timeout:                   d.cfg.AgentTimeout,
-		SemanticInactivityTimeout: d.cfg.CodexSemanticInactivityTimeout,
-		IdleWatchdogTimeout:       idleWatchdogTimeout,
-		HandshakeTimeout:          d.cfg.CodexHandshakeTimeout,
-		ResumeSessionID:           task.PriorSessionID,
+		Cwd:                        env.WorkDir,
+		Model:                      model,
+		ThreadName:                 deriveTaskThreadName(task),
+		Timeout:                    d.cfg.AgentTimeout,
+		SemanticInactivityTimeout:  d.cfg.CodexSemanticInactivityTimeout,
+		FirstTurnNoProgressTimeout: d.cfg.CodexFirstTurnNoProgressTimeout,
+		IdleWatchdogTimeout:        idleWatchdogTimeout,
+		HandshakeTimeout:           d.cfg.CodexHandshakeTimeout,
+		ResumeSessionID:            task.PriorSessionID,
 		// Post-gate intent: PriorSessionID here already reflects the pre-flight
 		// resume gates (a dropped resume is surfaced via the prompt instead). If it
 		// survived to here, the backend must disclose the loss when the live

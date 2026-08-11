@@ -759,8 +759,40 @@ func TestCodexFirstTurnNoProgressTimeoutClamp(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := codexFirstTurnNoProgressTimeout(tc.semantic); got != tc.want {
-				t.Fatalf("codexFirstTurnNoProgressTimeout(%s) = %s, want %s", tc.semantic, got, tc.want)
+			if got := codexFirstTurnNoProgressTimeout(tc.semantic, 0); got != tc.want {
+				t.Fatalf("codexFirstTurnNoProgressTimeout(%s, 0) = %s, want %s", tc.semantic, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCodexFirstTurnNoProgressTimeoutExplicitOverride covers the
+// MULTICA_CODEX_FIRST_TURN_TIMEOUT path added for GH #3262 / #5959: a positive
+// configured value wins outright, including upward past the default ceiling that
+// the semantic inactivity timeout alone can never raise. A non-positive override
+// changes nothing — the function falls back to the pinned default/scaling
+// behaviour asserted by TestCodexFirstTurnNoProgressTimeoutClamp.
+func TestCodexFirstTurnNoProgressTimeoutExplicitOverride(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		semantic   time.Duration
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "override above the ceiling is honored in full", semantic: 0, configured: 5 * time.Minute, want: 5 * time.Minute},
+		{name: "override wins over the default 10m semantic", semantic: 10 * time.Minute, configured: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "override wins over a value that would otherwise scale down", semantic: 30 * time.Second, configured: 90 * time.Second, want: 90 * time.Second},
+		{name: "override stays unbounded above", semantic: 0, configured: 30 * time.Minute, want: 30 * time.Minute},
+		{name: "zero override keeps the default ceiling", semantic: 0, configured: 0, want: 60 * time.Second},
+		{name: "negative override is ignored and falls back to the ceiling", semantic: 10 * time.Minute, configured: -1 * time.Second, want: 60 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexFirstTurnNoProgressTimeout(tc.semantic, tc.configured); got != tc.want {
+				t.Fatalf("codexFirstTurnNoProgressTimeout(%s, %s) = %s, want %s", tc.semantic, tc.configured, got, tc.want)
 			}
 		})
 	}

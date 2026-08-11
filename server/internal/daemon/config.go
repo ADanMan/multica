@@ -114,15 +114,21 @@ type Config struct {
 	HeartbeatInterval              time.Duration
 	AgentTimeout                   time.Duration
 	CodexSemanticInactivityTimeout time.Duration
-	CodexHandshakeTimeout          time.Duration
-	OpenCodeIdleWatchdog           time.Duration // OpenCode-specific no-message window; 0 falls back to AgentIdleWatchdog and values above it cannot extend the global bound
-	AgentIdleWatchdog              time.Duration // force-stop a run when the backend goes silent this long with an empty queue (0 = disabled)
-	AgentToolWatchdog              time.Duration // force-stop a run when a single tool call stays in flight (silent) this long (0 = disabled); backstop for hung tools now that there is no wall-clock cap
-	ClaudeArgs                     []string
-	CodexArgs                      []string
-	CodebuddyArgs                  []string
-	QwenArgs                       []string
-	QwenpawArgs                    []string
+	// CodexFirstTurnNoProgressTimeout is an explicit override for the Codex
+	// first-turn no-progress ceiling (MULTICA_CODEX_FIRST_TURN_TIMEOUT). 0 means
+	// unset: the backend keeps its default ceiling, which CodexSemanticInactivityTimeout
+	// can only shrink. A positive value raises (or lowers) that ceiling outright,
+	// for app-servers that are legitimately slow to their first event (GH #3262).
+	CodexFirstTurnNoProgressTimeout time.Duration
+	CodexHandshakeTimeout           time.Duration
+	OpenCodeIdleWatchdog            time.Duration // OpenCode-specific no-message window; 0 falls back to AgentIdleWatchdog and values above it cannot extend the global bound
+	AgentIdleWatchdog               time.Duration // force-stop a run when the backend goes silent this long with an empty queue (0 = disabled)
+	AgentToolWatchdog               time.Duration // force-stop a run when a single tool call stays in flight (silent) this long (0 = disabled); backstop for hung tools now that there is no wall-clock cap
+	ClaudeArgs                      []string
+	CodexArgs                       []string
+	CodebuddyArgs                   []string
+	QwenArgs                        []string
+	QwenpawArgs                     []string
 
 	// ProfileCommandOverrides maps a custom runtime profile_id -> the absolute
 	// executable path to use for that profile on THIS machine (MUL-3284).
@@ -289,6 +295,13 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 	if overrides.CodexSemanticInactivityTimeout > 0 {
 		codexSemanticInactivityTimeout = overrides.CodexSemanticInactivityTimeout
+	}
+
+	// 0 = unset: the codex backend keeps its default first-turn ceiling. A
+	// positive value is an explicit operator override (GH #3262 / #5959).
+	codexFirstTurnNoProgressTimeout, err := durationFromEnv("MULTICA_CODEX_FIRST_TURN_TIMEOUT", 0)
+	if err != nil {
+		return Config{}, err
 	}
 
 	codexHandshakeTimeout, err := durationFromEnv("MULTICA_CODEX_HANDSHAKE_TIMEOUT", DefaultCodexHandshakeTimeout)
@@ -465,43 +478,44 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	}
 
 	return Config{
-		ServerBaseURL:                  serverBaseURL,
-		DaemonID:                       daemonID,
-		LegacyDaemonIDs:                legacyDaemonIDs,
-		DeviceName:                     deviceName,
-		RuntimeName:                    runtimeName,
-		Profile:                        profile,
-		Agents:                         agents,
-		WorkspacesRoot:                 workspacesRoot,
-		KeepEnvAfterTask:               keepEnv,
-		GCEnabled:                      gcEnabled,
-		GCInterval:                     gcInterval,
-		GCTTL:                          gcTTL,
-		GCOrphanTTL:                    gcOrphanTTL,
-		GCArtifactTTL:                  gcArtifactTTL,
-		GCArtifactPatterns:             gcArtifactPatterns,
-		GCRepoTTL:                      gcRepoTTL,
-		GCCodexSessionTTL:              gcCodexSessionTTL,
-		GCHermesMemoryTTL:              gcHermesMemoryTTL,
-		AutoUpdateEnabled:              autoUpdateEnabled,
-		AutoUpdateCheckInterval:        autoUpdateInterval,
-		AutoReloadEnabled:              autoReloadEnabled,
-		HealthPort:                     healthPort,
-		MaxConcurrentTasks:             maxConcurrentTasks,
-		PollInterval:                   pollInterval,
-		HeartbeatInterval:              heartbeatInterval,
-		AgentTimeout:                   agentTimeout,
-		CodexSemanticInactivityTimeout: codexSemanticInactivityTimeout,
-		CodexHandshakeTimeout:          codexHandshakeTimeout,
-		OpenCodeIdleWatchdog:           openCodeIdleWatchdog,
-		AgentIdleWatchdog:              agentIdleWatchdog,
-		AgentToolWatchdog:              agentToolWatchdog,
-		ClaudeArgs:                     claudeArgs,
-		CodexArgs:                      codexArgs,
-		CodebuddyArgs:                  codebuddyArgs,
-		QwenArgs:                       qwenArgs,
-		QwenpawArgs:                    qwenpawArgs,
-		ProfileCommandOverrides:        profileCommandOverrides,
+		ServerBaseURL:                   serverBaseURL,
+		DaemonID:                        daemonID,
+		LegacyDaemonIDs:                 legacyDaemonIDs,
+		DeviceName:                      deviceName,
+		RuntimeName:                     runtimeName,
+		Profile:                         profile,
+		Agents:                          agents,
+		WorkspacesRoot:                  workspacesRoot,
+		KeepEnvAfterTask:                keepEnv,
+		GCEnabled:                       gcEnabled,
+		GCInterval:                      gcInterval,
+		GCTTL:                           gcTTL,
+		GCOrphanTTL:                     gcOrphanTTL,
+		GCArtifactTTL:                   gcArtifactTTL,
+		GCArtifactPatterns:              gcArtifactPatterns,
+		GCRepoTTL:                       gcRepoTTL,
+		GCCodexSessionTTL:               gcCodexSessionTTL,
+		GCHermesMemoryTTL:               gcHermesMemoryTTL,
+		AutoUpdateEnabled:               autoUpdateEnabled,
+		AutoUpdateCheckInterval:         autoUpdateInterval,
+		AutoReloadEnabled:               autoReloadEnabled,
+		HealthPort:                      healthPort,
+		MaxConcurrentTasks:              maxConcurrentTasks,
+		PollInterval:                    pollInterval,
+		HeartbeatInterval:               heartbeatInterval,
+		AgentTimeout:                    agentTimeout,
+		CodexSemanticInactivityTimeout:  codexSemanticInactivityTimeout,
+		CodexFirstTurnNoProgressTimeout: codexFirstTurnNoProgressTimeout,
+		CodexHandshakeTimeout:           codexHandshakeTimeout,
+		OpenCodeIdleWatchdog:            openCodeIdleWatchdog,
+		AgentIdleWatchdog:               agentIdleWatchdog,
+		AgentToolWatchdog:               agentToolWatchdog,
+		ClaudeArgs:                      claudeArgs,
+		CodexArgs:                       codexArgs,
+		CodebuddyArgs:                   codebuddyArgs,
+		QwenArgs:                        qwenArgs,
+		QwenpawArgs:                     qwenpawArgs,
+		ProfileCommandOverrides:         profileCommandOverrides,
 	}, nil
 }
 
