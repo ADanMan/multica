@@ -702,8 +702,21 @@ func TestGetAttachmentByID_AutoPublicEndpointReturnsPresignedDownloadURL(t *test
 	if want := "/api/attachments/" + id + "/download"; resp.MarkdownURL != want {
 		t.Fatalf("markdown_url = %q, want stable URL %q", resp.MarkdownURL, want)
 	}
-	if len(store.presignCalls) != 1 || store.presignCalls[0] != key {
-		t.Fatalf("presign calls = %v, want [%s]", store.presignCalls, key)
+	// The single-attachment endpoint presigns the object twice: once inline for
+	// download_url (asserted above) and once with a forced attachment disposition
+	// for attachment_download_url.
+	if len(store.presignCalls) != 2 || store.presignCalls[0] != key || store.presignCalls[1] != key {
+		t.Fatalf("presign calls = %v, want [%s %s]", store.presignCalls, key, key)
+	}
+	dl, err := url.Parse(resp.AttachmentDownloadURL)
+	if err != nil {
+		t.Fatalf("parse attachment_download_url: %v", err)
+	}
+	if got := dl.Query().Get("X-Amz-Signature"); got != "mock" {
+		t.Fatalf("attachment_download_url = %q, want an S3 presigned URL", resp.AttachmentDownloadURL)
+	}
+	if got := dl.Query().Get("response-content-disposition"); !strings.HasPrefix(got, "attachment") {
+		t.Fatalf("attachment_download_url response-content-disposition = %q, want a forced attachment disposition", got)
 	}
 }
 
