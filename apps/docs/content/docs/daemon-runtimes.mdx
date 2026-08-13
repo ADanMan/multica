@@ -73,9 +73,9 @@ Once a limit is reached, new tasks keep queueing. You can adjust a single agent'
 
 ## Private and public runtimes
 
-A local runtime is **private** by default: the runtime owner and the workspace's owners and admins can create agents on it.
+A local runtime is **private** by default: only the runtime owner can create agents on it. Workspace owners and admins are no exception — the runtime is someone else's computer, and running an agent there spends their machine and their tool credentials.
 
-The runtime owner or an admin can make it **public**. Other workspace members can then select this runtime as well; that does not share the underlying AI coding tool's login credentials — it only lets members route their agents' tasks to this computer.
+Only the runtime owner can make it **public** — workspace admins can rename or delete a runtime, but sharing one is the owner's decision. Other workspace members can then select this runtime as well; that does not share the underlying AI coding tool's login credentials — it only lets members route their agents' tasks to this computer.
 
 ## Custom runtime profiles
 

@@ -246,7 +246,7 @@ CLI の設定ファイルには、あなたとして Multica にアクセスで�
 | | `cancel-task <task-id>` | 実行中またはキュー中のタスクをキャンセル | `--issue` |
 | `project` | `list/get/create/update/delete` | プロジェクトを管理 | |
 | | `status <id> <status>` | プロジェクトのステータスを変更 | |
-| | `resource list/add/update/remove` | プロジェクトの追加リソースを管理 | `--type`、`--url` |
+| | `resource list/add/update/remove` | プロジェクトの追加リソースを管理 | `--type`、`--url`、`--local-path`、`--daemon-id`、`--execution-mode`（ローカルディレクトリの `in_place` / `worktree`） |
 | `label` | `list/get/create/update/delete` | ワークスペースのラベルを管理 | |
 | `property` | `list/get/create/update/archive/unarchive` | ワークスペースのカスタムプロパティを管理 | `create`: `--name`、`--type`、`--option`（繰り返し可）；`list`: `--include-archived`；タイプは作成後に変更できません |
 | `agent` | `list/get/create/update/archive/restore` | エージェントを管理 | `--name`、`--runtime-id`（`create` では必須）、`--instructions`、`--model`、`--thinking-level`、`--mcp-config`、`--permission-mode`、`--max-concurrent-tasks` |
