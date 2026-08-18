@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -370,6 +371,21 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 
 		info, err := entry.Info()
 		if err != nil || info.Size() > maxLocalSkillFileSize {
+			return nil
+		}
+		// A binary supporting file cannot survive SkillFileData.Content: the
+		// bytes go out as a Go string and encoding/json rewrites every invalid
+		// UTF-8 byte to U+FFFD, so writeSkillFiles later recreates a file that
+		// differs from the original and will not open. Skip it the way the
+		// archive/URL importer already does, and skip it regardless of
+		// includeContent so the discovery and sync passes agree on which files
+		// make up the bundle.
+		if skill.IsLikelyBinaryFilePath(rel) {
+			slog.Info("local skill: skipping binary file",
+				"skill_dir", skillDir,
+				"path", filepath.ToSlash(rel),
+				"size", info.Size(),
+			)
 			return nil
 		}
 		if len(files) >= maxLocalSkillFileCount {

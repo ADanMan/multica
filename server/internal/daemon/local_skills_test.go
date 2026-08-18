@@ -1100,3 +1100,72 @@ func TestLoadRuntimeLocalSkillBundle_ProviderNonDirFallsThrough(t *testing.T) {
 	}
 
 }
+
+// invalidUTF8Docx is a .docx prefix (PK zip magic) followed by bytes that are
+// not valid UTF-8. Carrying this through SkillFileData.Content is exactly the
+// corruption in #7143: encoding/json rewrites each invalid byte to U+FFFD, so
+// the file written back into the task environment no longer opens.
+const invalidUTF8Docx = "PK\x03\x04\x14\x00\x06\x00\xff\xfe\x80\x81payload"
+
+func TestCollectLocalSkillFiles_SkipsBinarySupportingFiles(t *testing.T) {
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":               "---\nname: docs\n---\nbody\n",
+		"references/notes.md":    "# notes\n",
+		"references/report.docx": invalidUTF8Docx,
+		"assets/logo.png":        "\x89PNG\r\n\x1a\n\x00\x00\x00",
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("collected paths = %v, want %v", paths, want)
+	}
+
+	// The text file that survives must survive byte-for-byte.
+	if files[0].Content != "# notes\n" {
+		t.Errorf("text content = %q, want %q", files[0].Content, "# notes\n")
+	}
+}
+
+func TestCollectLocalSkillFiles_BinarySkipIsConsistentAcrossPasses(t *testing.T) {
+	// Discovery reports the bundle with includeContent=false and sync uploads
+	// it with includeContent=true. If only one pass skipped binary files the
+	// two would disagree on what the bundle contains, so the skip must not
+	// depend on includeContent.
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":               "---\nname: docs\n---\nbody\n",
+		"references/notes.md":    "# notes\n",
+		"references/report.docx": invalidUTF8Docx,
+	})
+
+	listed, err := collectLocalSkillFiles(skillDir, false)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles(includeContent=false): %v", err)
+	}
+	synced, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles(includeContent=true): %v", err)
+	}
+
+	listedPaths := make([]string, 0, len(listed))
+	for _, f := range listed {
+		listedPaths = append(listedPaths, f.Path)
+	}
+	syncedPaths := make([]string, 0, len(synced))
+	for _, f := range synced {
+		syncedPaths = append(syncedPaths, f.Path)
+	}
+	if !reflect.DeepEqual(listedPaths, syncedPaths) {
+		t.Fatalf("discovery pass = %v, sync pass = %v; passes must agree", listedPaths, syncedPaths)
+	}
+}
