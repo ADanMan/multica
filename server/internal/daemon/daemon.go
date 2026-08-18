@@ -839,10 +839,13 @@ type healedAgent struct {
 // version detection at registration) then hard-fails with "executable not
 // found".
 //
-// The returned version always matches the returned path, so callers key
-// version-sensitive policy (e.g. the Codex sandbox) off it directly rather than
-// re-reading the shared version cache, which a concurrent heal could still be
-// updating.
+// The returned version matches the returned path in every case but one, so
+// callers key version-sensitive policy (e.g. the Codex sandbox) off it directly
+// rather than re-reading the shared version cache, which a concurrent heal could
+// still be updating. The one exception is the unverified case in the last bullet
+// below: a live-but-undetectable re-resolved path is returned paired with the
+// last known version, and the launch boundary refuses it precisely because that
+// pair was never verified.
 //
 // Behaviour:
 //   - A Windows stable entry point -> its final target is verified and returned
@@ -862,9 +865,14 @@ type healedAgent struct {
 //     through the same minimum-version gate registration applies. This
 //     reproduces exactly what a daemon restart would resolve, so it is no less
 //     safe than the documented restart workaround — only automatic.
-//   - Re-resolution fails, the candidate can't be version-detected, or it is
-//     below the minimum supported version -> entry is returned unchanged so the
-//     candidate is never launched and the downstream error still surfaces.
+//   - Pinned Path gone, re-resolution finds a candidate that is present but
+//     cannot be version-detected -> its path replaces the vanished pin so
+//     registration and model listing probe the real binary and can recover on a
+//     later retry, but it is returned paired with the last known version and is
+//     never launched, because that {path, version} pair is unverified (GH #6452).
+//   - Re-resolution finds nothing, or the candidate is below the minimum
+//     supported version -> entry is returned unchanged so the candidate is never
+//     launched and the downstream error still surfaces.
 func (d *Daemon) resolveAgentEntry(ctx context.Context, provider string, entry AgentEntry) (AgentEntry, string) {
 	resolved, version, _ := d.resolveAgentEntryWithHeal(ctx, provider, entry)
 	return resolved, version
