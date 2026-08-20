@@ -1139,13 +1139,16 @@ func TestCollectLocalSkillFiles_SkipsBinarySupportingFiles(t *testing.T) {
 func TestCollectLocalSkillFiles_BinarySkipIsConsistentAcrossPasses(t *testing.T) {
 	// Discovery reports the bundle with includeContent=false and sync uploads
 	// it with includeContent=true. If only one pass skipped binary files the
-	// two would disagree on what the bundle contains, so the skip must not
-	// depend on includeContent.
+	// two would disagree on what the bundle contains. This must hold both for
+	// a listed binary extension and for one caught only by the content-level
+	// UTF-8 check — the discovery pass has to actually read the file to make
+	// the same call the sync pass makes.
 	root := t.TempDir()
 	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
-		"SKILL.md":               "---\nname: docs\n---\nbody\n",
-		"references/notes.md":    "# notes\n",
-		"references/report.docx": invalidUTF8Docx,
+		"SKILL.md":                  "---\nname: docs\n---\nbody\n",
+		"references/notes.md":       "# notes\n",
+		"references/report.docx":    invalidUTF8Docx,
+		"weights/model.safetensors": invalidUTF8Bytes,
 	})
 
 	listed, err := collectLocalSkillFiles(skillDir, false)
@@ -1167,5 +1170,93 @@ func TestCollectLocalSkillFiles_BinarySkipIsConsistentAcrossPasses(t *testing.T)
 	}
 	if !reflect.DeepEqual(listedPaths, syncedPaths) {
 		t.Fatalf("discovery pass = %v, sync pass = %v; passes must agree", listedPaths, syncedPaths)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(listedPaths, want) {
+		t.Fatalf("collected paths = %v, want %v", listedPaths, want)
+	}
+}
+
+// invalidUTF8Bytes carries no listed binary extension's magic — it exists to
+// prove the content-level check, not the extension list, is what catches it.
+const invalidUTF8Bytes = "\xff\xfe\x00\x01payload\x80\x81"
+
+// Bohan-J's review on #7175: the extension blacklist alone doesn't close the
+// root cause. A binary file with an unlisted extension must still be caught
+// by the content-level utf8.Valid check.
+func TestCollectLocalSkillFiles_SkipsUnlistedBinaryExtension(t *testing.T) {
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":                  "---\nname: docs\n---\nbody\n",
+		"references/notes.md":       "# notes\n",
+		"weights/model.safetensors": invalidUTF8Bytes,
+		"data/table.parquet":        invalidUTF8Bytes,
+		"blob.bin":                  invalidUTF8Bytes,
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("collected paths = %v, want %v — an unlisted binary extension must still be caught by the content check", paths, want)
+	}
+}
+
+// A binary file with no extension at all must be caught the same way.
+func TestCollectLocalSkillFiles_SkipsInvalidUTF8WithNoExtension(t *testing.T) {
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":            "---\nname: docs\n---\nbody\n",
+		"references/notes.md": "# notes\n",
+		"references/README":   invalidUTF8Bytes,
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("collected paths = %v, want %v — a no-extension binary file must still be caught by the content check", paths, want)
+	}
+}
+
+// A valid-UTF-8 text file — including one with an extension the blacklist
+// doesn't recognize, and one with no extension at all — must still pass
+// through untouched. The content check must not over-trigger on ordinary
+// text.
+func TestCollectLocalSkillFiles_ValidUTF8TextPassesThroughUntouched(t *testing.T) {
+	root := t.TempDir()
+	body := "# Notes\n\nContém acentos e emoji 🎉 — não é binário.\n"
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":  "---\nname: docs\n---\nbody\n",
+		"notes.txt": body,
+		"data.csv":  "a,b,c\n1,2,3\n",
+		"config":    "key=value\n",
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+	if len(files) != 3 {
+		t.Fatalf("expected all 3 valid-UTF-8 supporting files to pass through, got %d: %+v", len(files), files)
+	}
+	for _, f := range files {
+		if f.Path == "notes.txt" && f.Content != body {
+			t.Errorf("notes.txt content = %q, want %q", f.Content, body)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/multica-ai/multica/server/internal/skill"
 	"github.com/multica-ai/multica/server/pkg/agent"
@@ -376,15 +377,34 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 		// A binary supporting file cannot survive SkillFileData.Content: the
 		// bytes go out as a Go string and encoding/json rewrites every invalid
 		// UTF-8 byte to U+FFFD, so writeSkillFiles later recreates a file that
-		// differs from the original and will not open. Skip it the way the
-		// archive/URL importer already does, and skip it regardless of
-		// includeContent so the discovery and sync passes agree on which files
-		// make up the bundle.
-		if skill.IsLikelyBinaryFilePath(rel) {
+		// differs from the original and will not open.
+		//
+		// IsLikelyBinaryFilePath is only a cheap first pass on the extension —
+		// the same heuristic the archive/URL importer uses. On its own it
+		// misses a binary file with an unlisted or missing extension (a
+		// .safetensors, a .parquet, a stray no-extension blob) and a text file
+		// in a non-UTF-8 encoding, both of which corrupt exactly the same way.
+		// The read below is the actual guarantee: skip whenever the bytes
+		// themselves are not valid UTF-8, regardless of what the extension
+		// suggested. This runs on both the includeContent=false (discovery)
+		// and includeContent=true (sync) passes so they agree on which files
+		// make up the bundle — skipping the read on the false pass would let
+		// a discovery listing promise a file that sync then silently drops.
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		likelyBinaryExt := skill.IsLikelyBinaryFilePath(rel)
+		if likelyBinaryExt || !utf8.Valid(content) {
+			reason := "invalid_utf8"
+			if likelyBinaryExt {
+				reason = "binary_extension"
+			}
 			slog.Info("local skill: skipping binary file",
 				"skill_dir", skillDir,
 				"path", filepath.ToSlash(rel),
 				"size", info.Size(),
+				"reason", reason,
 			)
 			return nil
 		}
@@ -398,10 +418,6 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 
 		file := SkillFileData{Path: filepath.ToSlash(rel)}
 		if includeContent {
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return nil
-			}
 			file.Content = string(content)
 		}
 		files = append(files, file)
