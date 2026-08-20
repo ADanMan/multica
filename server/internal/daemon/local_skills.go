@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -379,26 +380,43 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 		// UTF-8 byte to U+FFFD, so writeSkillFiles later recreates a file that
 		// differs from the original and will not open.
 		//
-		// IsLikelyBinaryFilePath is only a cheap first pass on the extension —
-		// the same heuristic the archive/URL importer uses. On its own it
-		// misses a binary file with an unlisted or missing extension (a
-		// .safetensors, a .parquet, a stray no-extension blob) and a text file
-		// in a non-UTF-8 encoding, both of which corrupt exactly the same way.
+		// IsLikelyBinaryFilePath is the cheap first pass on the extension — the
+		// same heuristic the archive/URL importer uses — checked before any
+		// read so a known-binary file never pays the I/O. On its own it misses
+		// a binary file with an unlisted or missing extension (a .safetensors,
+		// a .parquet, a stray no-extension blob) and a text file in a
+		// non-UTF-8 encoding, both of which corrupt exactly the same way.
+		if skill.IsLikelyBinaryFilePath(rel) {
+			slog.Info("local skill: skipping binary file",
+				"skill_dir", skillDir,
+				"path", filepath.ToSlash(rel),
+				"size", info.Size(),
+				"reason", "binary_extension",
+			)
+			return nil
+		}
 		// The read below is the actual guarantee: skip whenever the bytes
-		// themselves are not valid UTF-8, regardless of what the extension
-		// suggested. This runs on both the includeContent=false (discovery)
-		// and includeContent=true (sync) passes so they agree on which files
-		// make up the bundle — skipping the read on the false pass would let
-		// a discovery listing promise a file that sync then silently drops.
+		// themselves are not safely round-trippable, regardless of what the
+		// extension suggested. This runs on both the includeContent=false
+		// (discovery) and includeContent=true (sync) passes so they agree on
+		// which files make up the bundle — skipping the read on the false pass
+		// would let a discovery listing promise a file that sync then silently
+		// drops.
+		//
+		// Valid UTF-8 alone is not enough: a NUL byte is legal UTF-8 but the
+		// server-side import path strips every 0x00 via sanitizeNullBytes
+		// (server/internal/handler/skill_create.go), so a file that is valid
+		// UTF-8 but contains NUL — UTF-16LE text made of ASCII characters is a
+		// realistic example — still comes back different from what went in.
+		// Require both: valid UTF-8 AND NUL-free.
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return nil
 		}
-		likelyBinaryExt := skill.IsLikelyBinaryFilePath(rel)
-		if likelyBinaryExt || !utf8.Valid(content) {
+		if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
 			reason := "invalid_utf8"
-			if likelyBinaryExt {
-				reason = "binary_extension"
+			if utf8.Valid(content) {
+				reason = "embedded_nul"
 			}
 			slog.Info("local skill: skipping binary file",
 				"skill_dir", skillDir,

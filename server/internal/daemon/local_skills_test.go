@@ -1233,6 +1233,64 @@ func TestCollectLocalSkillFiles_SkipsInvalidUTF8WithNoExtension(t *testing.T) {
 	}
 }
 
+// validUTF8WithNUL is UTF-16LE encoding of "Hello": every byte is a valid
+// single-byte UTF-8 sequence (printable ASCII or NUL), so utf8.Valid alone
+// would accept it — multica-eve's review on #7175 flagged this as a
+// realistic byte-integrity hole: the server-side import path
+// (server/internal/handler/skill_create.go's sanitizeNullBytes) strips every
+// 0x00, so a file like this still comes back different from what went in.
+const validUTF8WithNUL = "H\x00e\x00l\x00l\x00o\x00"
+
+// A file with an unlisted extension that is valid UTF-8 but contains an
+// embedded NUL must still be caught — utf8.Valid alone is not sufficient.
+func TestCollectLocalSkillFiles_SkipsUnlistedExtensionWithEmbeddedNUL(t *testing.T) {
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":            "---\nname: docs\n---\nbody\n",
+		"references/notes.md": "# notes\n",
+		"weights/model.dat":   validUTF8WithNUL,
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("collected paths = %v, want %v — valid UTF-8 with an embedded NUL must still be caught", paths, want)
+	}
+}
+
+// A no-extension file with the same valid-UTF-8-but-NUL-containing content
+// must be caught the same way.
+func TestCollectLocalSkillFiles_SkipsNoExtensionWithEmbeddedNUL(t *testing.T) {
+	root := t.TempDir()
+	skillDir := writeTestLocalSkill(t, root, "docs", map[string]string{
+		"SKILL.md":             "---\nname: docs\n---\nbody\n",
+		"references/notes.md":  "# notes\n",
+		"references/UTF16NAME": validUTF8WithNUL,
+	})
+
+	files, err := collectLocalSkillFiles(skillDir, true)
+	if err != nil {
+		t.Fatalf("collectLocalSkillFiles: %v", err)
+	}
+
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, f.Path)
+	}
+	want := []string{"references/notes.md"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("collected paths = %v, want %v — a no-extension file with an embedded NUL must still be caught", paths, want)
+	}
+}
+
 // A valid-UTF-8 text file — including one with an extension the blacklist
 // doesn't recognize, and one with no extension at all — must still pass
 // through untouched. The content check must not over-trigger on ordinary
