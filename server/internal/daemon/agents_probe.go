@@ -269,6 +269,12 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	if e, ok := probe("MULTICA_MCODE_PATH", "mcode", ""); ok {
 		agents["mcode"] = e
 	}
+	// ZeroClaw (`zeroclaw`) is a Rust-based generic agent CLI, driven over
+	// ACP via `zeroclaw acp`. MULTICA_ZEROCLAW_MODEL seeds the daemon-wide
+	// default (a model id from the runtime's advertised catalog).
+	if e, ok := probe("MULTICA_ZEROCLAW_PATH", "zeroclaw", "MULTICA_ZEROCLAW_MODEL"); ok {
+		agents["zeroclaw"] = e
+	}
 	return agents
 }
 

@@ -23,6 +23,7 @@ describe("providerSupportsMcpConfig", () => {
     expect(providerSupportsMcpConfig("grok")).toBe(true);
     expect(providerSupportsMcpConfig("dim")).toBe(true);
     expect(providerSupportsMcpConfig("mcode")).toBe(true);
+    expect(providerSupportsMcpConfig("zeroclaw")).toBe(true);
   });
 
   it("rejects providers whose runtime ignores mcp_config", () => {

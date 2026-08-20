@@ -149,6 +149,7 @@ var (
 		"reasonix":      "reasonix",
 		"dim":           "dim",
 		"mcode":         "mcode",
+		"zeroclaw":      "zeroclaw",
 		"multica_agent": "multica_agent",
 		"openclaw":      "openclaw",
 		"opencode":      "opencode",
