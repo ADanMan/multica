@@ -144,6 +144,7 @@ var (
 		"gemini":        "gemini",
 		"grok":          "grok",
 		"hermes":        "hermes",
+		"junie":         "junie",
 		"kiro":          "kiro",
 		"kimi":          "kimi",
 		"reasonix":      "reasonix",
