@@ -185,11 +185,15 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	}()
 
 	go func() {
-		defer cancel()
 		defer close(msgCh)
 		defer close(resCh)
 		defer func() {
 			stdin.Close()
+			// Cancellation must be reachable before Wait. A pathological child
+			// can close stdout/stderr (so the pipe drain succeeds) but keep the
+			// process alive; waiting first would then block until the overall
+			// task timeout and make a later deferred cancel ineffective.
+			cancel()
 			_ = cmd.Wait()
 		}()
 
@@ -238,7 +242,27 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if err != nil {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("junie session/load failed: %v", err)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
+				if isACPSessionNotFound(err) {
+					// The runtime refused the session outright, so flag the
+					// rejection: without it the daemon reads the zero value as
+					// "checked, and this was not a rejection" and keeps
+					// replaying the dead id on every later turn instead of
+					// retrying from a fresh session. sessionID is still empty
+					// on this path — cleared explicitly to stay in lockstep
+					// with the set_model and prompt branches below.
+					b.cfg.Logger.Warn("resumed session not found at session/load time; clearing session id so the daemon retries fresh",
+						"backend", "junie",
+						"requested_session", opts.ResumeSessionID,
+					)
+					sessionID = ""
+					resumeRejected = true
+				}
+				resCh <- Result{
+					Status:         finalStatus,
+					Error:          finalError,
+					DurationMs:     time.Since(startTime).Milliseconds(),
+					ResumeRejected: resumeRejected,
+				}
 				return
 			}
 			// Apply the same defensive resolution kimi/hermes/kiro use: if
