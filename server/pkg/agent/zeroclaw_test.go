@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,11 +22,25 @@ func TestNewReturnsZeroclawBackend(t *testing.T) {
 	}
 }
 
-// fakeZeroclawACPScript impersonates `zeroclaw acp` for unit tests. Wire
-// format mirrors the other Multica ACP fakes (dim/grok/qwenpaw): session/new
-// returns sessionId, session/load accepts an existing session,
-// session/set_model acknowledges a model switch, session/prompt returns
-// stopReason=end_turn.
+// fakeZeroclawACPScript impersonates `zeroclaw acp` for unit tests. Unlike a
+// generic ACP fake, this one reproduces the frames a real ZeroClaw 0.8.4
+// binary was observed to send, because several of the bugs this suite guards
+// against were shipped by a fake that answered more generously than the
+// runtime does:
+//
+//   - initialize carries the model id in `_meta.zeroclaw.defaultModel` and
+//     advertises no remote MCP transports.
+//   - session/new returns {sessionId, workspaceDir} and nothing else — no
+//     model catalog, no currentModelId.
+//   - session/resume returns a bare `{}`; ZeroClaw dispatches no
+//     session/set_model at all, so that request must fall through to the
+//     -32601 default arm exactly as it does on the wire.
+//   - an unknown session is ZeroClaw's custom -32000 SESSION_NOT_FOUND, not a
+//     JSON-RPC standard code.
+//
+// ZEROCLAW_STALE_REPLAY makes session/resume push a historical
+// agent_message_chunk before answering, which is what session/load does for
+// real and what the turn gate has to swallow.
 func fakeZeroclawACPScript() string {
 	return `#!/bin/sh
 while IFS= read -r line; do
@@ -35,30 +50,31 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":true}}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"_meta":{"zeroclaw":{"defaultModel":"llama3.2","maxSessions":10,"sessionTimeoutSecs":3600}},"agentInfo":{"name":"zeroclaw-acp","version":"0.8.4"},"authMethods":[],"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":false,"sse":false},"sessionCapabilities":{"close":{},"resume":{}}}}}\n' "$id"
       ;;
     *'"method":"session/new"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_zeroclaw_new"}}\n' "$id"
-      ;;
-    *'"method":"session/load"'*)
-      if [ -n "$ZEROCLAW_SESSION_NOT_FOUND" ]; then
-        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"session not found"}}\n' "$id"
+      if [ -n "$ZEROCLAW_REQUIRE_AGENT_ALIAS" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"session/new requires ` + "`agentAlias`" + ` (alias of a configured [agents.<alias>] entry)"}}\n' "$id"
         exit 0
       fi
-      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_zeroclaw_new","workspaceDir":"/tmp"}}\n' "$id"
       ;;
-    *'"method":"session/set_model"'*)
-      if [ -n "$ZEROCLAW_SET_MODEL_FAIL" ]; then
-        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"model not available"}}\n' "$id"
+    *'"method":"session/resume"'*)
+      if [ -n "$ZEROCLAW_SESSION_NOT_FOUND" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Session not found: ses_gone"}}\n' "$id"
         exit 0
+      fi
+      if [ -n "$ZEROCLAW_STALE_REPLAY" ]; then
+        printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_existing","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"STALE PRIOR ANSWER"}}}}\n'
       fi
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"session/prompt"'*)
+      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_existing","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"CURRENT ANSWER"}}}}\n'
       printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn","usage":{"inputTokens":10,"outputTokens":20,"cacheReadTokens":3,"cacheWriteTokens":2,"costUsdTicks":900}}}\n' "$id"
       ;;
     *)
-      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$id"
       ;;
   esac
 done
@@ -77,7 +93,8 @@ func writeFakeZeroclawScript(t *testing.T, script string) string {
 
 // TestZeroclawSessionNew covers the fresh-session happy path: initialize,
 // session/new, session/prompt, and a completed result carrying the new
-// session id and usage.
+// session id and usage attributed to the model ZeroClaw reported on
+// initialize.
 func TestZeroclawSessionNew(t *testing.T) {
 	t.Parallel()
 	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
@@ -109,15 +126,60 @@ func TestZeroclawSessionNew(t *testing.T) {
 	if result.SessionID != "ses_zeroclaw_new" {
 		t.Fatalf("expected sessionID ses_zeroclaw_new, got %q", result.SessionID)
 	}
-	if result.Usage == nil {
-		t.Fatal("expected usage to be non-nil")
+	// `initialize._meta.zeroclaw.defaultModel` is the only model identity
+	// ZeroClaw's ACP surface exposes, so it is what usage must be keyed on.
+	if _, ok := result.Usage["llama3.2"]; !ok {
+		t.Fatalf("expected usage attributed to the initialize default model, got %+v", result.Usage)
 	}
 }
 
-// TestZeroclawResumeLoadsSession covers the resume-via-session/load happy
-// path: a follow-up run with ResumeSessionID set uses session/load (not
-// session/new) and reports ResumeRejected=false.
-func TestZeroclawResumeLoadsSession(t *testing.T) {
+// TestZeroclawInitializeWithoutDefaultModel proves a handshake that omits
+// `_meta` degrades to an unlabelled run instead of failing it. ZeroClaw leaves
+// defaultModel out whenever no provider entry is configured.
+func TestZeroclawInitializeWithoutDefaultModel(t *testing.T) {
+	t.Parallel()
+	script := strings.Replace(
+		fakeZeroclawACPScript(),
+		`"_meta":{"zeroclaw":{"defaultModel":"llama3.2","maxSessions":10,"sessionTimeoutSecs":3600}},`,
+		`"_meta":{"zeroclaw":{"maxSessions":10}},`,
+		1,
+	)
+	if strings.Contains(script, "defaultModel") {
+		t.Fatal("fake script rewrite failed: defaultModel still present")
+	}
+	bin := writeFakeZeroclawScript(t, script)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{ExecutablePath: bin, Logger: logger})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	for range session.Messages {
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+	}
+	if _, ok := result.Usage["unknown"]; !ok {
+		t.Fatalf("expected usage under the unknown-model key, got %+v", result.Usage)
+	}
+}
+
+// TestZeroclawResumeUsesSessionResume covers the resume happy path: a
+// follow-up run with ResumeSessionID set uses session/resume and reports
+// ResumeRejected=false.
+//
+// session/load is explicitly forbidden here. Both methods restore the
+// transcript into the agent, but load also replays every retained message back
+// to the client as session/update notifications, so resuming through it would
+// feed the previous answer into this turn's deliverable.
+func TestZeroclawResumeUsesSessionResume(t *testing.T) {
 	t.Parallel()
 	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
 	reqFile := filepath.Join(t.TempDir(), "requests.txt")
@@ -148,13 +210,13 @@ func TestZeroclawResumeLoadsSession(t *testing.T) {
 	if result.Status != "completed" {
 		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
 	}
-	// session/load returns no explicit sessionId, so resolveResumedSessionID
-	// falls back to the requested id.
+	// session/resume returns a bare {}, so resolveResumedSessionID falls back
+	// to the requested id.
 	if result.SessionID != "ses_existing" {
-		t.Fatalf("expected sessionID ses_existing (fallback from load), got %q", result.SessionID)
+		t.Fatalf("expected sessionID ses_existing (fallback from resume), got %q", result.SessionID)
 	}
 	if result.ResumeRejected {
-		t.Fatal("expected ResumeRejected=false on successful load")
+		t.Fatal("expected ResumeRejected=false on successful resume")
 	}
 
 	raw, err := os.ReadFile(reqFile)
@@ -162,17 +224,69 @@ func TestZeroclawResumeLoadsSession(t *testing.T) {
 		t.Fatalf("read requests file: %v", err)
 	}
 	requests := string(raw)
-	if !strings.Contains(requests, `"method":"session/load"`) {
-		t.Fatalf("expected session/load on resume, got requests:\n%s", requests)
+	if !strings.Contains(requests, `"method":"session/resume"`) {
+		t.Fatalf("expected session/resume on resume, got requests:\n%s", requests)
 	}
+	assertNoRecordedFrame(t, reqFile, "session/load")
 	if strings.Contains(requests, `"method":"session/new"`) {
 		t.Fatalf("resume must not call session/new, got requests:\n%s", requests)
 	}
 }
 
-// TestZeroclawResumeNotFound covers the resume-not-found path: session/load
-// fails with a session-not-found error and the backend reports
-// ResumeRejected=true so the daemon retries fresh.
+// TestZeroclawResumeDropsReplayedHistory pins the reason resume switched off
+// session/load. Even when the runtime pushes a historical
+// agent_message_chunk before answering the resume request, the turn gate must
+// swallow it: it belongs to a prior turn, and appending it would republish the
+// previous answer as this run's output and re-emit it to the UI.
+func TestZeroclawResumeDropsReplayedHistory(t *testing.T) {
+	t.Parallel()
+	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{
+		ExecutablePath: bin,
+		Logger:         logger,
+		Env:            map[string]string{"ZEROCLAW_STALE_REPLAY": "1"},
+	})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
+		Cwd:             t.TempDir(),
+		ResumeSessionID: "ses_existing",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	var streamed []string
+	for msg := range session.Messages {
+		if msg.Type == MessageText {
+			streamed = append(streamed, msg.Content)
+		}
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+	}
+	if strings.Contains(result.Output, "STALE PRIOR ANSWER") {
+		t.Fatalf("replayed history leaked into Result.Output: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "CURRENT ANSWER") {
+		t.Fatalf("expected the current turn's answer in Result.Output, got %q", result.Output)
+	}
+	for _, content := range streamed {
+		if strings.Contains(content, "STALE PRIOR ANSWER") {
+			t.Fatalf("replayed history was re-sent to the UI: %v", streamed)
+		}
+	}
+}
+
+// TestZeroclawResumeNotFound covers the resume-not-found path: session/resume
+// fails with ZeroClaw's custom -32000 SESSION_NOT_FOUND and the backend
+// reports ResumeRejected=true so the daemon retries fresh.
 func TestZeroclawResumeNotFound(t *testing.T) {
 	t.Parallel()
 	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
@@ -203,11 +317,11 @@ func TestZeroclawResumeNotFound(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("expected failed, got status=%q error=%q", result.Status, result.Error)
 	}
-	if !strings.Contains(result.Error, "session/load failed") {
-		t.Fatalf("expected session/load failed error, got %q", result.Error)
+	if !strings.Contains(result.Error, "session/resume failed") {
+		t.Fatalf("expected session/resume failed error, got %q", result.Error)
 	}
 	if !result.ResumeRejected {
-		t.Fatal("expected ResumeRejected=true on session not found")
+		t.Fatal("expected ResumeRejected=true on session not found — ZeroClaw reports it as -32000, which isACPSessionNotFound must recognise")
 	}
 }
 
@@ -228,23 +342,47 @@ func TestZeroclawBlockedArgs(t *testing.T) {
 
 func TestZeroclawListModels(t *testing.T) {
 	t.Parallel()
-	// A missing binary must fall back to an empty catalog rather than error,
-	// matching the other ACP discovery backends.
-	cat, err := ListModels(context.Background(), "zeroclaw", Command{Path: missingAgentExecutable(t, "zeroclaw")})
+	// ZeroClaw's session/new advertises no catalog and it has no
+	// session-scoped model selection to consume one, so ListModels must
+	// return an empty catalog WITHOUT spawning a discovery subprocess.
+	//
+	// Point it at a real, executable fake that records its own invocation: a
+	// non-existent path cannot guard this, because the removed discovery
+	// helper also returned an empty catalog when the binary was missing.
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "invoked")
+	bin := writeFakeZeroclawScript(t, "#!/bin/sh\ntouch '"+marker+"'\nexit 0\n")
+
+	cat, err := ListModels(context.Background(), "zeroclaw", Command{Path: bin})
 	if err != nil {
 		t.Fatalf("zeroclaw ListModels should not error, got: %v", err)
 	}
 	if len(cat.Models) != 0 {
-		t.Fatalf("zeroclaw ListModels should return empty catalog on missing binary, got %d models", len(cat.Models))
+		t.Fatalf("zeroclaw ListModels should return empty catalog, got %d models", len(cat.Models))
 	}
-	if !cat.Fallback {
-		t.Fatal("zeroclaw ListModels should mark the empty catalog as a fallback")
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("zeroclaw ListModels executed the CLI; it must return an empty catalog without spawning a discovery subprocess")
 	}
 }
 
-// TestZeroclawSetModel verifies that a requested model reaches
-// session/set_model and the usage entry is attributed to it.
-func TestZeroclawSetModel(t *testing.T) {
+func TestZeroclawModelSelectionUnsupported(t *testing.T) {
+	t.Parallel()
+	if ModelSelectionSupported("zeroclaw") {
+		t.Fatal("ModelSelectionSupported(zeroclaw) should return false — its ACP server has no session/set_model and no handler reads a model param, so the model comes from the ZeroClaw agent profile")
+	}
+	// Other providers should remain supported.
+	if !ModelSelectionSupported("claude") {
+		t.Fatal("ModelSelectionSupported(claude) should remain true")
+	}
+}
+
+// TestZeroclawDoesNotAttemptModelSelection is the regression for the shipped
+// bug: the backend used to send session/set_model whenever opts.Model was set
+// and fail the whole run on its error. ZeroClaw dispatches no such method —
+// the real binary answers -32601, which the fake reproduces through its
+// default arm — so a configured model turned every run into a hard failure
+// before session/prompt was ever sent.
+func TestZeroclawDoesNotAttemptModelSelection(t *testing.T) {
 	t.Parallel()
 	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
 	reqFile := filepath.Join(t.TempDir(), "requests.txt")
@@ -259,8 +397,7 @@ func TestZeroclawSetModel(t *testing.T) {
 		t.Fatalf("New(zeroclaw) error: %v", err)
 	}
 
-	ctx := context.Background()
-	session, err := b.Execute(ctx, "test prompt", ExecOptions{
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
 		Cwd:   t.TempDir(),
 		Model: "zeroclaw-large",
 	})
@@ -273,18 +410,219 @@ func TestZeroclawSetModel(t *testing.T) {
 
 	result := <-session.Result
 	if result.Status != "completed" {
-		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+		t.Fatalf("a configured model must not fail the run, got status=%q error=%q", result.Status, result.Error)
 	}
-	if _, ok := result.Usage["zeroclaw-large"]; !ok {
-		t.Fatalf("expected usage entry for model 'zeroclaw-large', got %+v", result.Usage)
+	assertNoRecordedFrame(t, reqFile, "session/set_model")
+	// The model actually used is ZeroClaw's own, so usage is attributed to
+	// what initialize reported rather than to the ignored request.
+	if _, ok := result.Usage["llama3.2"]; !ok {
+		t.Fatalf("expected usage attributed to the runtime's model, got %+v", result.Usage)
+	}
+}
+
+// TestZeroclawDoesNotForwardMcpServers pins that a saved mcp_config never
+// reaches the wire. ZeroClaw reads MCP only from its own config-dir — no ACP
+// handler looks at `params.mcpServers` — so forwarding would be theatre, and
+// the failure must stay non-fatal because a stale value must not brick a task.
+func TestZeroclawDoesNotForwardMcpServers(t *testing.T) {
+	t.Parallel()
+	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+	reqFile := filepath.Join(t.TempDir(), "requests.txt")
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{
+		ExecutablePath: bin,
+		Logger:         logger,
+		Env:            map[string]string{"ZEROCLAW_REQUESTS_FILE": reqFile},
+	})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
 	}
 
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
+		Cwd: t.TempDir(),
+		McpConfig: json.RawMessage(`{"mcpServers":{"probe-stdio":{"command":"/bin/sh","args":["-c","true"]},` +
+			`"probe-http":{"type":"http","url":"http://127.0.0.1:59999/mcp"}}}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	for range session.Messages {
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" {
+		t.Fatalf("a stale mcp_config must not fail the run, got status=%q error=%q", result.Status, result.Error)
+	}
+
+	frame := findRecordedFrame(t, reqFile, "session/new")
+	params, _ := frame["params"].(map[string]any)
+	servers, ok := params["mcpServers"].([]any)
+	if !ok {
+		t.Fatalf("session/new must carry a spec-shaped mcpServers array, got %#v", params["mcpServers"])
+	}
+	if len(servers) != 0 {
+		t.Fatalf("session/new must send an empty mcpServers array, got %#v", servers)
+	}
 	raw, err := os.ReadFile(reqFile)
 	if err != nil {
 		t.Fatalf("read requests file: %v", err)
 	}
-	if !strings.Contains(string(raw), `"method":"session/set_model"`) {
-		t.Fatalf("expected session/set_model request, got:\n%s", raw)
+	for _, name := range []string{"probe-stdio", "probe-http"} {
+		if strings.Contains(string(raw), name) {
+			t.Fatalf("MCP server %q leaked onto the wire:\n%s", name, raw)
+		}
+	}
+}
+
+// TestZeroclawSessionNewOmitsAgentAliasWhenUnset guards ZeroClaw's
+// sole-agent auto-select. When the operator configured no alias the key must
+// be absent entirely: a hardcoded guess such as "default" turns a working
+// single-agent install into `Unknown agent \`default\“.
+func TestZeroclawSessionNewOmitsAgentAliasWhenUnset(t *testing.T) {
+	t.Parallel()
+	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+	reqFile := filepath.Join(t.TempDir(), "requests.txt")
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{
+		ExecutablePath: bin,
+		Logger:         logger,
+		Env:            map[string]string{"ZEROCLAW_REQUESTS_FILE": reqFile},
+	})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	// A whitespace-only alias counts as unset, matching ZeroClaw's own
+	// trim-and-drop-empty handling of the param.
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
+		Cwd:        t.TempDir(),
+		CustomArgs: []string{"--agent", "   "},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	for range session.Messages {
+	}
+	if result := <-session.Result; result.Status != "completed" {
+		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+	}
+
+	frame := findRecordedFrame(t, reqFile, "session/new")
+	params, _ := frame["params"].(map[string]any)
+	if _, ok := params["agentAlias"]; ok {
+		t.Fatalf("session/new must omit agentAlias when none is configured, got %#v", params)
+	}
+}
+
+// TestZeroclawSessionNewSendsConfiguredAgentAlias covers the multi-agent
+// case. `zeroclaw acp` has no --agent flag — clap aborts on one — so the alias
+// is lifted out of custom_args and travels as a session/new param instead.
+func TestZeroclawSessionNewSendsConfiguredAgentAlias(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "separate value", args: []string{"--agent", "myagent"}},
+		{name: "inline value", args: []string{"--agent=myagent"}},
+		{name: "long spelling", args: []string{"--agent-alias", "myagent"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+			reqFile := filepath.Join(t.TempDir(), "requests.txt")
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			b, err := New("zeroclaw", Config{
+				ExecutablePath: bin,
+				Logger:         logger,
+				Env:            map[string]string{"ZEROCLAW_REQUESTS_FILE": reqFile},
+			})
+			if err != nil {
+				t.Fatalf("New(zeroclaw) error: %v", err)
+			}
+
+			session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
+				Cwd:        t.TempDir(),
+				CustomArgs: tc.args,
+			})
+			if err != nil {
+				t.Fatalf("Execute error: %v", err)
+			}
+			for range session.Messages {
+			}
+			if result := <-session.Result; result.Status != "completed" {
+				t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
+			}
+
+			frame := findRecordedFrame(t, reqFile, "session/new")
+			params, _ := frame["params"].(map[string]any)
+			if got := params["agentAlias"]; got != "myagent" {
+				t.Fatalf("expected agentAlias=myagent on session/new, got %#v", params)
+			}
+		})
+	}
+}
+
+// TestZeroclawAgentAliasNeverReachesArgv is the other half of the alias
+// plumbing: `zeroclaw acp --agent x` dies at clap argument parsing, so the
+// tokens must be consumed, not forwarded.
+func TestZeroclawAgentAliasNeverReachesArgv(t *testing.T) {
+	t.Parallel()
+	alias, rest := takeZeroclawAgentAlias([]string{"--log-level", "debug", "--agent", "myagent", "--verbose"})
+	if alias != "myagent" {
+		t.Fatalf("expected alias myagent, got %q", alias)
+	}
+	want := []string{"--log-level", "debug", "--verbose"}
+	if strings.Join(rest, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("expected the alias tokens to be consumed, got %v want %v", rest, want)
+	}
+
+	// A copy arriving through any other path must still be stripped rather
+	// than crashing the CLI.
+	for _, flag := range []string{"--agent", "--agent-alias"} {
+		if zeroclawBlockedArgs[flag] != blockedWithValue {
+			t.Fatalf("expected %s to be blockedWithValue in zeroclawBlockedArgs", flag)
+		}
+	}
+}
+
+// TestZeroclawSessionNewMissingAliasErrorIsActionable covers the install
+// ZeroClaw refuses outright: 2+ agents (or none) with no [acp].default_agent.
+// The bare RPC error names a param that has no CLI flag, so the backend has to
+// say where the alias can actually come from.
+func TestZeroclawSessionNewMissingAliasErrorIsActionable(t *testing.T) {
+	t.Parallel()
+	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{
+		ExecutablePath: bin,
+		Logger:         logger,
+		Env:            map[string]string{"ZEROCLAW_REQUIRE_AGENT_ALIAS": "1"},
+	})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	for range session.Messages {
+	}
+
+	result := <-session.Result
+	if result.Status != "failed" {
+		t.Fatalf("expected failed, got status=%q error=%q", result.Status, result.Error)
+	}
+	for _, want := range []string{"--agent", "acp].default_agent"} {
+		if !strings.Contains(result.Error, want) {
+			t.Fatalf("expected the error to mention %q, got %q", want, result.Error)
+		}
 	}
 }
 
@@ -342,10 +680,14 @@ done`
 	}
 }
 
-// TestZeroclawSessionLoadTransientError verifies that a transient
-// network/handshake error on session/load does NOT set ResumeRejected=true,
+// TestZeroclawSessionResumeTransientError verifies that a transient
+// network/handshake error on session/resume does NOT set ResumeRejected=true,
 // matching the invariant documented in grok.go and qwenpaw_test.go.
-func TestZeroclawSessionLoadTransientError(t *testing.T) {
+//
+// The code here is -32000, the same one ZeroClaw uses for SESSION_NOT_FOUND,
+// so this also pins that isACPSessionNotFound still decides on the wording:
+// recognising the code alone would throw away a live session on a rate limit.
+func TestZeroclawSessionResumeTransientError(t *testing.T) {
 	t.Parallel()
 
 	script := `#!/bin/sh
@@ -355,7 +697,7 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}\n' "$id"
       ;;
-    *'"method":"session/load"'*)
+    *'"method":"session/resume"'*)
       printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"rate limit exceeded"}}\n' "$id"
       exit 0
       ;;
@@ -392,10 +734,10 @@ done
 	if result.Status != "failed" {
 		t.Fatalf("expected failed, got status=%q error=%q", result.Status, result.Error)
 	}
-	if !strings.Contains(result.Error, "session/load failed") {
-		t.Fatalf("expected session/load failed error, got %q", result.Error)
+	if !strings.Contains(result.Error, "session/resume failed") {
+		t.Fatalf("expected session/resume failed error, got %q", result.Error)
 	}
 	if result.ResumeRejected {
-		t.Fatal("expected ResumeRejected=false on transient load error")
+		t.Fatal("expected ResumeRejected=false on transient resume error")
 	}
 }

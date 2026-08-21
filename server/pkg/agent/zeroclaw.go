@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,13 +19,106 @@ import (
 // break the daemon↔ZeroClaw communication contract. `--help`/`-h` and the
 // login/auth flags would switch the CLI into a mode that never starts the
 // ACP server.
+//
+// `--agent` / `--agent-alias` are blocked because `zeroclaw acp` has no such
+// flag — clap aborts the process with `error: unexpected argument '--agent'
+// found`. takeZeroclawAgentAlias consumes them out of custom_args before this
+// filter runs and forwards the value as the session/new `agentAlias` param
+// instead; these entries stop a copy arriving through any other path (a
+// runtime launch prefix) from reaching argv.
 var zeroclawBlockedArgs = map[string]blockedArgMode{
-	"acp":     blockedStandalone,
-	"--help":  blockedStandalone,
-	"-h":      blockedStandalone,
-	"login":   blockedStandalone,
-	"--login": blockedStandalone,
-	"--auth":  blockedStandalone,
+	"acp":           blockedStandalone,
+	"--help":        blockedStandalone,
+	"-h":            blockedStandalone,
+	"login":         blockedStandalone,
+	"--login":       blockedStandalone,
+	"--auth":        blockedStandalone,
+	"--agent":       blockedWithValue,
+	"--agent-alias": blockedWithValue,
+}
+
+// takeZeroclawAgentAlias consumes the ZeroClaw agent alias from custom_args
+// and returns it with the remaining arguments.
+//
+// ZeroClaw binds every ACP session to an agent alias, resolved in this order:
+// the session/new `agentAlias` param, `[acp].default_agent`, then auto-select
+// when the config holds exactly one `[agents.<alias>]` entry. With none of
+// those, session/new fails with -32602. The alias cannot travel on argv (see
+// zeroclawBlockedArgs), so custom_args is the only operator-facing channel and
+// the value is lifted out here.
+//
+// Both `--agent x` and `--agent=x` are accepted, `--agent-alias` is the long
+// spelling, and the last occurrence wins so a per-agent entry can override a
+// runtime-wide one. An empty or whitespace-only value counts as unset:
+// ZeroClaw trims and drops empty aliases the same way, and sending one would
+// forfeit its auto-select.
+func takeZeroclawAgentAlias(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", args
+	}
+	alias := ""
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := unshellQuoteArg(args[i])
+		flag, value := arg, ""
+		hasInlineValue := false
+		if idx := strings.Index(arg, "="); idx > 0 {
+			flag, value, hasInlineValue = arg[:idx], arg[idx+1:], true
+		}
+		if flag != "--agent" && flag != "--agent-alias" {
+			rest = append(rest, args[i])
+			continue
+		}
+		if !hasInlineValue {
+			if i+1 >= len(args) {
+				continue
+			}
+			i++
+			value = unshellQuoteArg(args[i])
+		}
+		alias = strings.TrimSpace(value)
+	}
+	return alias, rest
+}
+
+// extractZeroclawDefaultModel pulls the model id out of an `initialize`
+// response.
+//
+// This is the only model identity ZeroClaw's ACP surface exposes. It is
+// read-only: the value comes from the configured provider entry
+// (`[providers.models.<type>.<alias>].model`), no ACP method accepts a model
+// param, and there is no `session/set_model` to call. Used to label token
+// usage so a run is not attributed to "unknown".
+func extractZeroclawDefaultModel(result json.RawMessage) string {
+	var r struct {
+		Meta struct {
+			Zeroclaw struct {
+				DefaultModel string `json:"defaultModel"`
+			} `json:"zeroclaw"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(r.Meta.Zeroclaw.DefaultModel)
+}
+
+// zeroclawSessionNewErrorMessage turns ZeroClaw's agent-selection failure into
+// something an operator can act on.
+//
+// session/new demands `agentAlias` whenever the config does not hold exactly
+// one agent — including the zero-agent case, where it asks for the alias of an
+// entry that does not exist yet — and no CLI flag can supply one, so the bare
+// RPC error leaves no route forward.
+func zeroclawSessionNewErrorMessage(err error) string {
+	base := fmt.Sprintf("zeroclaw session/new failed: %v", err)
+	var rpcErr *acpRPCError
+	if !errors.As(err, &rpcErr) || !strings.Contains(rpcErr.Message, "agentAlias") {
+		return base
+	}
+	return base + " — ZeroClaw auto-selects an agent only when its config holds exactly one [agents.<alias>] entry." +
+		" Configure the agent you want, then name it with `--agent <alias>` in this runtime's custom args" +
+		" or set `[acp].default_agent` in ZeroClaw's config."
 }
 
 // zeroclawBackend implements Backend by spawning `zeroclaw acp` and
@@ -35,15 +131,32 @@ var zeroclawBlockedArgs = map[string]blockedArgMode{
 // the backend reuses the shared hermesClient ACP transport — only the
 // binary, the session bootstrap, and the tool-name extraction differ.
 //
-// This backend targets the vanilla ACP handshake (initialize → session/new
-// or session/load → session/prompt) with no provider-specific quirks
-// layered on top: no permission-preset injection, no version gate, and no
-// separate authenticate step. Those were verified against real binaries for
-// Dim and Grok respectively; ZeroClaw has not yet had the same hands-on
-// verification, so this file deliberately does not guess at behavior it
-// cannot confirm. If a real ZeroClaw binary turns out to need one of those
-// (e.g. a hardcoded restrictive permission preset like Dim's), add it here
-// following the Dim/Grok pattern once verified.
+// Verified against a real ZeroClaw 0.8.4 binary driven over stdio. That
+// handshake is not vanilla ACP, and the departures below are what this file
+// is shaped around:
+//
+//   - The dispatch table is initialize and session/{new,load,resume,close,
+//     prompt,stop,cancel,event|update}. There is no `session/set_model` — it
+//     answers -32601 — and no handler reads a model param at all. The model
+//     belongs to the ZeroClaw agent profile (`agents.<alias>.model_provider`
+//     → `[providers.models.<type>.<alias>].model`) and cannot be selected per
+//     session, so ModelSelectionSupported opts ZeroClaw out. The one model id
+//     ACP exposes is `initialize._meta.zeroclaw.defaultModel`, used here only
+//     to label token usage.
+//   - session/new returns exactly {sessionId, workspaceDir}: no model
+//     catalog, no currentModelId, so there is nothing to discover.
+//   - session/new requires `agentAlias` unless exactly one agent is
+//     configured or `[acp].default_agent` is set. See takeZeroclawAgentAlias.
+//   - Resume goes through session/resume, not session/load: load replays the
+//     whole retained transcript back as session/update notifications, which
+//     would re-emit prior turns as this turn's output.
+//   - No handler reads `params.mcpServers`. MCP is operator-side only,
+//     configured in ZeroClaw's own config-dir.
+//   - Its SESSION_NOT_FOUND is a custom -32000; see isACPSessionNotFound.
+//
+// No permission-preset injection, version gate, or separate authenticate step
+// is needed: initialize returns an empty `authMethods` and the handshake asks
+// for nothing further.
 type zeroclawBackend struct {
 	cfg Config
 }
@@ -93,19 +206,24 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		return nil, fmt.Errorf("zeroclaw executable not found at %q: %w", execPath, err)
 	}
 
-	// Translate the agent's mcp_config (Claude-style object of objects) into
-	// the array shape ACP session/new and session/load expect. Fail closed on
-	// malformed JSON so the launch surfaces the real error instead of silently
-	// dropping every MCP server.
-	mcpServers, err := buildACPMcpServers(opts.McpConfig, b.cfg.Logger)
-	if err != nil {
-		return nil, fmt.Errorf("zeroclaw: invalid mcp_config: %w", err)
+	// ZeroClaw discards client-supplied MCP servers: none of its session/new,
+	// session/load or session/resume handlers reads `params.mcpServers`, and
+	// enabling `agents.<alias>.acp_enable_mcp` initialises that agent's OWN
+	// `mcp_bundles`, not ours. MCP therefore lives entirely in ZeroClaw's
+	// config-dir. providerSupportsMcpConfig hides the MCP tab for this
+	// runtime, so reaching here means a value saved before that — warn and
+	// continue rather than bricking the task over config we cannot honour.
+	if len(opts.McpConfig) > 0 {
+		b.cfg.Logger.Warn("zeroclaw ignores MCP servers supplied by Multica; its ACP server reads MCP only from its own config-dir ([[mcp.servers]] + [mcp_bundles.*] + agents.<alias>.mcp_bundles with acp_enable_mcp = true)",
+			"backend", "zeroclaw",
+		)
 	}
 
 	timeout := opts.Timeout
 	runCtx, cancel := runContext(ctx, timeout)
 
-	zeroclawArgs := append([]string{"acp"}, filterCustomArgs(opts.CustomArgs, zeroclawBlockedArgs, b.cfg.Logger)...)
+	agentAlias, customArgs := takeZeroclawAgentAlias(opts.CustomArgs)
+	zeroclawArgs := append([]string{"acp"}, filterCustomArgs(customArgs, zeroclawBlockedArgs, b.cfg.Logger)...)
 
 	cmd := b.cfg.commandAt(execPath).exec(runCtx, zeroclawArgs...)
 	hideAgentWindow(cmd)
@@ -157,6 +275,13 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 	// block for Result.Output while retaining the full text for error
 	// detection.
 	var deliverable acpDeliverableTracker
+	// streamingCurrentTurn gates every session update so that anything the
+	// runtime pushes outside our turn is dropped instead of landing in the
+	// deliverable. It must default to false: ZeroClaw flushes the frames that
+	// matter here — session/load's transcript replay — before it answers the
+	// request that triggered them, so the gate has to be closed from process
+	// start. Flipped to true only just before session/prompt is sent.
+	var streamingCurrentTurn atomic.Bool
 
 	promptDone := make(chan hermesPromptResult, 1)
 	activity := make(chan struct{}, 1)
@@ -166,6 +291,9 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		stdin:        stdin,
 		pending:      make(map[int]*pendingRPC),
 		pendingTools: make(map[string]*pendingToolCall),
+		acceptNotification: func(string) bool {
+			return streamingCurrentTurn.Load()
+		},
 		onActivity: func() {
 			select {
 			case activity <- struct{}{}:
@@ -173,6 +301,9 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			}
 		},
 		onMessage: func(msg Message) {
+			if !streamingCurrentTurn.Load() {
+				return
+			}
 			if msg.Type == MessageToolUse {
 				// Re-normalise tool titles the same way kimi/traecli/grok/dim
 				// do so the UI sees consistent snake_case names.
@@ -182,6 +313,9 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			msgStream.send(msg)
 		},
 		onPromptDone: func(result hermesPromptResult) {
+			if !streamingCurrentTurn.Load() {
+				return
+			}
 			select {
 			case promptDone <- result:
 			default:
@@ -220,7 +354,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		// resume. Only that is curable by starting a fresh session, so
 		// handshake/network failures below must leave it false.
 		var resumeRejected bool
-		effectiveModel := strings.TrimSpace(opts.Model)
+		var effectiveModel string
 
 		initResult, err := c.request(runCtx, "initialize", map[string]any{
 			"protocolVersion": 1,
@@ -237,9 +371,15 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			return
 		}
 
-		// Drop MCP entries whose remote transport the runtime didn't advertise.
-		// See hermes.go for why sending an unsupported transport tanks session/new.
-		mcpServers = filterACPMcpServersByCapability(mcpServers, extractACPMcpCapabilities(initResult), "zeroclaw", b.cfg)
+		// ZeroClaw's model is owned by its own config and cannot be chosen over
+		// ACP, so opts.Model can never be applied. initialize's
+		// _meta.zeroclaw.defaultModel is the only model identity on the wire;
+		// prefer it, and keep opts.Model only as a label of last resort for a
+		// value saved before ModelSelectionSupported turned the picker off.
+		effectiveModel = extractZeroclawDefaultModel(initResult)
+		if effectiveModel == "" {
+			effectiveModel = strings.TrimSpace(opts.Model)
+		}
 
 		cwd := opts.Cwd
 		if cwd == "" {
@@ -247,10 +387,15 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		}
 
 		if opts.ResumeSessionID != "" {
-			result, err := c.request(runCtx, "session/load", map[string]any{
+			// session/resume, not session/load. Both restore the transcript
+			// into the agent and both answer a bare `{}`, but load also
+			// replays every retained message back to us as session/update
+			// notifications, so a resumed turn would re-emit the previous
+			// answer as its own output.
+			result, err := c.request(runCtx, "session/resume", map[string]any{
 				"cwd":        cwd,
 				"sessionId":  opts.ResumeSessionID,
-				"mcpServers": mcpServers,
+				"mcpServers": []any{},
 			})
 			if err != nil {
 				if isACPSessionNotFound(err) {
@@ -259,11 +404,11 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 						"requested_session", opts.ResumeSessionID,
 					)
 					resumeRejected = true
-					resCh <- Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/load failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+					resCh <- Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/resume failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
 					return
 				}
 				finalStatus = "failed"
-				finalError = fmt.Sprintf("zeroclaw session/load failed: %v", err)
+				finalError = fmt.Sprintf("zeroclaw session/resume failed: %v", err)
 				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
 				return
 			}
@@ -276,14 +421,19 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 					"actual", sessionID,
 				)
 			}
-			if effectiveModel == "" {
-				effectiveModel = extractACPCurrentModelID(result)
-			}
 		} else {
-			result, err := c.request(runCtx, "session/new", map[string]any{
+			// mcpServers stays empty on purpose: ZeroClaw never reads it.
+			// agentAlias is omitted unless the operator named one — sending a
+			// guess would forfeit ZeroClaw's sole-agent auto-select and turn a
+			// working single-agent install into `Unknown agent`.
+			params := map[string]any{
 				"cwd":        cwd,
-				"mcpServers": mcpServers,
-			})
+				"mcpServers": []any{},
+			}
+			if agentAlias != "" {
+				params["agentAlias"] = agentAlias
+			}
+			result, err := c.request(runCtx, "session/new", params)
 			if err != nil {
 				if runCtx.Err() == context.DeadlineExceeded {
 					finalStatus = "timeout"
@@ -293,7 +443,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 					finalError = fmt.Sprintf("zeroclaw aborted: %v", err)
 				} else {
 					finalStatus = "failed"
-					finalError = fmt.Sprintf("zeroclaw session/new failed: %v", err)
+					finalError = zeroclawSessionNewErrorMessage(err)
 				}
 				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 				return
@@ -305,9 +455,6 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 				return
 			}
-			if effectiveModel == "" {
-				effectiveModel = extractACPCurrentModelID(result)
-			}
 		}
 
 		c.sessionID = sessionID
@@ -315,39 +462,12 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		msgStream.send(Message{Type: MessageStatus, Status: "running", SessionID: sessionID})
 		b.cfg.Logger.Info("zeroclaw session ready", "session_id", sessionID)
 
-		if opts.Model != "" {
-			if _, err := c.request(runCtx, "session/set_model", map[string]any{
-				"sessionId": sessionID,
-				"modelId":   opts.Model,
-			}); err != nil {
-				b.cfg.Logger.Warn("zeroclaw set_session_model failed", "error", err, "requested_model", opts.Model)
-				finalStatus = "failed"
-				finalError = fmt.Sprintf("zeroclaw could not switch to model %q: %v", opts.Model, err)
-				if opts.ResumeSessionID != "" && isACPSessionNotFound(err) {
-					b.cfg.Logger.Warn("resumed session not found at set_model time; clearing session id so the daemon retries fresh",
-						"backend", "zeroclaw",
-						"session_id", sessionID,
-					)
-					sessionID = ""
-					resumeRejected = true
-				}
-				resCh <- Result{
-					Status:         finalStatus,
-					Error:          finalError,
-					DurationMs:     time.Since(startTime).Milliseconds(),
-					SessionID:      sessionID,
-					ResumeRejected: resumeRejected,
-				}
-				return
-			}
-			b.cfg.Logger.Info("zeroclaw session model set", "model", opts.Model)
-		}
-
 		userText := prompt
 		if opts.SystemPrompt != "" {
 			userText = opts.SystemPrompt + "\n\n---\n\n" + prompt
 		}
 
+		streamingCurrentTurn.Store(true)
 		_, err = c.request(runCtx, "session/prompt", map[string]any{
 			"sessionId": sessionID,
 			"prompt": []map[string]any{
@@ -412,6 +532,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		case <-drainCtx.Done():
 		}
 		drainCancel()
+		streamingCurrentTurn.Store(false)
 
 		finalOutput, providerErrorOutput := deliverable.result()
 
@@ -423,6 +544,10 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 
 		u := c.accumulatedUsage()
 
+		// ZeroClaw 0.8.4 reports no token counts over ACP — its prompt result
+		// is {sessionId, stopReason, content} — so usageMap stays nil today.
+		// The attribution is kept wired so a later ZeroClaw that does report
+		// usage lands on the real model id rather than "unknown".
 		var usageMap map[string]TokenUsage
 		if acpUsagePresent(u) {
 			model := effectiveModel
