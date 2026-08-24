@@ -21,7 +21,7 @@ func TestChooseQwenInvocation_PassthroughForNonLauncher(t *testing.T) {
 
 	execName := "qwen"
 	lookedUp := filepath.Join(t.TempDir(), "qwen") // no .cmd / .bat
-	args := []string{"-p", "hello\nworld", "--output-format", "stream-json", "--yolo"}
+	args := []string{"--output-format", "stream-json", "--yolo"}
 
 	gotExec, gotArgs := chooseQwenInvocation(execName, lookedUp, args, logger)
 
@@ -69,6 +69,6 @@ func TestQwenLaunchesThroughTheInvocationChooser(t *testing.T) {
 
 	if !routed {
 		t.Fatal("qwen.go must spawn through Command.execVia with chooseQwenInvocation; " +
-			"launching the resolved executable directly hands the -p prompt back to cmd.exe re-tokenisation on Windows (GH #6082)")
+			"launching the resolved executable directly hands the managed argv back to cmd.exe re-tokenisation on Windows (GH #6082)")
 	}
 }

@@ -13,9 +13,8 @@ import (
 // TestPlatformQwenInvocation_RewritesCmdLauncherToPowerShellFile is the core
 // Windows test for #6082: when LookPath resolves qwen to the npm-generated
 // .cmd launcher and a sibling qwen.ps1 exists, we should invoke PowerShell
-// with -File <ps1> and forward every original arg unchanged — the multi-line,
-// quote- and ampersand-bearing -p prompt, and the --output-format stream-json
-// pair behind it that cmd.exe %* re-expansion swallows along with the prompt.
+// with -File <ps1> and forward every managed arg unchanged. The task prompt is
+// deliberately absent here because it is delivered on stdin.
 func TestPlatformQwenInvocation_RewritesCmdLauncherToPowerShellFile(t *testing.T) {
 	dir := t.TempDir()
 	cmdPath := filepath.Join(dir, "qwen.cmd")
@@ -27,9 +26,7 @@ func TestPlatformQwenInvocation_RewritesCmdLauncherToPowerShellFile(t *testing.T
 	writeFile(t, fakePS, "")
 	stubPowerShell(t, fakePS, true)
 
-	prompt := "You are running as a chat assistant for a Multica workspace.\n\nUser message:\nHallo & say \"hi\" 100%\n"
 	args := []string{
-		"-p", prompt,
 		"--output-format", "stream-json",
 		"--yolo",
 	}
@@ -52,13 +49,8 @@ func TestPlatformQwenInvocation_RewritesCmdLauncherToPowerShellFile(t *testing.T
 		t.Errorf("argv mismatch:\n got  %#v\n want %#v", gotArgs, wantArgs)
 	}
 
-	// Explicit checks for the two properties #6082 loses: the prompt must
-	// still be one argv element, and the protocol flags must still be their
-	// own tokens behind it — without them qwen answers in plain text and the
-	// daemon never sees a stream-json result event.
-	if idx := prefixIndex(gotArgs, []string{"-p", prompt}); idx < 0 {
-		t.Errorf("the -p prompt did not survive as a single argv element: %#v", gotArgs)
-	}
+	// Without the protocol flags Qwen answers in plain text and the daemon
+	// never sees a stream-json result event.
 	if idx := prefixIndex(gotArgs, []string{"--output-format", "stream-json"}); idx < 0 {
 		t.Errorf("the stream-json protocol flags did not survive: %#v", gotArgs)
 	}
@@ -77,7 +69,7 @@ func TestPlatformQwenInvocation_SkipsWhenNotCmdOrBat(t *testing.T) {
 	stubPowerShell(t, filepath.Join(dir, "powershell.exe"), true)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, _, ok := platformQwenInvocation(exePath, []string{"-p", "hello"}, logger); ok {
+	if _, _, ok := platformQwenInvocation(exePath, []string{"--output-format", "stream-json"}, logger); ok {
 		t.Fatalf("expected ok=false for non-.cmd/.bat launcher")
 	}
 }
@@ -94,7 +86,7 @@ func TestPlatformQwenInvocation_SkipsWhenPS1Missing(t *testing.T) {
 	stubPowerShell(t, filepath.Join(dir, "powershell.exe"), true)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, _, ok := platformQwenInvocation(cmdPath, []string{"-p", "hello"}, logger); ok {
+	if _, _, ok := platformQwenInvocation(cmdPath, []string{"--output-format", "stream-json"}, logger); ok {
 		t.Fatalf("expected ok=false when qwen.ps1 is missing")
 	}
 }
@@ -112,7 +104,7 @@ func TestPlatformQwenInvocation_SkipsWhenPowerShellMissing(t *testing.T) {
 	stubPowerShell(t, "", false)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, _, ok := platformQwenInvocation(cmdPath, []string{"-p", "hello"}, logger); ok {
+	if _, _, ok := platformQwenInvocation(cmdPath, []string{"--output-format", "stream-json"}, logger); ok {
 		t.Fatalf("expected ok=false when no powershell host is available")
 	}
 }
