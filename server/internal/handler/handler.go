@@ -190,7 +190,7 @@ type Handler struct {
 	AutopilotService       *service.AutopilotService
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
 	// preserves the self-hosted and pre-rollout behavior without extra reads.
-	Entitlements          entitlement.Provider
+	Entitlements entitlement.Provider
 	// IssueScheduleService owns one-time issue-scheduled-trigger CRUD and
 	// dispatch (#5927). Dispatch is also called from the scheduler job
 	// (server/internal/scheduler/jobs_issue_schedule.go), registered in
