@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ var zeroclawBlockedArgs = map[string]blockedArgMode{
 	"--help":        blockedStandalone,
 	"-h":            blockedStandalone,
 	"login":         blockedStandalone,
+	"auth":          blockedStandalone,
 	"--login":       blockedStandalone,
 	"--auth":        blockedStandalone,
 	"--agent":       blockedWithValue,
@@ -78,6 +80,52 @@ func takeZeroclawAgentAlias(args []string) (string, []string) {
 		alias = strings.TrimSpace(value)
 	}
 	return alias, rest
+}
+
+// zeroclawResumeSupported reads the capability ZeroClaw derives from whether
+// its persistent session store opened successfully. A read-only or unwritable
+// config directory leaves resume absent even on a new-enough binary.
+func zeroclawResumeSupported(result json.RawMessage) bool {
+	var r struct {
+		AgentCapabilities struct {
+			SessionCapabilities struct {
+				Resume *struct{} `json:"resume"`
+			} `json:"sessionCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	return json.Unmarshal(result, &r) == nil && r.AgentCapabilities.SessionCapabilities.Resume != nil
+}
+
+// selectZeroclawPermissionOption keeps ordinary single-use tool approvals on
+// the shared ACP policy, but fails closed for ZeroClaw's legacy structured
+// question bridge. That bridge labels every answer `choice-N` with
+// allow_once, so generic auto-approval would silently answer every question
+// with the first choice. Select its offered reject_once option instead: a
+// headless daemon cannot truthfully make a user's product decision.
+func selectZeroclawPermissionOption(params json.RawMessage) (optionID string, grant bool, ok bool) {
+	var p struct {
+		Options []acpPermissionOption `json:"options"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return "", false, false
+	}
+
+	isLegacyChoice := len(p.Options) >= 2
+	for _, opt := range p.Options {
+		if !strings.HasPrefix(opt.OptionID, "choice-") {
+			isLegacyChoice = false
+			break
+		}
+	}
+	if !isLegacyChoice {
+		return selectACPPermissionOption(params)
+	}
+	for _, opt := range p.Options {
+		if opt.OptionID != "" && strings.EqualFold(strings.TrimSpace(opt.Kind), acpKindRejectOnce) {
+			return opt.OptionID, false, true
+		}
+	}
+	return "", false, false
 }
 
 // zeroclawSessionNewErrorMessage turns ZeroClaw's agent-selection failure into
@@ -266,10 +314,11 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 	activity := make(chan struct{}, 1)
 
 	c := &hermesClient{
-		cfg:          b.cfg,
-		stdin:        stdin,
-		pending:      make(map[int]*pendingRPC),
-		pendingTools: make(map[string]*pendingToolCall),
+		cfg:              b.cfg,
+		stdin:            stdin,
+		pending:          make(map[int]*pendingRPC),
+		pendingTools:     make(map[string]*pendingToolCall),
+		selectPermission: selectZeroclawPermissionOption,
 		acceptNotification: func(string) bool {
 			return streamingCurrentTurn.Load()
 		},
@@ -335,7 +384,10 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		var resumeRejected bool
 		var effectiveModel string
 
-		_, err := c.request(runCtx, "initialize", map[string]any{
+		// Keep elicitation absent: this headless client cannot collect a user's
+		// form response. ZeroClaw's legacy structured-choice bridge is handled
+		// fail-closed by selectZeroclawPermissionOption instead.
+		initResult, err := c.request(runCtx, "initialize", map[string]any{
 			"protocolVersion": 1,
 			"clientInfo": map[string]any{
 				"name":    "multica-agent-sdk",
@@ -355,16 +407,23 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			cwd = "."
 		}
 
-		if opts.ResumeSessionID != "" {
+		resumeSupported := zeroclawResumeSupported(initResult)
+		resumingExistingSession := opts.ResumeSessionID != "" && resumeSupported
+		if opts.ResumeSessionID != "" && !resumeSupported {
+			b.cfg.Logger.Warn("zeroclaw persistence is unavailable; starting a fresh session in the current process",
+				"backend", "zeroclaw",
+				"requested_session", opts.ResumeSessionID,
+			)
+		}
+
+		if resumingExistingSession {
 			// session/resume, not session/load. Both restore the transcript
 			// into the agent and both answer a bare `{}`, but load also
 			// replays every retained message back to us as session/update
 			// notifications, so a resumed turn would re-emit the previous
 			// answer as its own output.
 			result, err := c.request(runCtx, "session/resume", map[string]any{
-				"cwd":        cwd,
-				"sessionId":  opts.ResumeSessionID,
-				"mcpServers": []any{},
+				"sessionId": opts.ResumeSessionID,
 			})
 			if err != nil {
 				if isACPSessionNotFound(err) {
@@ -453,7 +512,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			} else {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("zeroclaw session/prompt failed: %v", err)
-				if opts.ResumeSessionID != "" && isACPSessionNotFound(err) {
+				if resumingExistingSession && isACPSessionNotFound(err) {
 					b.cfg.Logger.Warn("resumed session not found at prompt time; clearing session id so the daemon retries fresh",
 						"backend", "zeroclaw",
 						"session_id", sessionID,
@@ -469,9 +528,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 					finalStatus = "aborted"
 					finalError = "zeroclaw cancelled the prompt"
 				}
-				if effectiveModel == "" {
-					effectiveModel = pr.modelID
-				}
+				effectiveModel = pr.modelID
 				c.mergeUsage(pr.usage)
 			default:
 			}

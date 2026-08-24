@@ -225,10 +225,62 @@ func TestZeroclawResumeUsesSessionResume(t *testing.T) {
 	if !strings.Contains(requests, `"method":"session/resume"`) {
 		t.Fatalf("expected session/resume on resume, got requests:\n%s", requests)
 	}
+	resumeFrame := findRecordedFrame(t, reqFile, "session/resume")
+	resumeParams, _ := resumeFrame["params"].(map[string]any)
+	if len(resumeParams) != 1 || resumeParams["sessionId"] != "ses_existing" {
+		t.Fatalf("session/resume must send only the session id ZeroClaw reads, got %#v", resumeParams)
+	}
 	assertNoRecordedFrame(t, reqFile, "session/load")
 	if strings.Contains(requests, `"method":"session/new"`) {
 		t.Fatalf("resume must not call session/new, got requests:\n%s", requests)
 	}
+}
+
+// TestZeroclawResumeCapabilityUnavailableStartsFresh covers ZeroClaw's
+// read-only/unwritable persistence fallback. In that mode initialize omits
+// sessionCapabilities.resume, so attempting session/resume would only create
+// a failed turn and force the daemon to launch a second process. Start a new
+// session in the process already running instead.
+func TestZeroclawResumeCapabilityUnavailableStartsFresh(t *testing.T) {
+	t.Parallel()
+	script := strings.Replace(
+		fakeZeroclawACPScript(),
+		`"sessionCapabilities":{"close":{},"resume":{}}`,
+		`"sessionCapabilities":{"close":{}}`,
+		1,
+	)
+	if strings.Contains(script, `"resume":{}`) {
+		t.Fatal("fake script rewrite failed: resume capability still present")
+	}
+	bin := writeFakeZeroclawScript(t, script)
+	reqFile := filepath.Join(t.TempDir(), "requests.txt")
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{
+		ExecutablePath: bin,
+		Logger:         logger,
+		Env:            map[string]string{"ZEROCLAW_REQUESTS_FILE": reqFile},
+	})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	session, err := b.Execute(context.Background(), "test prompt", ExecOptions{
+		Cwd:             t.TempDir(),
+		ResumeSessionID: "ses_existing",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	for range session.Messages {
+	}
+
+	result := <-session.Result
+	if result.Status != "completed" || result.SessionID != "ses_zeroclaw_new" {
+		t.Fatalf("expected a completed fresh session, got status=%q session=%q error=%q", result.Status, result.SessionID, result.Error)
+	}
+	assertNoRecordedFrame(t, reqFile, "session/resume")
+	findRecordedFrame(t, reqFile, "session/new")
 }
 
 // TestZeroclawResumeDropsReplayedHistory pins the reason resume switched off
@@ -331,10 +383,79 @@ func TestZeroclawBlockedArgs(t *testing.T) {
 	if zeroclawBlockedArgs["acp"] != blockedStandalone {
 		t.Fatalf("expected acp to be blockedStandalone, got %v", zeroclawBlockedArgs["acp"])
 	}
-	for _, flag := range []string{"--help", "-h", "login", "--login", "--auth"} {
+	for _, flag := range []string{"--help", "-h", "login", "auth", "--login", "--auth"} {
 		if _, ok := zeroclawBlockedArgs[flag]; !ok {
 			t.Fatalf("expected %s to be in zeroclawBlockedArgs", flag)
 		}
+	}
+}
+
+func TestSelectZeroclawPermissionOptionRejectsLegacyChoice(t *testing.T) {
+	t.Parallel()
+
+	question := json.RawMessage(`{"options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"},{"optionId":"choice-2","kind":"reject_once"}]}`)
+	optionID, grant, ok := selectZeroclawPermissionOption(question)
+	if !ok || grant || optionID != "choice-2" {
+		t.Fatalf("legacy choices must fail closed through the offered reject, got option=%q grant=%v ok=%v", optionID, grant, ok)
+	}
+	questionWithoutReject := json.RawMessage(`{"options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"}]}`)
+	if optionID, grant, ok := selectZeroclawPermissionOption(questionWithoutReject); ok || grant || optionID != "" {
+		t.Fatalf("legacy choices without an offered reject must return no selectable outcome, got option=%q grant=%v ok=%v", optionID, grant, ok)
+	}
+
+	toolApproval := json.RawMessage(`{"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}`)
+	optionID, grant, ok = selectZeroclawPermissionOption(toolApproval)
+	if !ok || !grant || optionID != "allow-once" {
+		t.Fatalf("ordinary tool approval must keep the shared single-use grant policy, got option=%q grant=%v ok=%v", optionID, grant, ok)
+	}
+}
+
+// TestZeroclawLegacyChoiceFailsClosedThroughClient pins the backend wiring,
+// not just the selector helper. The fake waits for the response to the same
+// session/request_permission shape ZeroClaw uses for structured ask_user and
+// completes only when the client selects the offered reject_once option.
+func TestZeroclawLegacyChoiceFailsClosedThroughClient(t *testing.T) {
+	t.Parallel()
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}\n' "$id"
+      ;;
+    *'"method":"session/new"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_choice","workspaceDir":"/tmp"}}\n' "$id"
+      ;;
+    *'"method":"session/prompt"'*)
+      printf '{"jsonrpc":"2.0","id":"zc-out-0","method":"session/request_permission","params":{"sessionId":"ses_choice","options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"},{"optionId":"choice-2","kind":"reject_once"}]}}\n'
+      IFS= read -r answer
+      case "$answer" in
+        *'"optionId":"choice-2"'*) ;;
+        *) exit 2 ;;
+      esac
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+      ;;
+    *)
+      exit 3
+      ;;
+  esac
+done
+`
+	bin := writeFakeZeroclawScript(t, script)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	b, err := New("zeroclaw", Config{ExecutablePath: bin, Logger: logger})
+	if err != nil {
+		t.Fatalf("New(zeroclaw) error: %v", err)
+	}
+
+	session, err := b.Execute(context.Background(), "choose", ExecOptions{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	for range session.Messages {
+	}
+	if result := <-session.Result; result.Status != "completed" {
+		t.Fatalf("expected the offered reject_once response to unblock the turn, got status=%q error=%q", result.Status, result.Error)
 	}
 }
 
@@ -693,7 +814,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":{}}}}}\n' "$id"
       ;;
     *'"method":"session/resume"'*)
       printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"rate limit exceeded"}}\n' "$id"
