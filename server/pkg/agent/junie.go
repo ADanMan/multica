@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,6 +21,49 @@ import (
 // Reasonix's `acp --profile ...`.
 var junieBlockedArgs = map[string]blockedArgMode{
 	"--acp": blockedWithValue,
+}
+
+// junieSessionNotFoundRe matches Junie's unknown-session wording, which
+// interpolates the id between the noun and the verdict:
+//
+//	{"code":-32602,"message":"Session session-260824-112848-191m not found"}
+//
+// The shared isACPSessionNotFound only matches contiguous phrases ("session
+// not found" / "no session found" / "unknown session"), so it returns false
+// for every rejection Junie 1468.30 actually emits.
+//
+// The interleaved token must look like an id — one word carrying a digit,
+// hyphen or underscore — so that unrelated "session <noun> not found" errors
+// (a "session config not found", a "session log file x.json not found") keep
+// failing the match. Erring towards NOT matching is the safe direction: a
+// false positive discards a healthy session id and re-runs the turn from zero.
+var junieSessionNotFoundRe = regexp.MustCompile(`(?i)\bsession\s+['"` + "`" + `]?[a-z0-9]*[-_0-9][a-z0-9._-]*['"` + "`" + `]?\s+not found\b`)
+
+// isJunieSessionNotFound reports whether err is Junie refusing a session id it
+// no longer knows. It is a strict superset of the shared helper: the
+// contiguous ACP wordings still match, and Junie's id-interpolating phrasing
+// matches on top of that.
+//
+// Kept Junie-local rather than widened into isACPSessionNotFound (hermes.go)
+// on purpose. That predicate is shared by ~11 ACP backends, and every widening
+// can only add false positives — each of which makes a backend clear a live
+// session and replay a turn. Precedent for a provider-local predicate:
+// isKiroOversizedHistoryImage (kiro.go) and hermesResumeSessionLost (hermes.go).
+func isJunieSessionNotFound(err error) bool {
+	if isACPSessionNotFound(err) {
+		return true
+	}
+	var rpcErr *acpRPCError
+	if !errors.As(err, &rpcErr) {
+		return false
+	}
+	// Same code gate as the shared helper: wording alone must not be enough to
+	// retire a session when the runtime classified the failure as something
+	// else entirely.
+	if rpcErr.Code != -32603 && rpcErr.Code != -32602 && rpcErr.Code != -32002 {
+		return false
+	}
+	return junieSessionNotFoundRe.MatchString(rpcErr.Message + " " + rpcErr.Data)
 }
 
 // junieReaderDrainGrace bounds how long the turn waits for trailing ACP
@@ -36,9 +81,25 @@ var junieReaderDrainGrace = 2 * time.Second
 // the existing Hermes/Kimi/Kiro ACP client can drive it with only
 // provider-specific launch args.
 //
-// Two things this adapter deliberately does NOT do, pending a live protocol
-// check against an installed `junie` binary (see the issue's "Protocol
-// check" step, same as the Kiro PR):
+// What a protocol capture against @jetbrains/junie-cli 1468.30.0 established,
+// and what it could not:
+//
+//   - session/load answers ANY session id — live, expired or invented — with
+//     an ordinary success frame carrying only configOptions and no sessionId.
+//     It is not a session-existence probe, and neither is session/list, which
+//     returned {"sessions":[]} for sessions that were live in the same process.
+//   - session/set_model DOES validate the session, answering -32602
+//     "Session <id> not found" for an unknown id and "Unsupported Junie model
+//     '<x>'" for a live one. That wording is what isJunieSessionNotFound
+//     exists to match.
+//   - Everything past the auth wall is unverified: session/prompt answered
+//     -32000 "Authentication is required before this operation can be
+//     performed" on an unauthenticated CLI, so no capture shows a real turn,
+//     a session/request_permission, or what prompt does with a dead session.
+//
+// Two things this adapter deliberately does NOT do, pending a live run against
+// an authenticated `junie` (see the issue's "Protocol check" step, same as the
+// Kiro PR):
 //
 //  1. Permission auto-approval uses the generic kind-based
 //     selectACPPermissionOption (see hermes.go) unmodified rather than a
@@ -48,7 +109,7 @@ var junieReaderDrainGrace = 2 * time.Second
 //     ACP-compliant agent out of the box; Reasonix only needed an override
 //     because it multiplexes protected decisions and free-form questions
 //     through the same request_permission call, which has not been observed
-//     for Junie.
+//     for Junie. No session/request_permission frame has been captured at all.
 //  2. No junieToolNameFromTitle mapping (contrast kiroToolNameFromTitle /
 //     reasonixToolNameFromTitle): hermesClient already falls back to the
 //     standard ACP ToolCallKind (read/edit/execute/search/fetch/think) when a
@@ -242,14 +303,28 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if err != nil {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("junie session/load failed: %v", err)
-				if isACPSessionNotFound(err) {
-					// The runtime refused the session outright, so flag the
-					// rejection: without it the daemon reads the zero value as
-					// "checked, and this was not a rejection" and keeps
-					// replaying the dead id on every later turn instead of
-					// retrying from a fresh session. sessionID is still empty
-					// on this path — cleared explicitly to stay in lockstep
-					// with the set_model and prompt branches below.
+				if isJunieSessionNotFound(err) {
+					// Junie 1468.30 does not take this path for a MISSING
+					// session: session/load answers any id, live or invented,
+					// with a success frame carrying only configOptions. A dead
+					// resume surfaces later instead — at session/set_model or
+					// session/prompt, where the runtime does check. The branch
+					// stays for load errors that are real (transport, cwd,
+					// malformed mcpServers) and in case JetBrains makes load
+					// strict; it is not this backend's resume-rejection
+					// detector. There is no load-time detector to write:
+					// session/load echoes nothing distinguishing, and
+					// session/list — though advertised — returned
+					// {"sessions":[]} for sessions that were live in the same
+					// process, so it cannot serve as an existence probe.
+					//
+					// When it does fire, flagging the rejection matters:
+					// without it the daemon reads the zero value as "checked,
+					// and this was not a rejection" and keeps replaying the
+					// dead id on every later turn instead of retrying from a
+					// fresh session. sessionID is still empty on this path —
+					// cleared explicitly to stay in lockstep with the
+					// set_model and prompt branches below.
 					b.cfg.Logger.Warn("resumed session not found at session/load time; clearing session id so the daemon retries fresh",
 						"backend", "junie",
 						"requested_session", opts.ResumeSessionID,
@@ -316,11 +391,13 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				b.cfg.Logger.Warn("junie set_session_model failed", "error", err, "requested_model", opts.Model)
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("junie could not switch to model %q: %v", opts.Model, err)
-				if opts.ResumeSessionID != "" && isACPSessionNotFound(err) {
+				if opts.ResumeSessionID != "" && isJunieSessionNotFound(err) {
 					// On a resumed session with a model override, the dead
-					// session surfaces here instead of at session/prompt.
-					// Same fix as the prompt path below: clear the id so
-					// the daemon's resume-failure fallback retries fresh.
+					// session surfaces here instead of at session/prompt —
+					// this is the one branch a capture proves Junie reaches,
+					// since session/load lets any id through. Same fix as the
+					// prompt path below: clear the id so the daemon's
+					// resume-failure fallback retries fresh.
 					b.cfg.Logger.Warn("resumed session not found at set_model time; clearing session id so the daemon retries fresh",
 						"backend", "junie",
 						"session_id", sessionID,
@@ -363,13 +440,20 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			} else {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("junie session/prompt failed: %v", err)
-				if opts.ResumeSessionID != "" && isACPSessionNotFound(err) {
+				if opts.ResumeSessionID != "" && isJunieSessionNotFound(err) {
 					// See the hermes/kiro backends: the runtime may echo the
 					// requested id back from session/load even when the
 					// session is gone, so the stale id only fails here, at
-					// prompt time. Empty SessionID lets the daemon's
-					// resume-failure fallback retry fresh and store the
-					// replacement id.
+					// prompt time. Junie is the extreme case — its session/load
+					// accepts any id at all — so without a model override this
+					// is the first place a dead resume can be caught. Empty
+					// SessionID lets the daemon's resume-failure fallback retry
+					// fresh and store the replacement id.
+					//
+					// The unknown-session wording is verified for set_model
+					// only; the auth wall blocked every captured prompt. The
+					// predicate is a strict superset of the previous shared
+					// one, so the worst case here is that it keeps not firing.
 					b.cfg.Logger.Warn("resumed session not found at prompt time; clearing session id so the daemon retries fresh",
 						"backend", "junie",
 						"session_id", sessionID,

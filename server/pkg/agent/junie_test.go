@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -70,6 +71,21 @@ func TestJunieBlockedArgsProtectsACPFlag(t *testing.T) {
 // fakeJunieACPScript is a minimal ACP server that answers the handshake
 // junieBackend.Execute drives: initialize, session/new, session/load,
 // session/set_model, session/prompt. Mirrors fakeKiroACPScript's shape.
+//
+// The frames follow a capture of @jetbrains/junie-cli 1468.30.0 wherever one
+// exists, because the previous fixture invented both the wording and the
+// behaviour of a missing session and so certified a path the real CLI cannot
+// produce. In particular:
+//
+//   - session/load answers ANY id with a success frame carrying only
+//     configOptions — no sessionId echo, no error. JUNIE_SESSION_NOT_FOUND
+//     forces the generic-ACP error shape instead; that is a shape other ACP
+//     runtimes produce and this backend still handles, not one Junie 1468.30
+//     was observed to produce.
+//   - an unknown session is rejected by the stateful methods with
+//     -32602 "Session <id> not found" (JUNIE_STALE_AT_SET_MODEL /
+//     JUNIE_STALE_AT_PROMPT), which is the id-interpolating wording the
+//     shared isACPSessionNotFound does not match.
 func fakeJunieACPScript() string {
 	return `#!/bin/sh
 if [ -n "$JUNIE_ARGS_FILE" ]; then
@@ -87,16 +103,20 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}\n' "$id"
       ;;
     *'"method":"session/new"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_new","models":{"currentModelId":"auto","availableModels":[{"modelId":"auto","name":"auto"}]}}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_new","configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}],"models":{"currentModelId":"auto","availableModels":[{"modelId":"auto","name":"auto"}]}}}\n' "$id"
       ;;
     *'"method":"session/load"'*)
       if [ -n "$JUNIE_SESSION_NOT_FOUND" ]; then
-        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"session not found"}}\n' "$id"
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Session ses_gone not found"}}\n' "$id"
         exit 0
       fi
-      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}]}}\n' "$id"
       ;;
     *'"method":"session/set_model"'*)
+      if [ -n "$JUNIE_STALE_AT_SET_MODEL" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Session ses_gone not found"}}\n' "$id"
+        exit 0
+      fi
       case "$line" in
         *bogus-model*)
           printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"model not available: bogus-model"}}\n' "$id"
@@ -108,6 +128,10 @@ while IFS= read -r line; do
       esac
       ;;
     *'"method":"session/prompt"'*)
+      if [ -n "$JUNIE_STALE_AT_PROMPT" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Session ses_gone not found"}}\n' "$id"
+        exit 0
+      fi
       case "$line" in
         *'"prompt":'*)
           ;;
@@ -300,6 +324,14 @@ func TestJunieBackendSetModelFailureFailsTask(t *testing.T) {
 // shouldRetryWithFreshSession starts a new session; without it the daemon
 // reads the zero value as "checked, not a rejection" and replays the dead id
 // on every subsequent turn. Mirrors TestQwenpawSessionLoadNotFound.
+//
+// This is a generic-ACP shape, NOT what Junie 1468.30 does — its session/load
+// answers an unknown id with an ordinary success frame, so the branch under
+// test is unreachable for that build (see the fixture comment, and
+// fakeHermesACPStaleResumeScript in hermes_test.go for the same annotation on
+// the Hermes side). It stays covered because the branch must keep behaving if
+// JetBrains makes load strict. The surfaces a capture proves Junie DOES reject
+// on are covered by TestJunieStaleResumeSignalsResumeRejected.
 func TestJunieSessionLoadNotFoundSignalsResumeRejected(t *testing.T) {
 	t.Parallel()
 
@@ -349,6 +381,213 @@ func TestJunieSessionLoadNotFoundSignalsResumeRejected(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestIsJunieSessionNotFound pins the wording discrimination the whole resume
+// recovery hangs on. Junie interpolates the id — "Session <id> not found" —
+// which the shared isACPSessionNotFound (contiguous phrases only) misses, so
+// every ResumeRejected branch in junie.go stayed dead against the real CLI.
+//
+// The near-misses matter as much as the matches. A false positive here makes
+// the backend clear a HEALTHY session id and report a rejection, which drives
+// shouldRetryWithFreshSession to discard the conversation pointer and re-run
+// the turn from zero — strictly worse than failing loudly. The interleaved
+// token must therefore look like an id, not any noun.
+func TestIsJunieSessionNotFound(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			// Captured verbatim from @jetbrains/junie-cli 1468.30.0 replying
+			// to session/set_model with an unknown session id.
+			name: "junie interpolates the session id",
+			err:  &acpRPCError{Method: "session/set_model", Code: -32602, Message: "Session session-260824-112848-191m not found"},
+			want: true,
+		},
+		{
+			name: "junie wording with a quoted id",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32602, Message: `Session "ses_1a" not found`},
+			want: true,
+		},
+		{
+			name: "junie wording carried in data",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32602, Message: "Invalid params", Data: "Session ses-9 not found"},
+			want: true,
+		},
+		{
+			// The shared helper's wordings must keep matching: this predicate
+			// is a superset, not a replacement.
+			name: "contiguous hermes wording still matches",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32603, Message: "Session not found"},
+			want: true,
+		},
+		{
+			name: "kiro data wording still matches",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32603, Message: "Internal error", Data: "No session found with id ses_abc"},
+			want: true,
+		},
+		{
+			name: "wrapped rpc error",
+			err:  fmt.Errorf("request failed: %w", &acpRPCError{Method: "session/set_model", Code: -32602, Message: "Session ses-1 not found"}),
+			want: true,
+		},
+		{
+			// The interleaved word is a plain noun, not an id: a missing
+			// config is not a missing session, and treating it as one would
+			// retire a live conversation.
+			name: "missing session config is not a missing session",
+			err:  &acpRPCError{Method: "session/new", Code: -32602, Message: "session config not found"},
+			want: false,
+		},
+		{
+			name: "missing session config file is not a missing session",
+			err:  &acpRPCError{Method: "session/new", Code: -32602, Message: "session config file not found"},
+			want: false,
+		},
+		{
+			// An id-shaped token elsewhere in the sentence must not count:
+			// only the token directly between the noun and the verdict does.
+			name: "missing session log file is not a missing session",
+			err:  &acpRPCError{Method: "session/load", Code: -32603, Message: "session log file ses-1.json not found"},
+			want: false,
+		},
+		{
+			name: "missing model on a live session",
+			err:  &acpRPCError{Method: "session/set_model", Code: -32602, Message: "Model gpt-9 not found for session ses-1"},
+			want: false,
+		},
+		{
+			// Junie's answer for a live session with a bad model. Sharing the
+			// code with the not-found reply is exactly why the text gate has
+			// to be narrow.
+			name: "unsupported model on a live session",
+			err:  &acpRPCError{Method: "session/set_model", Code: -32602, Message: "Unsupported Junie model 'gpt-5'"},
+			want: false,
+		},
+		{
+			name: "junie auth wall",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32000, Message: "Authentication is required before this operation can be performed."},
+			want: false,
+		},
+		{
+			name: "junie wording under an unrelated code",
+			err:  &acpRPCError{Method: "session/prompt", Code: -32601, Message: "Session ses-1 not found"},
+			want: false,
+		},
+		{
+			name: "plain error",
+			err:  fmt.Errorf("session/set_model: Session ses-1 not found (code=-32602)"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isJunieSessionNotFound(tc.err); got != tc.want {
+				t.Errorf("isJunieSessionNotFound(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJunieStaleResumeSignalsResumeRejected covers the surfaces a real Junie
+// actually rejects a dead session on. Its session/load lets any id through, so
+// the failure only lands at session/set_model (verified against 1468.30) or,
+// without a model override, at session/prompt (same runtime, same error
+// vocabulary — the captured run hit the auth wall before prompt, so that half
+// is extrapolated).
+//
+// Both must clear the session id and set ResumeRejected. junie is absent from
+// resumeRejectionUndetectable, so a false ResumeRejected is read by
+// shouldRetryWithFreshSession as an authoritative "checked, not a rejection"
+// and the daemon replays the dead id forever.
+func TestJunieStaleResumeSignalsResumeRejected(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		env       map[string]string
+		model     string
+		wantError string
+	}{
+		{
+			name:      "set_model rejects the stale session",
+			env:       map[string]string{"JUNIE_STALE_AT_SET_MODEL": "1"},
+			model:     "junie-default",
+			wantError: `could not switch to model "junie-default"`,
+		},
+		{
+			name:      "prompt rejects the stale session",
+			env:       map[string]string{"JUNIE_STALE_AT_PROMPT": "1"},
+			wantError: "session/prompt failed",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fakePath := filepath.Join(t.TempDir(), "junie")
+			writeTestExecutable(t, fakePath, []byte(fakeJunieACPScript()))
+
+			backend, err := New("junie", Config{
+				ExecutablePath: fakePath,
+				Logger:         slog.Default(),
+				Env:            tc.env,
+			})
+			if err != nil {
+				t.Fatalf("new junie backend: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			session, err := backend.Execute(ctx, "continue", ExecOptions{
+				ResumeSessionID: "ses_gone",
+				Model:           tc.model,
+				Timeout:         5 * time.Second,
+			})
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			go func() {
+				for range session.Messages {
+				}
+			}()
+
+			select {
+			case result, ok := <-session.Result:
+				if !ok {
+					t.Fatal("result channel closed without a value")
+				}
+				if result.Status != "failed" {
+					t.Fatalf("expected status=failed, got %q (error=%q)", result.Status, result.Error)
+				}
+				if !strings.Contains(result.Error, tc.wantError) {
+					t.Errorf("expected the error to name the failing step %q, got %q", tc.wantError, result.Error)
+				}
+				if !result.ResumeRejected {
+					t.Fatal("expected ResumeRejected=true so the daemon retries from a fresh session")
+				}
+				if result.SessionID != "" {
+					t.Errorf("expected the dead session id to be cleared, got %q", result.SessionID)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("timeout waiting for result")
+			}
+		})
 	}
 }
 
