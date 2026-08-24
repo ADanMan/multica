@@ -1,4 +1,4 @@
--- One-time scheduled run bound to an issue (#5927). See migration 377 for
+-- One-time scheduled run bound to an issue (#5927). See migration 404 for
 -- the table shape and server/internal/service/issue_schedule.go for the
 -- validation and dispatch logic.
 
