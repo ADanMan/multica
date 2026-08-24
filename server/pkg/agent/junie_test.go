@@ -25,9 +25,10 @@ func TestNewReturnsJunieBackend(t *testing.T) {
 
 // TestJunieBlockedArgsProtectsACPFlag verifies custom_args cannot drop or
 // override the --acp launch flag, in either inline (--acp=false) or
-// two-token (--acp false) form, while unrelated custom args pass through
-// unchanged. Mirrors the equivalent coverage in kiro_test.go / reasonix_test.go
-// for their own protocol-critical flags.
+// two-token (--acp false) form, nor hand-set the daemon-owned --brave
+// permission bypass, while unrelated custom args pass through unchanged.
+// Mirrors the equivalent coverage in kiro_test.go / reasonix_test.go for their
+// own protocol-critical flags.
 func TestJunieBlockedArgsProtectsACPFlag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -43,6 +44,11 @@ func TestJunieBlockedArgsProtectsACPFlag(t *testing.T) {
 		{
 			name: "two-token override is stripped along with its value",
 			in:   []string{"--acp", "false", "--verbose"},
+			want: []string{"--verbose"},
+		},
+		{
+			name: "daemon-owned brave-mode flag is stripped",
+			in:   []string{"--brave", "--verbose"},
 			want: []string{"--verbose"},
 		},
 		{
@@ -70,13 +76,15 @@ func TestJunieBlockedArgsProtectsACPFlag(t *testing.T) {
 
 // fakeJunieACPScript is a minimal ACP server that answers the handshake
 // junieBackend.Execute drives: initialize, session/new, session/load,
-// session/set_model, session/prompt. Mirrors fakeKiroACPScript's shape.
+// session/set_config_option, session/set_model, session/prompt. Mirrors
+// fakeKiroACPScript's shape.
 //
 // The frames follow a capture of @jetbrains/junie-cli 1468.30.0 wherever one
 // exists, because the previous fixture invented both the wording and the
 // behaviour of a missing session and so certified a path the real CLI cannot
 // produce. In particular:
 //
+//   - session/new advertises the brave_mode configOption, defaulting to "off".
 //   - session/load answers ANY id with a success frame carrying only
 //     configOptions — no sessionId echo, no error. JUNIE_SESSION_NOT_FOUND
 //     forces the generic-ACP error shape instead; that is a shape other ACP
@@ -111,6 +119,15 @@ while IFS= read -r line; do
         exit 0
       fi
       printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}]}}\n' "$id"
+      ;;
+    *'"method":"session/set_config_option"'*)
+      if [ -n "$JUNIE_BRAVE_FAIL" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"config set failed"}}\n' "$id"
+      elif [ -n "$JUNIE_BRAVE_UNCONFIRMED" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}]}}\n' "$id"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":[{"type":"select","id":"brave_mode","currentValue":"on","options":[{"value":"on"},{"value":"off"}]}]}}\n' "$id"
+      fi
       ;;
     *'"method":"session/set_model"'*)
       if [ -n "$JUNIE_STALE_AT_SET_MODEL" ]; then
@@ -583,6 +600,150 @@ func TestJunieStaleResumeSignalsResumeRejected(t *testing.T) {
 				}
 				if result.SessionID != "" {
 					t.Errorf("expected the dead session id to be cleared, got %q", result.SessionID)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("timeout waiting for result")
+			}
+		})
+	}
+}
+
+// TestJunieEnablesBraveModeBeforePrompt pins the unattended-execution
+// contract. Junie's brave_mode configOption defaults to "off" — it asks before
+// executing commands — and its --brave flag is interactive-only, so
+// session/set_config_option is the only route. The parameter name is load
+// bearing: Junie answers `optionId` with -32700 "Missing 'configId'".
+//
+// It must run on the resumed path too: a resumed session whose first run died
+// before configuring the gate would otherwise carry it into the resume.
+func TestJunieEnablesBraveModeBeforePrompt(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		opts ExecOptions
+	}{
+		{name: "fresh session", opts: ExecOptions{Timeout: 5 * time.Second}},
+		{name: "resumed session", opts: ExecOptions{ResumeSessionID: "ses_existing", Timeout: 5 * time.Second}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tempDir := t.TempDir()
+			requestsFile := filepath.Join(tempDir, "requests.jsonl")
+			fakePath := filepath.Join(tempDir, "junie")
+			writeTestExecutable(t, fakePath, []byte(fakeJunieACPScript()))
+
+			backend, err := New("junie", Config{
+				ExecutablePath: fakePath,
+				Logger:         slog.Default(),
+				Env:            map[string]string{"JUNIE_REQUESTS_FILE": requestsFile},
+			})
+			if err != nil {
+				t.Fatalf("new junie backend: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			session, err := backend.Execute(ctx, "do the thing", tc.opts)
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			go func() {
+				for range session.Messages {
+				}
+			}()
+			result := <-session.Result
+			if result.Status != "completed" {
+				t.Fatalf("expected completed result, got status=%q error=%q", result.Status, result.Error)
+			}
+
+			raw, err := os.ReadFile(requestsFile)
+			if err != nil {
+				t.Fatalf("read requests file: %v", err)
+			}
+			requests := string(raw)
+			configAt := strings.Index(requests, `"method":"session/set_config_option"`)
+			if configAt < 0 {
+				t.Fatalf("expected a session/set_config_option request, got:\n%s", requests)
+			}
+			if !strings.Contains(requests, `"configId":"brave_mode"`) {
+				t.Fatalf("brave mode must be set through configId, not optionId, got:\n%s", requests)
+			}
+			if !strings.Contains(requests, `"value":"on"`) {
+				t.Fatalf("expected brave_mode to be switched on, got:\n%s", requests)
+			}
+			promptAt := strings.Index(requests, `"method":"session/prompt"`)
+			if promptAt < 0 {
+				t.Fatalf("expected a session/prompt request, got:\n%s", requests)
+			}
+			if configAt > promptAt {
+				t.Fatalf("brave mode must be enabled before the prompt, got:\n%s", requests)
+			}
+		})
+	}
+}
+
+// TestJunieBraveModeFailureStillRuns keeps the brave-mode call best-effort.
+// Unlike dim's read-only preset — whose default denies every write, so failing
+// to raise it guarantees a dead session — Junie's default only asks for
+// approval, and an ACP session/request_permission is already auto-answered by
+// selectACPPermissionOption. Aborting here would turn a probably-working run
+// into a hard failure.
+func TestJunieBraveModeFailureStillRuns(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "runtime rejects the request", env: map[string]string{"JUNIE_BRAVE_FAIL": "1"}},
+		{name: "runtime does not confirm the value", env: map[string]string{"JUNIE_BRAVE_UNCONFIRMED": "1"}},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fakePath := filepath.Join(t.TempDir(), "junie")
+			writeTestExecutable(t, fakePath, []byte(fakeJunieACPScript()))
+
+			backend, err := New("junie", Config{
+				ExecutablePath: fakePath,
+				Logger:         slog.Default(),
+				Env:            tc.env,
+			})
+			if err != nil {
+				t.Fatalf("new junie backend: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			session, err := backend.Execute(ctx, "do the thing", ExecOptions{Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			go func() {
+				for range session.Messages {
+				}
+			}()
+
+			select {
+			case result, ok := <-session.Result:
+				if !ok {
+					t.Fatal("result channel closed without a value")
+				}
+				if result.Status != "completed" {
+					t.Fatalf("a failed brave-mode call must not fail the run, got status=%q error=%q", result.Status, result.Error)
+				}
+				if result.Output != "loaded" {
+					t.Errorf("expected the turn to still produce output, got %q", result.Output)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("timeout waiting for result")

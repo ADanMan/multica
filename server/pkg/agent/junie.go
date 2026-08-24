@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -19,9 +20,27 @@ import (
 // for Kiro/Reasonix. Junie CLI documents this as a flag (`--acp=true`), not a
 // subcommand — a different shape from Kiro's `acp --trust-all-tools` and
 // Reasonix's `acp --profile ...`.
+//
+// --brave is daemon-owned for the same reason --trust-all-tools is on Kiro and
+// --yolo is on Qoder/Traecli: the permission bypass is part of the unattended
+// contract, not a user preference. `junie --help` scopes the flag to
+// interactive mode, so the ACP path sets it through session/set_config_option
+// (see applyJunieBraveMode) — blocking it here keeps custom_args from
+// half-setting the same knob through a route that does nothing in ACP mode.
 var junieBlockedArgs = map[string]blockedArgMode{
-	"--acp": blockedWithValue,
+	"--acp":   blockedWithValue,
+	"--brave": blockedStandalone,
 }
+
+// junieBraveModeConfigID is the session configOption Junie advertises for its
+// permission gate. Captured from session/new against @jetbrains/junie-cli
+// 1468.30.0: {"type":"select","id":"brave_mode","name":"Brave Mode",
+// "description":"When enabled, Junie will execute commands without asking for
+// approval","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}.
+const junieBraveModeConfigID = "brave_mode"
+
+// junieBraveModeOn is the advertised option value that disables the gate.
+const junieBraveModeOn = "on"
 
 // junieSessionNotFoundRe matches Junie's unknown-session wording, which
 // interpolates the id between the noun and the verdict:
@@ -66,6 +85,70 @@ func isJunieSessionNotFound(err error) bool {
 	return junieSessionNotFoundRe.MatchString(rpcErr.Message + " " + rpcErr.Data)
 }
 
+// applyJunieBraveMode turns off Junie's per-command approval prompt for the
+// life of the process by setting the advertised brave_mode configOption.
+//
+// Junie 1468.30 defaults brave_mode to "off", i.e. it asks before executing
+// commands — unusable for an unattended daemon run. Every other unattended ACP
+// backend pins an equivalent bypass (kiro --trust-all-tools, qoder/traecli
+// --yolo, hermes HERMES_YOLO_MODE=1, dim permission=full-access). Junie's own
+// --brave flag is documented interactive-only, so session/set_config_option is
+// the only route in ACP mode. The parameter is `configId`: sending `optionId`
+// is answered -32700 "Missing 'configId'" (captured).
+//
+// Best-effort by design, unlike dim.go's fail-closed equivalent. Dim's default
+// is a read-only preset that denies every write, so a failed set there
+// guarantees a dead session; Junie's default only *asks*, and an ACP
+// session/request_permission is already auto-answered by the shared
+// selectACPPermissionOption. Turning a probably-working run into a hard
+// failure would cost more than it saves.
+//
+// Known side effect: Junie persists this to the user's global
+// ~/.junie/settings.json ("braveMode": "true") and does not revert it when the
+// session ends, so it outlives the task and also affects the user's own
+// interactive junie runs. That is in tension with the rule
+// selectACPPermissionOption follows (hermes.go), which refuses to auto-select a
+// permanent allow_always grant for exactly this reason. It is accepted here
+// because Junie advertises no session-scoped equivalent, and restoring the
+// previous value at exit would be a second global write — racy against
+// concurrent junie processes and unreachable when the daemon is killed.
+func applyJunieBraveMode(ctx context.Context, request acpRequestFn, logger *slog.Logger, sessionID string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	result, err := request(ctx, "session/set_config_option", map[string]any{
+		"sessionId": sessionID,
+		"configId":  junieBraveModeConfigID,
+		"value":     junieBraveModeOn,
+	})
+	if err != nil {
+		logger.Warn("junie rejected the brave-mode request; sending the prompt anyway (the run may stall on an approval prompt)",
+			"backend", "junie",
+			"config_id", junieBraveModeConfigID,
+			"session_id", sessionID,
+			"error", err,
+		)
+		return
+	}
+	// Read back rather than assume: the response echoes the session's
+	// configOptions, so a runtime that accepts the call and leaves the value
+	// where it was is visible here instead of at the first blocked command.
+	effective, confirmed := acpConfigOptionCurrentValue(result, junieBraveModeConfigID)
+	if !confirmed || effective != junieBraveModeOn {
+		if !confirmed {
+			effective = "unknown"
+		}
+		logger.Warn("junie did not confirm brave mode; sending the prompt anyway (the run may stall on an approval prompt)",
+			"backend", "junie",
+			"config_id", junieBraveModeConfigID,
+			"session_id", sessionID,
+			"effective_value", effective,
+		)
+		return
+	}
+	logger.Info("junie brave mode enabled", "session_id", sessionID)
+}
+
 // junieReaderDrainGrace bounds how long the turn waits for trailing ACP
 // notifications after the session/prompt response. A var, not a const, so
 // tests can shorten it. Mirrors kiroReaderDrainGrace / reasonixReaderDrainGrace.
@@ -84,6 +167,9 @@ var junieReaderDrainGrace = 2 * time.Second
 // What a protocol capture against @jetbrains/junie-cli 1468.30.0 established,
 // and what it could not:
 //
+//   - session/new advertises a "brave_mode" configOption defaulting to "off",
+//     i.e. Junie asks before executing commands. applyJunieBraveMode turns it
+//     on; see there for the global-settings side effect that carries.
 //   - session/load answers ANY session id — live, expired or invented — with
 //     an ordinary success frame carrying only configOptions and no sessionId.
 //     It is not a session-existence probe, and neither is session/list, which
@@ -109,7 +195,9 @@ var junieReaderDrainGrace = 2 * time.Second
 //     ACP-compliant agent out of the box; Reasonix only needed an override
 //     because it multiplexes protected decisions and free-form questions
 //     through the same request_permission call, which has not been observed
-//     for Junie. No session/request_permission frame has been captured at all.
+//     for Junie. No session/request_permission frame has been captured at all,
+//     so whether brave mode or this path is what keeps a run unattended is
+//     still open.
 //  2. No junieToolNameFromTitle mapping (contrast kiroToolNameFromTitle /
 //     reasonixToolNameFromTitle): hermesClient already falls back to the
 //     standard ACP ToolCallKind (read/edit/execute/search/fetch/think) when a
@@ -382,6 +470,12 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 
 		c.sessionID = sessionID
 		b.cfg.Logger.Info("junie session created", "session_id", sessionID)
+
+		// Runs on both the fresh and the resumed path: brave mode is a session
+		// setting, a resumed session whose first run failed before configuring
+		// it would otherwise carry the gate into the resume, and the call is
+		// idempotent.
+		applyJunieBraveMode(runCtx, c.request, b.cfg.Logger, sessionID)
 
 		if opts.Model != "" {
 			if _, err := c.request(runCtx, "session/set_model", map[string]any{
