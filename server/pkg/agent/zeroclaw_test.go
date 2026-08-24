@@ -236,12 +236,12 @@ func TestZeroclawResumeUsesSessionResume(t *testing.T) {
 	}
 }
 
-// TestZeroclawResumeCapabilityUnavailableStartsFresh covers ZeroClaw's
+// TestZeroclawResumeCapabilityUnavailableReportsRejection covers ZeroClaw's
 // read-only/unwritable persistence fallback. In that mode initialize omits
-// sessionCapabilities.resume, so attempting session/resume would only create
-// a failed turn and force the daemon to launch a second process. Start a new
-// session in the process already running instead.
-func TestZeroclawResumeCapabilityUnavailableStartsFresh(t *testing.T) {
+// sessionCapabilities.resume. Report positive rejection evidence so the
+// daemon owns the fresh retry, continuity notice, prompt rebuild, runtime
+// config rewrite, and retirement of the abandoned session id.
+func TestZeroclawResumeCapabilityUnavailableReportsRejection(t *testing.T) {
 	t.Parallel()
 	script := strings.Replace(
 		fakeZeroclawACPScript(),
@@ -276,11 +276,14 @@ func TestZeroclawResumeCapabilityUnavailableStartsFresh(t *testing.T) {
 	}
 
 	result := <-session.Result
-	if result.Status != "completed" || result.SessionID != "ses_zeroclaw_new" {
-		t.Fatalf("expected a completed fresh session, got status=%q session=%q error=%q", result.Status, result.SessionID, result.Error)
+	if result.Status != "failed" || !result.ResumeRejected || result.SessionID != "" {
+		t.Fatalf("expected failed resume rejection without a replacement session, got status=%q session=%q rejected=%v error=%q", result.Status, result.SessionID, result.ResumeRejected, result.Error)
+	}
+	if !strings.Contains(result.Error, "session/resume unavailable") {
+		t.Fatalf("expected an actionable resume-unavailable error, got %q", result.Error)
 	}
 	assertNoRecordedFrame(t, reqFile, "session/resume")
-	findRecordedFrame(t, reqFile, "session/new")
+	assertNoRecordedFrame(t, reqFile, "session/new")
 }
 
 // TestZeroclawResumeDropsReplayedHistory pins the reason resume switched off
@@ -395,8 +398,8 @@ func TestSelectZeroclawPermissionOptionRejectsLegacyChoice(t *testing.T) {
 
 	question := json.RawMessage(`{"options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"},{"optionId":"choice-2","kind":"reject_once"}]}`)
 	optionID, grant, ok := selectZeroclawPermissionOption(question)
-	if !ok || grant || optionID != "choice-2" {
-		t.Fatalf("legacy choices must fail closed through the offered reject, got option=%q grant=%v ok=%v", optionID, grant, ok)
+	if ok || grant || optionID != "" {
+		t.Fatalf("legacy choices must return no selectable outcome, got option=%q grant=%v ok=%v", optionID, grant, ok)
 	}
 	questionWithoutReject := json.RawMessage(`{"options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"}]}`)
 	if optionID, grant, ok := selectZeroclawPermissionOption(questionWithoutReject); ok || grant || optionID != "" {
@@ -410,11 +413,11 @@ func TestSelectZeroclawPermissionOptionRejectsLegacyChoice(t *testing.T) {
 	}
 }
 
-// TestZeroclawLegacyChoiceFailsClosedThroughClient pins the backend wiring,
-// not just the selector helper. The fake waits for the response to the same
-// session/request_permission shape ZeroClaw uses for structured ask_user and
-// completes only when the client selects the offered reject_once option.
-func TestZeroclawLegacyChoiceFailsClosedThroughClient(t *testing.T) {
+// TestZeroclawLegacyChoiceReturnsProtocolErrorThroughClient pins the backend
+// wiring, not just the selector helper. The fake waits for the response to the
+// same session/request_permission shape ZeroClaw uses for structured ask_user,
+// then mirrors ZeroClaw's prompt failure after the client returns -32603.
+func TestZeroclawLegacyChoiceReturnsProtocolErrorThroughClient(t *testing.T) {
 	t.Parallel()
 	script := `#!/bin/sh
 while IFS= read -r line; do
@@ -430,10 +433,10 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":"zc-out-0","method":"session/request_permission","params":{"sessionId":"ses_choice","options":[{"optionId":"choice-0","kind":"allow_once"},{"optionId":"choice-1","kind":"allow_once"},{"optionId":"choice-2","kind":"reject_once"}]}}\n'
       IFS= read -r answer
       case "$answer" in
-        *'"optionId":"choice-2"'*) ;;
+        *'"code":-32603'*) ;;
         *) exit 2 ;;
       esac
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"ACP request_permission failed: no auto-selectable permission option offered"}}\n' "$id"
       ;;
     *)
       exit 3
@@ -454,8 +457,9 @@ done
 	}
 	for range session.Messages {
 	}
-	if result := <-session.Result; result.Status != "completed" {
-		t.Fatalf("expected the offered reject_once response to unblock the turn, got status=%q error=%q", result.Status, result.Error)
+	result := <-session.Result
+	if result.Status != "failed" || !strings.Contains(result.Error, "ACP request_permission failed") {
+		t.Fatalf("expected the legacy choice to fail through the protocol error, got status=%q error=%q", result.Status, result.Error)
 	}
 }
 

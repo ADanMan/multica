@@ -100,8 +100,10 @@ func zeroclawResumeSupported(result json.RawMessage) bool {
 // the shared ACP policy, but fails closed for ZeroClaw's legacy structured
 // question bridge. That bridge labels every answer `choice-N` with
 // allow_once, so generic auto-approval would silently answer every question
-// with the first choice. Select its offered reject_once option instead: a
-// headless daemon cannot truthfully make a user's product decision.
+// with the first choice. Returning ok=false makes the shared transport send a
+// protocol error: even the option marked reject_once is still mapped back to
+// a real answer by ZeroClaw, so selecting it would silently choose the last
+// answer rather than reject the question.
 func selectZeroclawPermissionOption(params json.RawMessage) (optionID string, grant bool, ok bool) {
 	var p struct {
 		Options []acpPermissionOption `json:"options"`
@@ -119,11 +121,6 @@ func selectZeroclawPermissionOption(params json.RawMessage) (optionID string, gr
 	}
 	if !isLegacyChoice {
 		return selectACPPermissionOption(params)
-	}
-	for _, opt := range p.Options {
-		if opt.OptionID != "" && strings.EqualFold(strings.TrimSpace(opt.Kind), acpKindRejectOnce) {
-			return opt.OptionID, false, true
-		}
 	}
 	return "", false, false
 }
@@ -407,16 +404,22 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			cwd = "."
 		}
 
-		resumeSupported := zeroclawResumeSupported(initResult)
-		resumingExistingSession := opts.ResumeSessionID != "" && resumeSupported
-		if opts.ResumeSessionID != "" && !resumeSupported {
-			b.cfg.Logger.Warn("zeroclaw persistence is unavailable; starting a fresh session in the current process",
+		if opts.ResumeSessionID != "" && !zeroclawResumeSupported(initResult) {
+			b.cfg.Logger.Warn("zeroclaw persistence is unavailable; the daemon will retry from a rebuilt fresh-session context",
 				"backend", "zeroclaw",
 				"requested_session", opts.ResumeSessionID,
 			)
+			resumeRejected = true
+			resCh <- Result{
+				Status:         "failed",
+				Error:          "zeroclaw session/resume unavailable: initialize did not advertise sessionCapabilities.resume",
+				DurationMs:     time.Since(startTime).Milliseconds(),
+				ResumeRejected: resumeRejected,
+			}
+			return
 		}
 
-		if resumingExistingSession {
+		if opts.ResumeSessionID != "" {
 			// session/resume, not session/load. Both restore the transcript
 			// into the agent and both answer a bare `{}`, but load also
 			// replays every retained message back to us as session/update
@@ -512,7 +515,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			} else {
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("zeroclaw session/prompt failed: %v", err)
-				if resumingExistingSession && isACPSessionNotFound(err) {
+				if opts.ResumeSessionID != "" && isACPSessionNotFound(err) {
 					b.cfg.Logger.Warn("resumed session not found at prompt time; clearing session id so the daemon retries fresh",
 						"backend", "zeroclaw",
 						"session_id", sessionID,
