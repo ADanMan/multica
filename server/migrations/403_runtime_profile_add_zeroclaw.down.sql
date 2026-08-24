@@ -1,4 +1,4 @@
--- Restore the pre-378 whitelist (including dim from migration 370).
+-- Restore the pre-403 whitelist (including dim from migration 370).
 -- Existing ZeroClaw rows remain valid because the replacement constraint is
 -- NOT VALID, but new ZeroClaw profiles are blocked.
 ALTER TABLE runtime_profile DROP CONSTRAINT IF EXISTS runtime_profile_protocol_family_check;

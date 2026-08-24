@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,28 +80,6 @@ func takeZeroclawAgentAlias(args []string) (string, []string) {
 	return alias, rest
 }
 
-// extractZeroclawDefaultModel pulls the model id out of an `initialize`
-// response.
-//
-// This is the only model identity ZeroClaw's ACP surface exposes. It is
-// read-only: the value comes from the configured provider entry
-// (`[providers.models.<type>.<alias>].model`), no ACP method accepts a model
-// param, and there is no `session/set_model` to call. Used to label token
-// usage so a run is not attributed to "unknown".
-func extractZeroclawDefaultModel(result json.RawMessage) string {
-	var r struct {
-		Meta struct {
-			Zeroclaw struct {
-				DefaultModel string `json:"defaultModel"`
-			} `json:"zeroclaw"`
-		} `json:"_meta"`
-	}
-	if err := json.Unmarshal(result, &r); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(r.Meta.Zeroclaw.DefaultModel)
-}
-
 // zeroclawSessionNewErrorMessage turns ZeroClaw's agent-selection failure into
 // something an operator can act on.
 //
@@ -140,9 +117,10 @@ func zeroclawSessionNewErrorMessage(err error) string {
 //     answers -32601 — and no handler reads a model param at all. The model
 //     belongs to the ZeroClaw agent profile (`agents.<alias>.model_provider`
 //     → `[providers.models.<type>.<alias>].model`) and cannot be selected per
-//     session, so ModelSelectionSupported opts ZeroClaw out. The one model id
-//     ACP exposes is `initialize._meta.zeroclaw.defaultModel`, used here only
-//     to label token usage.
+//     session, so ModelSelectionSupported opts ZeroClaw out. The
+//     `initialize._meta.zeroclaw.defaultModel` value is process-global (the
+//     first configured provider model), not the model for the alias later
+//     selected by session/new, so it is not used for usage attribution.
 //   - session/new returns exactly {sessionId, workspaceDir}: no model
 //     catalog, no currentModelId, so there is nothing to discover.
 //   - session/new requires `agentAlias` unless exactly one agent is
@@ -154,9 +132,10 @@ func zeroclawSessionNewErrorMessage(err error) string {
 //     configured in ZeroClaw's own config-dir.
 //   - Its SESSION_NOT_FOUND is a custom -32000; see isACPSessionNotFound.
 //
-// No permission-preset injection, version gate, or separate authenticate step
-// is needed: initialize returns an empty `authMethods` and the handshake asks
-// for nothing further.
+// MinVersions requires ZeroClaw 0.8.0+, the first stable release with
+// persistent ACP sessions and session/resume. No permission-preset injection
+// or separate authenticate step is needed: initialize returns an empty
+// `authMethods` and the handshake asks for nothing further.
 type zeroclawBackend struct {
 	cfg Config
 }
@@ -356,7 +335,7 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		var resumeRejected bool
 		var effectiveModel string
 
-		initResult, err := c.request(runCtx, "initialize", map[string]any{
+		_, err := c.request(runCtx, "initialize", map[string]any{
 			"protocolVersion": 1,
 			"clientInfo": map[string]any{
 				"name":    "multica-agent-sdk",
@@ -369,16 +348,6 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 			finalError = fmt.Sprintf("zeroclaw initialize failed: %v", err)
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 			return
-		}
-
-		// ZeroClaw's model is owned by its own config and cannot be chosen over
-		// ACP, so opts.Model can never be applied. initialize's
-		// _meta.zeroclaw.defaultModel is the only model identity on the wire;
-		// prefer it, and keep opts.Model only as a label of last resort for a
-		// value saved before ModelSelectionSupported turned the picker off.
-		effectiveModel = extractZeroclawDefaultModel(initResult)
-		if effectiveModel == "" {
-			effectiveModel = strings.TrimSpace(opts.Model)
 		}
 
 		cwd := opts.Cwd
@@ -545,9 +514,10 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		u := c.accumulatedUsage()
 
 		// ZeroClaw 0.8.4 reports no token counts over ACP — its prompt result
-		// is {sessionId, stopReason, content} — so usageMap stays nil today.
-		// The attribution is kept wired so a later ZeroClaw that does report
-		// usage lands on the real model id rather than "unknown".
+		// is {sessionId, stopReason, content} — so usageMap stays nil today. If
+		// a later response reports usage without a per-turn model id, keep it
+		// under "unknown": initialize.defaultModel is process-global and can
+		// belong to a different agent alias.
 		var usageMap map[string]TokenUsage
 		if acpUsagePresent(u) {
 			model := effectiveModel

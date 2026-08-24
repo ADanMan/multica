@@ -93,8 +93,9 @@ func writeFakeZeroclawScript(t *testing.T, script string) string {
 
 // TestZeroclawSessionNew covers the fresh-session happy path: initialize,
 // session/new, session/prompt, and a completed result carrying the new
-// session id and usage attributed to the model ZeroClaw reported on
-// initialize.
+// session id. initialize.defaultModel is deliberately not used for usage:
+// it is the process-global first provider model, not the model selected by
+// the agent alias bound during session/new.
 func TestZeroclawSessionNew(t *testing.T) {
 	t.Parallel()
 	bin := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
@@ -126,26 +127,23 @@ func TestZeroclawSessionNew(t *testing.T) {
 	if result.SessionID != "ses_zeroclaw_new" {
 		t.Fatalf("expected sessionID ses_zeroclaw_new, got %q", result.SessionID)
 	}
-	// `initialize._meta.zeroclaw.defaultModel` is the only model identity
-	// ZeroClaw's ACP surface exposes, so it is what usage must be keyed on.
-	if _, ok := result.Usage["llama3.2"]; !ok {
-		t.Fatalf("expected usage attributed to the initialize default model, got %+v", result.Usage)
+	if _, ok := result.Usage["unknown"]; !ok {
+		t.Fatalf("expected usage without a per-turn model id to stay unknown, got %+v", result.Usage)
 	}
 }
 
-// TestZeroclawInitializeWithoutDefaultModel proves a handshake that omits
-// `_meta` degrades to an unlabelled run instead of failing it. ZeroClaw leaves
-// defaultModel out whenever no provider entry is configured.
-func TestZeroclawInitializeWithoutDefaultModel(t *testing.T) {
+// TestZeroclawPromptModelMetadataControlsUsageAttribution proves the prompt
+// result is authoritative when a future ZeroClaw reports a per-turn model id.
+func TestZeroclawPromptModelMetadataControlsUsageAttribution(t *testing.T) {
 	t.Parallel()
 	script := strings.Replace(
 		fakeZeroclawACPScript(),
-		`"_meta":{"zeroclaw":{"defaultModel":"llama3.2","maxSessions":10,"sessionTimeoutSecs":3600}},`,
-		`"_meta":{"zeroclaw":{"maxSessions":10}},`,
+		`"result":{"stopReason":"end_turn","usage":{`,
+		`"result":{"stopReason":"end_turn","_meta":{"modelId":"selected-model"},"usage":{`,
 		1,
 	)
-	if strings.Contains(script, "defaultModel") {
-		t.Fatal("fake script rewrite failed: defaultModel still present")
+	if !strings.Contains(script, `"modelId":"selected-model"`) {
+		t.Fatal("fake script rewrite failed: prompt model metadata not inserted")
 	}
 	bin := writeFakeZeroclawScript(t, script)
 
@@ -166,8 +164,8 @@ func TestZeroclawInitializeWithoutDefaultModel(t *testing.T) {
 	if result.Status != "completed" {
 		t.Fatalf("expected completed, got status=%q error=%q", result.Status, result.Error)
 	}
-	if _, ok := result.Usage["unknown"]; !ok {
-		t.Fatalf("expected usage under the unknown-model key, got %+v", result.Usage)
+	if _, ok := result.Usage["selected-model"]; !ok {
+		t.Fatalf("expected usage attributed to prompt model metadata, got %+v", result.Usage)
 	}
 }
 
@@ -413,10 +411,10 @@ func TestZeroclawDoesNotAttemptModelSelection(t *testing.T) {
 		t.Fatalf("a configured model must not fail the run, got status=%q error=%q", result.Status, result.Error)
 	}
 	assertNoRecordedFrame(t, reqFile, "session/set_model")
-	// The model actually used is ZeroClaw's own, so usage is attributed to
-	// what initialize reported rather than to the ignored request.
-	if _, ok := result.Usage["llama3.2"]; !ok {
-		t.Fatalf("expected usage attributed to the runtime's model, got %+v", result.Usage)
+	// The requested model is ignored, and initialize's process-global default
+	// may belong to another alias, so neither is safe for attribution.
+	if _, ok := result.Usage["unknown"]; !ok {
+		t.Fatalf("expected usage without a per-turn model id to stay unknown, got %+v", result.Usage)
 	}
 }
 
