@@ -311,6 +311,7 @@ export type {
   WorkspaceSubscriptionInterval,
   WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  WorkspaceSeatCapacity,
   WorkspaceSeatPurchaseSummary,
   WorkspaceSubscriptionPrice,
   WorkspaceSubscriptionPrices,

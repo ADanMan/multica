@@ -27,7 +27,7 @@ const issueScheduleMissedInboxType = "issue_schedule_missed"
 // these to the appropriate HTTP status.
 var (
 	// ErrIssueScheduleAlreadyPending means the issue already has a pending
-	// schedule — migration 421's partial unique index enforces this at the
+	// schedule — migration 433's partial unique index enforces this at the
 	// DB level; CreateSchedule translates the resulting unique-violation
 	// into this sentinel so the handler doesn't need to know about Postgres
 	// error codes.

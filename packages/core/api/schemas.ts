@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   ChatDraftRestoresResponse,
   ChatPendingTask,
+  ChatSession,
   PrioritizeQueuedChatTaskResponse,
   SendChatMessageResponse,
   StartMikaOnboardingResponse,
@@ -1791,6 +1792,60 @@ export const CancelTaskResponseSchema = AgentTaskSchema.extend({
     .transform((value) => value ?? undefined),
 }).loose();
 
+const ChatLastMessageSchema = z.object({
+  content: z.string().default(""),
+  role: z.enum(["user", "assistant"]).catch("assistant"),
+  created_at: z.string().default(""),
+  failure_reason: z.string().nullable().optional(),
+  message_kind: z.enum([
+    "message",
+    "no_response",
+    "onboarding_kickoff",
+    "onboarding_opening",
+  ]).optional().catch(undefined),
+}).loose();
+
+const ChatChannelSourceSchema = z.object({
+  channel_type: z.string().default(""),
+  installation_id: z.string().default(""),
+  route_revision: z.number().default(0),
+}).loose();
+
+export const ChatSessionSchema: z.ZodType<ChatSession> = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  agent_id: z.string().default(""),
+  creator_id: z.string().default(""),
+  project_id: z.string().nullable().optional(),
+  title: z.string().default(""),
+  status: z.enum(["active", "archived"]).catch("active"),
+  has_unread: z.boolean().default(false),
+  unread_count: z.number().optional(),
+  last_message: ChatLastMessageSchema.nullable().optional().catch(undefined),
+  pinned: z.boolean().optional(),
+  channel_source: ChatChannelSourceSchema.optional().catch(undefined),
+  is_current_channel_route: z.boolean().optional().catch(undefined),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const EMPTY_CHAT_SESSION: ChatSession = {
+  id: "",
+  workspace_id: "",
+  agent_id: "",
+  creator_id: "",
+  title: "",
+  status: "active",
+  has_unread: false,
+  created_at: "",
+  updated_at: "",
+};
+export const ChatSessionListSchema = z
+  .array(ChatSessionSchema.catch(EMPTY_CHAT_SESSION))
+  .transform((sessions) => sessions.filter((session) => session.id !== ""))
+  .default([]);
+export const EMPTY_CHAT_SESSION_LIST: ChatSession[] = [];
+
 // Deferred-cancellation draft restores
 // (`GET /api/chat/sessions/{id}/draft-restores`, #5219) feed the composer
 // directly: `content` becomes the draft text, `attachments` re-bind on
@@ -2585,50 +2640,62 @@ export const WorkspaceSubscriptionEntitlementsSchema = z
 export const WorkspaceSubscriptionSummarySchema = z
   .object({
     entitlement: WorkspaceSubscriptionEntitlementsSchema,
-    billing_interval: WorkspaceSubscriptionIntervalSchema.nullable().optional(),
-    actual_seats: z.number().int().nonnegative(),
-    billed_seats: z.number().int().nonnegative().nullable().optional(),
-    pending_seat_quantity: z.number().int().nonnegative().nullable().optional(),
-    used_seats: z.number().int().nonnegative().optional().catch(undefined),
-    reserved_seats: z.number().int().nonnegative().optional().catch(0),
-    purchase_version: z.number().int().positive().optional().catch(undefined),
-    active_seat_purchase: z
+    billing_interval: WorkspaceSubscriptionIntervalSchema.nullable(),
+    human_members: z.number().int().nonnegative(),
+    seat_capacity: z
       .object({
-        request_id: z.string(),
-        target_seats: z.number().int().positive(),
-        status: z.enum(["pending", "processing", "submitted"]),
-        expires_at: z.string().min(1).optional().catch(undefined),
+        purchased: z.number().int().positive(),
+        used: z.number().int().nonnegative(),
+        reserved: z.number().int().nonnegative(),
+        available: z.number().int().nonnegative(),
+        version: z.number().int().positive(),
+        pending_quantity: z.number().int().positive().nullable(),
+        active_purchase: z
+          .object({
+            request_id: z.string(),
+            target_seats: z.number().int().positive(),
+            status: z.enum(["pending", "processing", "submitted"]),
+            expires_at: z.string().min(1).optional(),
+          })
+          .loose()
+          .optional(),
       })
       .loose()
-      .nullable()
-      .optional()
-      .catch(null),
-    cancel_at_period_end: z.boolean().optional(),
-    grace_until: z.string().nullable().optional(),
-    has_stripe_customer: z.boolean().optional(),
+      .nullable(),
+    cancel_at_period_end: z.boolean(),
+    grace_until: z.string().nullable(),
+    has_stripe_customer: z.boolean(),
   })
   .loose()
   .transform(
     (value): WorkspaceSubscriptionSummary => ({
       entitlement: value.entitlement,
-      billingInterval: value.billing_interval ?? null,
-      actualSeats: value.actual_seats,
-      billedSeats: value.billed_seats ?? null,
-      pendingSeatQuantity: value.pending_seat_quantity ?? null,
-      usedSeats: value.used_seats ?? value.actual_seats,
-      reservedSeats: value.reserved_seats ?? 0,
-      purchaseVersion: value.purchase_version ?? null,
-      activeSeatPurchase: value.active_seat_purchase
+      billingInterval: value.billing_interval,
+      humanMembers: value.human_members,
+      seatCapacity: value.seat_capacity
         ? {
-            requestId: value.active_seat_purchase.request_id,
-            targetSeats: value.active_seat_purchase.target_seats,
-            status: value.active_seat_purchase.status,
-            expiresAt: value.active_seat_purchase.expires_at ?? null,
+            purchased: value.seat_capacity.purchased,
+            used: value.seat_capacity.used,
+            reserved: value.seat_capacity.reserved,
+            available: value.seat_capacity.available,
+            version: value.seat_capacity.version,
+            pendingQuantity: value.seat_capacity.pending_quantity,
+            activePurchase: value.seat_capacity.active_purchase
+              ? {
+                  requestId:
+                    value.seat_capacity.active_purchase.request_id,
+                  targetSeats:
+                    value.seat_capacity.active_purchase.target_seats,
+                  status: value.seat_capacity.active_purchase.status,
+                  expiresAt:
+                    value.seat_capacity.active_purchase.expires_at ?? null,
+                }
+              : null,
           }
         : null,
-      cancelAtPeriodEnd: value.cancel_at_period_end ?? false,
-      graceUntil: value.grace_until ?? null,
-      hasStripeCustomer: value.has_stripe_customer ?? false,
+      cancelAtPeriodEnd: value.cancel_at_period_end,
+      graceUntil: value.grace_until,
+      hasStripeCustomer: value.has_stripe_customer,
     }),
   );
 
@@ -2690,17 +2757,15 @@ export const CreateWorkspaceSubscriptionCheckoutResponseSchema = z
 export const WorkspaceSubscriptionSeatReconcileResultSchema = z
   .object({
     workspace_id: z.string(),
-    billed_seats: z.number().int().nonnegative(),
-    actual_seats: z.number().int().nonnegative(),
     action: z.string(),
+    version: z.number().int().nonnegative(),
   })
   .loose()
   .transform(
     (value): WorkspaceSubscriptionSeatReconcileResult => ({
       workspaceId: value.workspace_id,
-      billedSeats: value.billed_seats,
-      actualSeats: value.actual_seats,
       action: value.action,
+      version: value.version,
     }),
   );
 

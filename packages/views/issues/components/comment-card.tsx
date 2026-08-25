@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { CheckCircle2, ChevronRight, ListChevronsDownUp, Copy, GitBranchPlus, Loader2, MoreHorizontal, Pencil, RotateCcw, Trash2 } from "lucide-react";
+import { CheckCircle2, ChevronRight, ListChevronsDownUp, Copy, Loader2, MessageSquarePlus, MoreHorizontal, Pencil, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Card } from "@multica/ui/components/ui/card";
 import { Button } from "@multica/ui/components/ui/button";
@@ -679,7 +679,7 @@ function CommentRow({
               </DropdownMenuItem>
               {onCreateSubIssue && entry.comment_type === "comment" && (
                 <DropdownMenuItem onClick={() => onCreateSubIssue(entry.id)}>
-                  <GitBranchPlus className="h-3.5 w-3.5" aria-hidden />
+                  <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden />
                   {t(($) => $.source_context.create_action)}
                 </DropdownMenuItem>
               )}
@@ -1007,7 +1007,7 @@ function CommentCardImpl({
                       </DropdownMenuItem>
                       {onCreateSubIssue && entry.comment_type === "comment" && (
                         <DropdownMenuItem onClick={() => onCreateSubIssue(entry.id)}>
-                          <GitBranchPlus className="h-3.5 w-3.5" aria-hidden />
+                          <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden />
                           {t(($) => $.source_context.create_action)}
                         </DropdownMenuItem>
                       )}

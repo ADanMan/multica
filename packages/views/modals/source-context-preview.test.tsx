@@ -44,7 +44,7 @@ describe("SourceContextPreviewCard", () => {
     expect(screen.getByText("Quoted context").closest("div.mt-1\\.5")).toBeInTheDocument();
     expect(screen.getByText("Alice").closest("ol")?.parentElement).toHaveClass("space-y-8");
     expect(screen.getByText("Alice").closest('[data-slot="source-context-content"]')).toBeInTheDocument();
-    expect(screen.getByText("Branch point")).toHaveClass(
+    expect(screen.getByText("Source comment")).toHaveClass(
       "rounded",
       "bg-info/10",
       "px-1.5",
@@ -177,7 +177,7 @@ describe("SourceContextPreviewCard", () => {
   });
 
   it.each([
-    ["anchor_comment_deleted", "The branch point was deleted"],
+    ["anchor_comment_deleted", "The source comment was deleted"],
     ["source_issue_deleted", "The source issue was deleted"],
   ])("explains terminal deletion error %s without offering refresh", (code, message) => {
     const onRetry = vi.fn();

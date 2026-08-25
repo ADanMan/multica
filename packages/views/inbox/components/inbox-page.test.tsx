@@ -279,6 +279,34 @@ describe("InboxPage", () => {
     expect(screen.getByTestId("row")).toHaveTextContent("done-low");
   });
 
+  it("hides read notifications while the unread filter is on", () => {
+    reset();
+    listData.active = [
+      item({ id: "unread-row", issue_id: "issue-1", read: false }),
+      item({ id: "read-row", issue_id: "issue-2", read: true }),
+    ];
+    useInboxFilterStore.getState().toggleUnreadOnly("workspace-1");
+
+    render(<InboxPage />);
+
+    expect(screen.getAllByTestId("row")).toHaveLength(1);
+    expect(screen.getByTestId("row")).toHaveTextContent("unread-row");
+  });
+
+  it("filters by the actor the row carries", () => {
+    reset();
+    listData.active = [
+      item({ id: "from-alice", issue_id: "issue-1", actor_type: "member", actor_id: "alice" }),
+      item({ id: "from-bob", issue_id: "issue-2", actor_type: "agent", actor_id: "bob" }),
+    ];
+    useInboxFilterStore.getState().toggleActorFilter("workspace-1", "member:alice");
+
+    render(<InboxPage />);
+
+    expect(screen.getAllByTestId("row")).toHaveLength(1);
+    expect(screen.getByTestId("row")).toHaveTextContent("from-alice");
+  });
+
   it("offers to clear filters when they hide every notification", () => {
     reset();
     listData.active = [

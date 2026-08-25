@@ -109,7 +109,7 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create invitation")
 		return
 	}
-	if h.seatCapacitySettlementEnabled() {
+	if h.seatCapacityEnabled() {
 		for _, expired := range expiredInvitations {
 			if err := enqueueCapacityRelease(r.Context(), h.Queries, uuid.UUID(expired.WorkspaceID.Bytes), uuid.UUID(expired.ID.Bytes)); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to release expired invitation capacity")
@@ -129,18 +129,6 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Consume every applicable budget only after validation and idempotency
-	// checks, but before the invitation row or email side effect is created.
-	if !h.admitInvitation(
-		w,
-		r,
-		uuidToString(requester.UserID),
-		uuidToString(requester.WorkspaceID),
-		email,
-	) {
-		return
-	}
-
 	// Resolve invitee_user_id if the user already exists.
 	var inviteeUserID pgtype.UUID
 	if existingUser.ID.Valid {
@@ -151,6 +139,21 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().Add(7 * 24 * time.Hour)
 	if err := h.reserveInvitationCapacity(r.Context(), uuid.UUID(requester.WorkspaceID.Bytes), invitationID, expiresAt); err != nil {
 		writeSeatCapacityError(w, err)
+		return
+	}
+
+	// Consume rate-limit budgets only after capacity is secured. A request that
+	// must purchase a seat can then retry without spending the same invitation
+	// budgets twice. If admission rejects, the durable capacity intent releases
+	// the hold immediately or through the recovery worker.
+	if !h.admitInvitation(
+		w,
+		r,
+		uuidToString(requester.UserID),
+		uuidToString(requester.WorkspaceID),
+		email,
+	) {
+		h.compensateCapacityIntent(r.Context(), invitationID)
 		return
 	}
 
@@ -313,7 +316,7 @@ func (h *Handler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "invitation not found")
 		return
 	}
-	if h.seatCapacitySettlementEnabled() {
+	if h.seatCapacityEnabled() {
 		if err := enqueueCapacityRelease(r.Context(), qtx, uuid.UUID(inv.WorkspaceID.Bytes), uuid.UUID(inv.ID.Bytes)); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to revoke invitation")
 			return
@@ -323,7 +326,7 @@ func (h *Handler) RevokeInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to revoke invitation")
 		return
 	}
-	if h.seatCapacitySettlementEnabled() {
+	if h.seatCapacityEnabled() {
 		h.compensateCapacityIntent(r.Context(), uuid.UUID(inv.ID.Bytes))
 	}
 
@@ -641,7 +644,7 @@ func (h *Handler) DeclineInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to decline invitation")
 		return
 	}
-	if h.seatCapacitySettlementEnabled() {
+	if h.seatCapacityEnabled() {
 		if err := enqueueCapacityRelease(r.Context(), qtx, uuid.UUID(inv.WorkspaceID.Bytes), uuid.UUID(inv.ID.Bytes)); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decline invitation")
 			return
@@ -651,7 +654,7 @@ func (h *Handler) DeclineInvitation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to decline invitation")
 		return
 	}
-	if h.seatCapacitySettlementEnabled() {
+	if h.seatCapacityEnabled() {
 		h.compensateCapacityIntent(r.Context(), uuid.UUID(inv.ID.Bytes))
 	}
 

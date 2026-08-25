@@ -138,16 +138,10 @@ func runRuntimeSweeper(ctx context.Context, txStarter runtimeGCTxStarter, querie
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if cleaned, err := taskSvc.CleanupSourceContextObjectIntents(ctx, 50); err != nil {
-				slog.Warn("source context object intent cleanup failed", "error", err)
-			} else if cleaned > 0 {
-				slog.Info("source context object intent cleanup completed", "count", cleaned)
-			}
-			if cleaned, err := taskSvc.CleanupAbandonedSourceContexts(ctx, 50); err != nil {
-				slog.Warn("source context cleanup sweeper failed", "error", err)
-			} else if cleaned > 0 {
-				slog.Info("source context cleanup sweeper removed abandoned captures", "count", cleaned)
-			}
+			// Every stage below is DB-only and latency-critical: it is what
+			// flips a dead runtime offline and reclaims its orphaned tasks
+			// within ~180s. Object-store work belongs on its own goroutine
+			// (runSourceContextSweeper), never in this tick.
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepOfflineRuntimeTasks(ctx, queries, taskSvc, reconnectGrace)
 			sweepExpiredRuntimeReconnectRetries(ctx, queries, taskSvc, reconnectGrace)

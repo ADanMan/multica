@@ -730,8 +730,8 @@ describe("IssueDetail (shared)", () => {
     await waitFor(() => expect(menuButton("source-reply")).toBeTruthy());
 
     fireEvent.click(menuButton("source-root")!);
-    const branchAction = await screen.findByText("Branch into sub-issue");
-    expect(branchAction.closest('[role="menuitem"]')?.querySelector(".lucide-git-branch-plus")).toBeInTheDocument();
+    const branchAction = await screen.findByText("Create sub-issue from here");
+    expect(branchAction.closest('[role="menuitem"]')?.querySelector(".lucide-message-square-plus")).toBeInTheDocument();
     fireEvent.click(branchAction);
     expect(mockOpenModal).toHaveBeenLastCalledWith("quick-create-issue", expect.objectContaining({
       anchor_comment_id: "source-root",
@@ -739,7 +739,7 @@ describe("IssueDetail (shared)", () => {
     }));
 
     fireEvent.click(menuButton("source-reply")!);
-    fireEvent.click(await screen.findByText("Branch into sub-issue"));
+    fireEvent.click(await screen.findByText("Create sub-issue from here"));
     expect(mockOpenModal).toHaveBeenLastCalledWith("quick-create-issue", expect.objectContaining({
       anchor_comment_id: "source-reply",
       parent_issue_id: "issue-1",
@@ -761,7 +761,7 @@ describe("IssueDetail (shared)", () => {
     expect(menuButton).toBeTruthy();
     fireEvent.click(menuButton!);
 
-    expect(screen.queryByText("Branch into sub-issue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Create sub-issue from here")).not.toBeInTheDocument();
   });
 
   it("shows loading skeleton while data is loading", () => {
@@ -917,9 +917,10 @@ describe("IssueDetail (shared)", () => {
 
     const snapshotAction = await screen.findByRole("button", { name: "Context snapshot" });
     const summary = snapshotAction.closest<HTMLElement>('[data-slot="source-context-summary"]');
-    expect(summary).toHaveTextContent("Branched from");
+    expect(summary).toHaveTextContent("Sub-issue of");
     expect(within(summary!).getByRole("link", { name: "TES-7 Source issue" })).toBeInTheDocument();
-    expect(screen.queryByText("Sub-issue of")).not.toBeInTheDocument();
+    // The summary replaces the plain parent row rather than adding a second one.
+    expect(screen.getAllByText("Sub-issue of")).toHaveLength(1);
     expect(screen.queryByText(/From TES-7/)).not.toBeInTheDocument();
     expect(mockApiObj.getIssue).toHaveBeenCalledWith("issue-1");
   });

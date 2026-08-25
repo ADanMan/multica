@@ -15,6 +15,8 @@
     "active_count_other": "{{count}} active filters",
     "status": "Status",
     "priority": "Priority",
+    "from": "From",
+    "unread_only": "Unread only",
     "notification_count_one": "{{count}} notification",
     "notification_count_other": "{{count}} notifications",
     "clear": "Clear filters",

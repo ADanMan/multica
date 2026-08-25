@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronRight, GitBranch, LocateFixed, Maximize2, Minimize2, XIcon } from "lucide-react";
+import { AlertTriangle, ChevronRight, LocateFixed, Maximize2, Minimize2, XIcon } from "lucide-react";
 import { issueStatusCategory } from "@multica/core/issues";
 import type { Issue, IssueSourceContext, SourceContextCommentSnapshot } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
@@ -142,9 +142,13 @@ export function SourceContextBadge({
         className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 text-caption"
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          {/* Structurally this is the same parent relation a plain sub-issue
+              has, so it reuses that label instead of naming a second concept.
+              The snapshot is the only extra, and it has its own button. */}
           <span className="shrink-0 text-muted-foreground">
-            {t(($) => $.source_context.branched_from)}
+            {parentIssue
+              ? t(($) => $.detail.sub_issue_of)
+              : t(($) => $.source_context.created_from)}
           </span>
           {parentIssue ? (
             <AppLink

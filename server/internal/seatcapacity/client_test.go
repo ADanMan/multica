@@ -64,6 +64,16 @@ func TestClientRejectsRedirectAndDoesNotForwardCredential(t *testing.T) {
 	}
 }
 
+func TestIsCapacityOvercommittedRequiresCloudConflictCode(t *testing.T) {
+	if !IsCapacityOvercommitted(&HTTPError{StatusCode: http.StatusConflict, Code: "capacity_overcommitted"}) {
+		t.Fatal("capacity_overcommitted conflict was not recognized")
+	}
+	if IsCapacityOvercommitted(&HTTPError{StatusCode: http.StatusConflict, Code: "capacity_full"}) ||
+		IsCapacityOvercommitted(&HTTPError{StatusCode: http.StatusServiceUnavailable, Code: "capacity_overcommitted"}) {
+		t.Fatal("unrelated Cloud error was recognized as capacity overcommit")
+	}
+}
+
 func TestDisabledClientPreservesLegacyBehavior(t *testing.T) {
 	client, err := New(Config{})
 	if err != nil {

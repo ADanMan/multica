@@ -92,9 +92,8 @@ describe("SourceContextBadge", () => {
       parentProgress: { done: 1, total: 3 },
     });
 
-    const summary = screen.getByText("Branched from").closest('[data-slot="source-context-summary"]');
+    const summary = screen.getByText("Sub-issue of").closest('[data-slot="source-context-summary"]');
     expect(summary).toHaveClass("border-border/60", "bg-muted/30");
-    expect(summary?.querySelector(".lucide-git-branch")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /MUL-7 Current source title/ })).toHaveAttribute(
       "href",
       "/acme/issues/source-issue",
@@ -111,7 +110,7 @@ describe("SourceContextBadge", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(refetch).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Locate branch point" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go to source comment" }));
     await waitFor(() => expect(refetch).toHaveBeenCalledOnce());
     expect(navigationPush).toHaveBeenCalledWith("/acme/issues/source-issue#comment-selected");
   });
@@ -125,7 +124,7 @@ describe("SourceContextBadge", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Context snapshot" }));
-    fireEvent.click(screen.getByRole("button", { name: "Locate branch point" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go to source comment" }));
 
     expect(await screen.findByRole("dialog")).toBeTruthy();
     expect(screen.getByText("Captured comment")).toBeTruthy();
@@ -139,7 +138,7 @@ describe("SourceContextBadge", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveClass("h-[min(82dvh,56rem)]", "sm:max-w-4xl");
     expect(dialog).not.toHaveClass("h-[calc(100dvh-2rem)]", "sm:max-w-[calc(100%-2rem)]");
-    expect(screen.getByText("Branch point")).toHaveClass(
+    expect(screen.getByText("Source comment")).toHaveClass(
       "rounded",
       "bg-info/10",
       "text-info",
@@ -151,7 +150,7 @@ describe("SourceContextBadge", () => {
     expect(screen.getByText("Source body").closest("section")).toHaveClass("space-y-4");
     expect(screen.getByText("Captured comment").closest("ol")?.parentElement).toHaveClass("space-y-8");
     expect(screen.getByText("Captured comment").closest('[data-slot="source-context-content"]')).toBeInTheDocument();
-    const openCurrent = screen.getByRole("button", { name: "Locate branch point" });
+    const openCurrent = screen.getByRole("button", { name: "Go to source comment" });
     expect(openCurrent.closest('[data-slot="dialog-header"]')).toBeInTheDocument();
     expect(openCurrent.querySelector(".lucide-locate-fixed")).toBeInTheDocument();
     const expand = screen.getByRole("button", { name: "Expand captured context" });
@@ -254,7 +253,7 @@ describe("SourceContextBadge", () => {
     expect(screen.getByText("Captured comment").closest("[data-source-context-change-kind='changed']")).toHaveClass(
       "bg-amber-500/5",
     );
-    expect(screen.getByRole("button", { name: "Locate branch point" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Go to source comment" })).toBeTruthy();
   });
 
   it("distinguishes added, changed, and deleted comment nodes", () => {
@@ -388,7 +387,7 @@ describe("SourceContextBadge", () => {
 
     expect(await screen.findByText("The current source could not be checked.")).toBeTruthy();
     expect(screen.getByText("Captured context is still available.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Locate branch point" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Go to source comment" })).toBeTruthy();
   });
 
   it("keeps the snapshot readable without a live action after source issue deletion", async () => {
@@ -415,7 +414,7 @@ describe("SourceContextBadge", () => {
     expect(screen.getByText("Captured comment").closest("[data-source-context-change-kind='deleted']")).toHaveClass(
       "bg-destructive/5",
     );
-    expect(screen.queryByRole("button", { name: "Locate branch point" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Go to source comment" })).toBeNull();
   });
 
   it("treats anchor deletion as a thread change and disables navigation", async () => {
@@ -457,7 +456,7 @@ describe("SourceContextBadge", () => {
     expect(screen.getByText("Earlier changed comment").closest("[data-source-context-change-kind='changed']")).toHaveClass(
       "bg-amber-500/5",
     );
-    expect(screen.queryByRole("button", { name: "Locate branch point" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Go to source comment" })).toBeNull();
   });
 
   it("updates the badge when focus refetch supplies fresher source state", async () => {
@@ -602,7 +601,7 @@ describe("SourceContextBadge", () => {
       const dialog = await screen.findByRole("dialog");
 
       expect(screen.getByText(author.expected)).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Locate branch point" }) !== null)
+      expect(screen.queryByRole("button", { name: "Go to source comment" }) !== null)
         .toBe(display.openCurrent);
       expect(dialog).toHaveClass("h-[min(82dvh,56rem)]", "sm:max-w-4xl");
     },
