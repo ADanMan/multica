@@ -1389,6 +1389,55 @@ describe("BillingTab", () => {
     );
   });
 
+  it("warns when actual members exceed purchased seats", () => {
+    Object.assign(mocks.entitlements, {
+      plan: "pro",
+      status: "active",
+      issueWindow: null,
+      autopilotRuns: null,
+      version: 3,
+    });
+    Object.assign(mocks.summary, {
+      actualSeats: 5,
+      usedSeats: 4,
+      billedSeats: 4,
+      reservedSeats: 0,
+      purchaseVersion: 9,
+    });
+
+    renderWithI18n(<BillingTab />);
+
+    expect(screen.getByText("Members exceed purchased seats")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This workspace has 5 members but only 4 purchased seats. Add enough seats or remove members before sending more invitations.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not expose a transient used-seat ledger delay to customers", () => {
+    Object.assign(mocks.entitlements, {
+      plan: "pro",
+      status: "active",
+      issueWindow: null,
+      autopilotRuns: null,
+      version: 3,
+    });
+    Object.assign(mocks.summary, {
+      actualSeats: 5,
+      usedSeats: 4,
+      billedSeats: 5,
+      reservedSeats: 0,
+      purchaseVersion: 9,
+    });
+
+    renderWithI18n(<BillingTab />);
+
+    expect(
+      screen.queryByText("Members exceed purchased seats"),
+    ).not.toBeInTheDocument();
+  });
+
   it.each(["canceled", "incomplete_expired"])(
     "keeps management and self-service repurchase available for %s Free",
     (status) => {

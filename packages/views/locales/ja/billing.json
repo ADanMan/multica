@@ -221,6 +221,8 @@
       "summary_loading": "サブスクリプションの席数詳細を読み込み中",
       "summary_unavailable_title": "一部の席数詳細を利用できません",
       "summary_unavailable_description": "現在のプランは表示できますが、購入済みの席数と変更予定の席数を読み込めませんでした。",
+      "members_over_capacity_title": "メンバー数が購入済みの席数を超えています",
+      "members_over_capacity_description": "このワークスペースには {{actual}} 人のメンバーがいますが、購入済みの席は {{purchased}} 席です。さらに招待する前に席を追加するか、メンバーを削除してください。",
       "updated": "席数を更新しました",
       "reconciled": "現在のメンバー: {{actual}} · 請求席数: {{billed}}"
     },

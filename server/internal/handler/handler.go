@@ -36,6 +36,7 @@ import (
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
+	"github.com/multica-ai/multica/server/internal/seatcapacity"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/storage"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -195,13 +196,19 @@ type Handler struct {
 	// dispatch (#5927). Dispatch is also called from the scheduler job
 	// (server/internal/scheduler/jobs_issue_schedule.go), registered in
 	// cmd/server/main.go.
-	IssueScheduleService  *service.IssueScheduleService
-	EmailService          *service.EmailService
-	UpdateStore           UpdateStore
-	ModelListStore        ModelListStore
-	LocalSkillListStore   LocalSkillListStore
-	LocalSkillImportStore LocalSkillImportStore
-	FeatureFlags          *featureflag.Service
+	IssueScheduleService *service.IssueScheduleService
+	// SeatCapacity executes Cloud's pre-purchased human-seat protocol. Nil or
+	// disabled preserves self-hosted behavior.
+	SeatCapacity                   seatcapacity.Executor
+	SeatCapacityEnforcementEnabled bool
+	SeatCapacityLocker             seatcapacity.WorkspaceLocker
+	SeatCapacityWorker             *seatcapacity.Worker
+	EmailService                   *service.EmailService
+	UpdateStore                    UpdateStore
+	ModelListStore                 ModelListStore
+	LocalSkillListStore            LocalSkillListStore
+	LocalSkillImportStore          LocalSkillImportStore
+	FeatureFlags                   *featureflag.Service
 	// IssueStatusCatalog reads the workspace status catalog. Defaults to
 	// Queries; a test can substitute a counting wrapper to assert HOW MANY
 	// catalog reads a request performs, which is the only property that

@@ -225,6 +225,8 @@
       "summary_loading": "Loading subscription seat details",
       "summary_unavailable_title": "Some seat details are unavailable",
       "summary_unavailable_description": "The current plan is still shown, but purchased and scheduled seat quantities could not be loaded.",
+      "members_over_capacity_title": "Members exceed purchased seats",
+      "members_over_capacity_description": "This workspace has {{actual}} members but only {{purchased}} purchased seats. Add enough seats or remove members before sending more invitations.",
       "updated": "Seats refreshed",
       "reconciled": "Current members: {{actual}} · billed seats: {{billed}}"
     },

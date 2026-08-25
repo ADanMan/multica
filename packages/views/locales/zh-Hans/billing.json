@@ -221,6 +221,8 @@
       "summary_loading": "正在加载订阅席位详情",
       "summary_unavailable_title": "部分席位详情不可用",
       "summary_unavailable_description": "当前套餐仍会显示，但暂时无法加载已购席位和待生效席位。",
+      "members_over_capacity_title": "成员数超过已购席位",
+      "members_over_capacity_description": "当前工作区有 {{actual}} 名成员，但只购买了 {{purchased}} 个席位。继续邀请前，请补足席位或移除成员。",
       "updated": "席位已刷新",
       "reconciled": "当前成员：{{actual}} · 计费席位：{{billed}}"
     },
