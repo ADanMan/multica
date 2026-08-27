@@ -111,7 +111,11 @@ while IFS= read -r line; do
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}\n' "$id"
       ;;
     *'"method":"session/new"'*)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_new","configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}],"models":{"currentModelId":"auto","availableModels":[{"modelId":"auto","name":"auto"}]}}}\n' "$id"
+      if [ -n "$JUNIE_REAL_MODEL_SHAPE" ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_new","configOptions":[{"type":"select","id":"model","currentValue":"gpt-5-2025-08-07","options":[{"value":"gpt-5-2025-08-07"},{"value":"grok-4-1-fast-reasoning"}]},{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}]}}\n' "$id"
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"ses_new","configOptions":[{"type":"select","id":"brave_mode","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}],"models":{"currentModelId":"auto","availableModels":[{"modelId":"auto","name":"auto"}]}}}\n' "$id"
+      fi
       ;;
     *'"method":"session/load"'*)
       if [ -n "$JUNIE_SESSION_NOT_FOUND" ]; then
@@ -136,8 +140,9 @@ while IFS= read -r line; do
       fi
       case "$line" in
         *bogus-model*)
+          # Reject the model but keep serving: real Junie stays alive on its
+          # current model, and junie.go now treats this rejection as non-fatal.
           printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"model not available: bogus-model"}}\n' "$id"
-          exit 0
           ;;
         *)
           printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
@@ -290,13 +295,28 @@ func TestJunieBackendUsesSessionLoadForResume(t *testing.T) {
 	}
 }
 
-func TestJunieBackendSetModelFailureFailsTask(t *testing.T) {
+// TestJunieBackendSetModelRejectionIsNonFatal pins the recovery contract when
+// Junie refuses a requested model. Junie 1468.30 answers session/set_model for
+// an unrecognised model id with -32602 "Unsupported Junie model '<x>'" (the fake
+// uses "model not available: bogus-model") and keeps the session on its own
+// current model. That model works, so the turn must still run instead of failing
+// every task for a misconfigured model string — and usage must be attributed to
+// the model Junie actually used (its session/new "model" configOption current
+// value), not the rejected override and not "unknown".
+//
+// The dead-resume case is the deliberate exception and stays fatal; see
+// TestJunieStaleResumeSignalsResumeRejected.
+func TestJunieBackendSetModelRejectionIsNonFatal(t *testing.T) {
 	t.Parallel()
 
 	fakePath := filepath.Join(t.TempDir(), "junie")
 	writeTestExecutable(t, fakePath, []byte(fakeJunieACPScript()))
 
-	backend, err := New("junie", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	backend, err := New("junie", Config{
+		ExecutablePath: fakePath,
+		Logger:         slog.Default(),
+		Env:            map[string]string{"JUNIE_REAL_MODEL_SHAPE": "1"},
+	})
 	if err != nil {
 		t.Fatalf("new junie backend: %v", err)
 	}
@@ -321,14 +341,69 @@ func TestJunieBackendSetModelFailureFailsTask(t *testing.T) {
 		if !ok {
 			t.Fatal("result channel closed without a value")
 		}
-		if result.Status != "failed" {
-			t.Fatalf("expected status=failed, got %q (error=%q)", result.Status, result.Error)
-		}
-		if !strings.Contains(result.Error, `could not switch to model "bogus-model"`) {
-			t.Errorf("expected error to name the requested model, got %q", result.Error)
+		if result.Status != "completed" {
+			t.Fatalf("expected status=completed after a non-fatal model rejection, got %q (error=%q)", result.Status, result.Error)
 		}
 		if result.SessionID != "ses_new" {
-			t.Errorf("expected session id to be preserved on failure, got %q", result.SessionID)
+			t.Errorf("expected session id ses_new, got %q", result.SessionID)
+		}
+		if _, ok := result.Usage["bogus-model"]; ok {
+			t.Errorf("usage must not be attributed to the rejected model, got %v", result.Usage)
+		}
+		if _, ok := result.Usage["gpt-5-2025-08-07"]; !ok {
+			t.Errorf("usage must be attributed to Junie's current model gpt-5-2025-08-07, got %v", result.Usage)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+}
+
+// TestJunieCurrentModelFromConfigOptions pins usage attribution when no model
+// override is requested. Junie 1468.30's session/new carries no top-level
+// `models` block — the selected model is the "model" configOption's currentValue
+// — so the shared extractACPCurrentModelID returns "" and usage would be filed
+// under "unknown". The junie backend must fall back to that configOption so
+// tokens are attributed to the real model.
+func TestJunieCurrentModelFromConfigOptions(t *testing.T) {
+	t.Parallel()
+
+	fakePath := filepath.Join(t.TempDir(), "junie")
+	writeTestExecutable(t, fakePath, []byte(fakeJunieACPScript()))
+
+	backend, err := New("junie", Config{
+		ExecutablePath: fakePath,
+		Logger:         slog.Default(),
+		Env:            map[string]string{"JUNIE_REAL_MODEL_SHAPE": "1"},
+	})
+	if err != nil {
+		t.Fatalf("new junie backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, "prompt-ignored", ExecOptions{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+
+	select {
+	case result, ok := <-session.Result:
+		if !ok {
+			t.Fatal("result channel closed without a value")
+		}
+		if result.Status != "completed" {
+			t.Fatalf("expected status=completed, got %q (error=%q)", result.Status, result.Error)
+		}
+		if _, ok := result.Usage["unknown"]; ok {
+			t.Errorf("usage must not be filed under \"unknown\"; got %v", result.Usage)
+		}
+		if _, ok := result.Usage["gpt-5-2025-08-07"]; !ok {
+			t.Errorf("usage must be attributed to the model configOption current value gpt-5-2025-08-07, got %v", result.Usage)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")

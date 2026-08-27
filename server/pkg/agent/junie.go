@@ -39,6 +39,16 @@ var junieBlockedArgs = map[string]blockedArgMode{
 // approval","currentValue":"off","options":[{"value":"on"},{"value":"off"}]}.
 const junieBraveModeConfigID = "brave_mode"
 
+// junieModelConfigID is the session configOption Junie advertises for its model
+// selector. Unlike Hermes/Kiro, Junie 1468.30 carries NO top-level `models`
+// block in session/new, so the shared extractACPCurrentModelID returns "" and
+// token usage would be filed under "unknown". The selected model is instead the
+// currentValue of this configOption. Captured from session/new against
+// @jetbrains/junie-cli 1468.30: {"type":"select","id":"model","name":"Model",
+// "currentValue":"gpt-5-2025-08-07","options":[{"value":"gpt-5-2025-08-07",...},
+// {"value":"grok-4-1-fast-reasoning",...},...]}.
+const junieModelConfigID = "model"
+
 // junieBraveModeOn is the advertised option value that disables the gate.
 const junieBraveModeOn = "on"
 
@@ -355,6 +365,12 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// handshake/network failures below must leave it false.
 		var resumeRejected bool
 		effectiveModel := strings.TrimSpace(opts.Model)
+		// junieCurrentModel is the model Junie actually runs the session on,
+		// read from the session/new (or session/load) "model" configOption.
+		// It backs two things: attributing usage when no model override was
+		// requested, and re-attributing it when an override is rejected and
+		// Junie stays on its own default.
+		var junieCurrentModel string
 
 		initResult, err := c.request(runCtx, "initialize", map[string]any{
 			"protocolVersion": 1,
@@ -442,8 +458,16 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 					"actual", sessionID,
 				)
 			}
+			if junieCurrentModel == "" {
+				if v, ok := acpConfigOptionCurrentValue(result, junieModelConfigID); ok {
+					junieCurrentModel = v
+				}
+			}
 			if effectiveModel == "" {
 				effectiveModel = extractACPCurrentModelID(result)
+				if effectiveModel == "" {
+					effectiveModel = junieCurrentModel
+				}
 			}
 		} else {
 			result, err := c.request(runCtx, "session/new", map[string]any{
@@ -463,8 +487,16 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 				return
 			}
+			if junieCurrentModel == "" {
+				if v, ok := acpConfigOptionCurrentValue(result, junieModelConfigID); ok {
+					junieCurrentModel = v
+				}
+			}
 			if effectiveModel == "" {
 				effectiveModel = extractACPCurrentModelID(result)
+				if effectiveModel == "" {
+					effectiveModel = junieCurrentModel
+				}
 			}
 		}
 
@@ -482,33 +514,47 @@ func (b *junieBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				"sessionId": sessionID,
 				"modelId":   opts.Model,
 			}); err != nil {
-				b.cfg.Logger.Warn("junie set_session_model failed", "error", err, "requested_model", opts.Model)
-				finalStatus = "failed"
-				finalError = fmt.Sprintf("junie could not switch to model %q: %v", opts.Model, err)
 				if opts.ResumeSessionID != "" && isJunieSessionNotFound(err) {
-					// On a resumed session with a model override, the dead
-					// session surfaces here instead of at session/prompt —
-					// this is the one branch a capture proves Junie reaches,
-					// since session/load lets any id through. Same fix as the
-					// prompt path below: clear the id so the daemon's
-					// resume-failure fallback retries fresh.
+					// On a resumed session with a model override, a dead session
+					// surfaces here instead of at session/prompt — this is the
+					// one branch a capture proves Junie reaches, since
+					// session/load lets any id through. This IS fatal: clear the
+					// id and flag ResumeRejected so the daemon's resume-failure
+					// fallback retries from a fresh session.
 					b.cfg.Logger.Warn("resumed session not found at set_model time; clearing session id so the daemon retries fresh",
 						"backend", "junie",
 						"session_id", sessionID,
 					)
+					finalStatus = "failed"
+					finalError = fmt.Sprintf("junie could not switch to model %q: %v", opts.Model, err)
 					sessionID = ""
 					resumeRejected = true
+					resCh <- Result{
+						Status:         finalStatus,
+						Error:          finalError,
+						DurationMs:     time.Since(startTime).Milliseconds(),
+						SessionID:      sessionID,
+						ResumeRejected: resumeRejected,
+					}
+					return
 				}
-				resCh <- Result{
-					Status:         finalStatus,
-					Error:          finalError,
-					DurationMs:     time.Since(startTime).Milliseconds(),
-					SessionID:      sessionID,
-					ResumeRejected: resumeRejected,
-				}
-				return
+				// Any other set_model failure — notably -32602 "Unsupported
+				// Junie model '<x>'" for a model id Junie does not recognise
+				// (verified against 1468.30) — is NOT fatal. Junie keeps the
+				// session on its current default model, which is a working
+				// model, so the turn still runs instead of failing every task
+				// for a misconfigured model string. Usage re-attributes to that
+				// current model (from the session/new configOptions) rather than
+				// to the rejected override.
+				b.cfg.Logger.Warn("junie rejected the requested model; continuing on Junie's current model",
+					"backend", "junie",
+					"requested_model", opts.Model,
+					"error", err,
+				)
+				effectiveModel = junieCurrentModel
+			} else {
+				b.cfg.Logger.Info("junie session model set", "model", opts.Model)
 			}
-			b.cfg.Logger.Info("junie session model set", "model", opts.Model)
 		}
 
 		userText := prompt
