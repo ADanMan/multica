@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createRequestId, createSafeId, generateUUID, isImeComposing } from "./utils";
+import {
+  createRequestId,
+  createSafeId,
+  generateUUID,
+  isImeComposing,
+  truncateWithEllipsis,
+} from "./utils";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -51,5 +57,31 @@ describe("isImeComposing", () => {
   it("returns false when not composing", () => {
     expect(isImeComposing({ nativeEvent: { isComposing: false, keyCode: 13 } })).toBe(false);
     expect(isImeComposing({ isComposing: false, keyCode: 13 })).toBe(false);
+  });
+});
+
+describe("truncateWithEllipsis", () => {
+  it("returns text shorter than maxLength unchanged", () => {
+    expect(truncateWithEllipsis("hello", 10)).toBe("hello");
+  });
+
+  it("returns text exactly equal to maxLength unchanged", () => {
+    expect(truncateWithEllipsis("hello", 5)).toBe("hello");
+  });
+
+  it("truncates longer text and appends an ellipsis", () => {
+    expect(truncateWithEllipsis("hello world", 8)).toBe("hello...");
+  });
+
+  it("keeps the truncated result within maxLength", () => {
+    const result = truncateWithEllipsis("hello world", 8);
+    expect(result).toHaveLength(8);
+    expect(result.endsWith("...")).toBe(true);
+  });
+
+  it("returns only the ellipsis when maxLength is at or below the ellipsis length", () => {
+    // No room for visible text, so the truncated output is just the ellipsis.
+    expect(truncateWithEllipsis("hello", 3)).toBe("...");
+    expect(truncateWithEllipsis("hello", 1)).toBe("...");
   });
 });
