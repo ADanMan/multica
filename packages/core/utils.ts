@@ -64,18 +64,31 @@ export function isImeComposing(event: {
 }
 
 /**
- * Truncate `text` to at most `maxLength` characters, appending an ellipsis
- * (`...`) when it is longer. Text at or under the limit is returned unchanged.
+ * Truncate `text` to at most `maxLength` code points, appending an ellipsis
+ * (`…`, U+2026) when it is longer. Text at or under the limit is returned
+ * unchanged.
  *
- * The ellipsis counts toward the limit, so a truncated result has a total
- * length of `maxLength` (the visible text is sliced to `maxLength - 3`). When
- * `maxLength` is smaller than the ellipsis there is no room for visible text,
- * so only the ellipsis is returned.
+ * The ellipsis counts toward the limit, so a truncated result is at most
+ * `maxLength` code points: the visible text is sliced to `maxLength - 1` and
+ * has trailing whitespace trimmed before the ellipsis is appended. The bound
+ * is measured in Unicode code points, not UTF-16 code units, so an emoji is
+ * never cut into a lone surrogate — a returned string may therefore exceed
+ * `maxLength` in `.length` (code units) while staying within `maxLength`
+ * visible characters. When `maxLength` leaves no room for visible text, only
+ * the ellipsis is returned; `maxLength <= 0` returns the empty string.
  */
 export function truncateWithEllipsis(text: string, maxLength: number): string {
+  // Fast path on code units: may fail to return early on astral text, but
+  // never truncates wrongly — the code-point check below is authoritative.
   if (text.length <= maxLength) {
     return text;
   }
-
-  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+  if (maxLength <= 1) {
+    return maxLength <= 0 ? "" : "…";
+  }
+  const chars = Array.from(text);
+  if (chars.length <= maxLength) {
+    return text;
+  }
+  return `${chars.slice(0, maxLength - 1).join("").trimEnd()}…`;
 }
