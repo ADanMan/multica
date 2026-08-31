@@ -54,7 +54,7 @@ type CreateIssueScheduledTriggerParams struct {
 	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
 }
 
-// One-time scheduled run bound to an issue (#5927). See migration 443 for
+// One-time scheduled run bound to an issue (#5927). See migration 446 for
 // the table shape and server/internal/service/issue_schedule.go for the
 // validation and dispatch logic.
 func (q *Queries) CreateIssueScheduledTrigger(ctx context.Context, arg CreateIssueScheduledTriggerParams) (IssueScheduledTrigger, error) {

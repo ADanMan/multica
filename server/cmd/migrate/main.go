@@ -274,8 +274,9 @@ var concurrentIndexCleanups = map[string]string{
 	"438_agent_runtime_online_last_seen_index":                  "idx_agent_runtime_online_last_seen",
 	"439_agent_runtime_offline_last_seen_index":                 "idx_agent_runtime_offline_last_seen",
 	"440_github_pr_head_sha_index":                              "idx_github_pull_request_head_sha",
-	"444_issue_scheduled_trigger_pending_index":                 "uq_issue_scheduled_trigger_pending_issue",
-	"445_issue_scheduled_trigger_scan_index":                    "idx_issue_scheduled_trigger_status_run_at",
+	"443_issue_project_status_index":                            "idx_issue_project_status",
+	"447_issue_scheduled_trigger_pending_index":                 "uq_issue_scheduled_trigger_pending_issue",
+	"448_issue_scheduled_trigger_scan_index":                    "idx_issue_scheduled_trigger_status_run_at",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
