@@ -354,6 +354,11 @@ func (d *Daemon) ClaimTasksWSFirst(ctx context.Context, daemonID string, runtime
 			// execution budget plus response grace has elapsed. If the WS claim
 			// committed, the task is already dispatched and stale reclaim owns
 			// recovery; if it did not, HTTP regains liveness for the queued task.
+			// The drained forceRecheck set (#7452) is intentionally not re-noted
+			// here: the caller treats this nil error as success and does not
+			// restore it, so a runtime whose bypass rode this uncertain claim
+			// falls back to the next targeted wakeup or the empty-claim TTL rather
+			// than risk a double-claim by replaying the force signal immediately.
 			delay := wsClaimUncertainFallbackDelay
 			if delay < 0 {
 				delay = 0
