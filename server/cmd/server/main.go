@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
@@ -367,7 +366,6 @@ func main() {
 	stopStartup()
 	slog.Info("connected to database")
 	logPoolConfig(pool)
-	ctx := context.Background()
 
 	bus := events.New()
 	hub := realtime.NewHub()
@@ -554,41 +552,21 @@ func main() {
 	var metricsServer *http.Server
 	var httpMetrics *obsmetrics.HTTPMetrics
 	var businessMetrics *obsmetrics.BusinessMetrics
-	var samplerPool *pgxpool.Pool
 	var channelMediaMetrics *obsmetrics.ChannelMediaReconcilerMetrics
 	var channelLeaseMetrics *obsmetrics.ChannelLeaseMetrics
-	var seatCapacityMetrics *obsmetrics.SeatCapacityMetrics
 	var wecomMetrics *obsmetrics.WecomMetrics
 	if metricsConfig.Enabled() {
-		// Build a dedicated tiny pool for the BusinessSamplerCollector
-		// so a stalled scrape can never starve business traffic. If the
-		// pool fails to construct we log and continue without the
-		// sampler — the rest of /metrics is still useful.
-		var err error
-		samplerPool, err = newSamplerDBPool(ctx, dbURL)
-		if err != nil {
-			slog.Warn("metrics: failed to build sampler pgxpool; sampler disabled", "error", err)
-			samplerPool = nil
-		}
-
 		metricsRegistry := obsmetrics.NewRegistry(obsmetrics.RegistryOptions{
 			Pool:     pool,
 			Realtime: realtime.M,
 			DaemonWS: daemonws.M,
 			Version:  version,
 			Commit:   commit,
-			BusinessSampler: func() *obsmetrics.BusinessSamplerOptions {
-				if samplerPool == nil {
-					return nil
-				}
-				return &obsmetrics.BusinessSamplerOptions{Pool: samplerPool}
-			}(),
 		})
 		httpMetrics = metricsRegistry.HTTP
 		businessMetrics = metricsRegistry.Business
 		channelMediaMetrics = metricsRegistry.ChannelMedia
 		channelLeaseMetrics = metricsRegistry.ChannelLease
-		seatCapacityMetrics = metricsRegistry.SeatCapacity
 		wecomMetrics = metricsRegistry.Wecom
 		// Forward inbound daemon WS frames into the per-kind counter so
 		// dashboards can split heartbeat / unknown / invalid traffic.
@@ -603,10 +581,6 @@ func main() {
 			)
 		}
 	}
-	if samplerPool != nil {
-		defer samplerPool.Close()
-	}
-
 	// Construct the BatchedHeartbeatScheduler before the router so it can
 	// be injected into the Handler. The Run goroutine starts below
 	// alongside the sweeper, and Stop is called explicitly during graceful
@@ -626,7 +600,6 @@ func main() {
 		HTTPMetrics:         httpMetrics,
 		BusinessMetrics:     businessMetrics,
 		ChannelLeaseMetrics: channelLeaseMetrics,
-		SeatCapacityMetrics: seatCapacityMetrics,
 		ChannelLeaseRedis:   channelLeaseRedis,
 		WecomMetrics:        wecomMetrics,
 		DaemonHub:           daemonHub,
