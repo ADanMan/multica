@@ -167,6 +167,16 @@ The self-assignment guard is intentionally pair-scoped. It does not treat
 cross-issue handoff, because serial sub-issue promotion and triage batches rely
 on those assignments creating their normal queued runs.
 
+## Revision precondition (optimistic concurrency)
+
+| Behavior | Source |
+|---|---|
+| `issue update`, `issue status`, and `issue assign` accept `--expected-revision <n>` and send it as `expected_revision` | `server/cmd/multica/cmd_issue.go` (`applyExpectedRevision`, `runIssueUpdate`, `runIssueStatus`, `runIssueAssign`) |
+| A non-positive `--expected-revision` is rejected before any request | `server/cmd/multica/cmd_issue.go` (`applyExpectedRevision`) |
+| The update endpoint compares `expected_revision` against the issue's current revision and applies the mutation atomically only on a match | `server/internal/handler/issue.go` (`UpdateIssue`, `UpdateIssueRequest.ExpectedRevision`) |
+| A mismatch returns 409 with code `revision_conflict`, `expected_revision`, and `actual_revision`, and changes nothing | `server/internal/handler/handler.go` (`writeRevisionConflict`) |
+| The conflict prose names the current revision so the CLI's surfaced error is actionable | `server/internal/handler/handler.go` (`writeRevisionConflict`), `server/internal/cli/errors.go` (`serverMessagePrefixes` `KindConflict`) |
+
 ## Sub-issue stages (barrier wake)
 
 | Behavior | File:line |
