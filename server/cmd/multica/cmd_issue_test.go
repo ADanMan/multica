@@ -4079,7 +4079,7 @@ func TestRunIssueRunsSiblingsTableRendersFamilyColumns(t *testing.T) {
 	}
 	// The task id has to survive the new payload's task_id key — reading `id`
 	// here would render a column of blanks and lose the run-messages target.
-	for _, want := range []string{"TASK", "ISSUE", "MUL-7001", "abcd1234"} {
+	for _, want := range []string{"RUN", "ISSUE", "MUL-7001", "abcd1234"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("family table missing %q:\n%s", want, out)
 		}
