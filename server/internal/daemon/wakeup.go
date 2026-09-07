@@ -143,7 +143,7 @@ func (d *Daemon) runTaskWakeupConnection(ctx context.Context, runtimeIDs []strin
 	defer d.clearWSHeartbeatAcks()
 
 	d.logger.Info("task wakeup websocket connected", "runtimes", len(runtimeIDs))
-	signalTaskWakeup(taskWakeups, "")
+	d.signalTaskWakeup(taskWakeups, "")
 	// signalTaskWakeup only wakes idle ClaimTask pollers. In-flight tasks and
 	// the workspace sync loop park on coarse tickers (5s and 30s) that do not
 	// observe the wakeup channel, so anything the server changed during the
@@ -397,7 +397,7 @@ func (d *Daemon) readTaskWakeupMessagesForConnection(conn *websocket.Conn, taskW
 			if payload.RuntimeID != "" {
 				d.logger.Debug("task wakeup received", "runtime_id", payload.RuntimeID, "task_id", payload.TaskID)
 			}
-			signalTaskWakeup(taskWakeups, payload.RuntimeID)
+			d.signalTaskWakeup(taskWakeups, payload.RuntimeID)
 		case protocol.EventDaemonRuntimeProfilesChanged:
 			var payload protocol.RuntimeProfilesChangedPayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -476,10 +476,21 @@ func (d *Daemon) handleRuntimeProfilesChanged(payload protocol.RuntimeProfilesCh
 	}
 }
 
-func signalTaskWakeup(taskWakeups chan<- taskWakeup, runtimeID string) {
+// signalTaskWakeup delivers a targeted (or catch-up) task wakeup to the poller.
+// The channel is a coalescing nudge, so a full channel already carries a pending
+// wakeup — dropping the send loses only the runtime id it would have delivered.
+// For a targeted wakeup that id is the #7452 force-recheck signal, so on a full
+// channel record it directly in the woken set instead: the already-queued nudge
+// still drives the next claim, and the runtime is now forced there. A catch-up
+// wakeup (empty runtimeID) has nothing to preserve and is simply dropped.
+func (d *Daemon) signalTaskWakeup(taskWakeups chan<- taskWakeup, runtimeID string) {
 	select {
 	case taskWakeups <- taskWakeup{runtimeID: runtimeID}:
 	default:
+		if runtimeID != "" {
+			d.noteWokenRuntime(runtimeID)
+			d.logger.Debug("task wakeup channel full; coalesced runtime into force-recheck set", "runtime_id", runtimeID)
+		}
 	}
 }
 
