@@ -3727,9 +3727,17 @@ func (s *TaskService) RequeueTaskAfterClaimFailure(ctx context.Context, task db.
 // so a genuinely-idle runtime re-arms the cache instead of polling Postgres
 // every cycle. It is an optional, additive signal: an empty set reproduces the
 // exact pre-#7452 behavior, and ids not in runtimeIDs are ignored.
-func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pgtype.UUID, maxTasks int, forceRecheckRuntimeIDs ...pgtype.UUID) ([]db.AgentTaskQueue, error) {
+//
+// The second return value echoes the subset of forceRecheckRuntimeIDs that
+// actually reached the candidate SELECT this cycle (were in the non-empty set
+// step 4 queried), as canonical uuid strings. It drives the daemon's
+// "consume the hint only on confirmed execution" contract: a forced runtime the
+// server did NOT scan — because reclaim already filled the batch (step 2 early
+// return) or an error cut the cycle short — is absent from the echo, so the
+// daemon re-notes it and forces the re-check again next cycle.
+func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pgtype.UUID, maxTasks int, forceRecheckRuntimeIDs ...pgtype.UUID) ([]db.AgentTaskQueue, []string, error) {
 	if len(runtimeIDs) == 0 || maxTasks <= 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Runtimes whose cached empty verdict is bypassed for this call. Keyed by
@@ -3777,7 +3785,7 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		slog.Info("promote deferred tasks (batch): slot taken by a concurrent enqueue, skipping this tick")
 		promoted = nil
 	} else if err != nil {
-		return nil, fmt.Errorf("promote deferred tasks: %w", err)
+		return nil, nil, fmt.Errorf("promote deferred tasks: %w", err)
 	}
 	for _, task := range promoted {
 		slog.Info("deferred fallback task promoted (batch)",
@@ -3812,7 +3820,7 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 			MaxTasks:          int32(maxTasks),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("reclaim stale dispatched tasks: %w", err)
+			return nil, nil, fmt.Errorf("reclaim stale dispatched tasks: %w", err)
 		}
 		// The UPDATE's fixed setup/locking cost dominates array width. Query and
 		// advance the complete machine-level set together so per-runtime backstops
@@ -3839,7 +3847,9 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		// "empty" verdict this cycle. That is self-healing: the daemon re-drives
 		// the same free slots on the next poll (and the wakeup that set the force
 		// signal recurs), so the bypass lands then; the TTL is the outer bound.
-		return claimed[:maxTasks], nil
+		// The forced runtimes were never scanned, so the echo is empty and the
+		// daemon re-notes every one of them for the next cycle.
+		return claimed[:maxTasks], nil, nil
 	}
 
 	// 3. Empty-cache short-circuit + version sampling for the remaining runtimes.
@@ -3849,16 +3859,23 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 	// MarkEmpty-repair it when the SELECT confirms it is genuinely idle.
 	nonEmpty := make([]pgtype.UUID, 0, len(uniqueIDs))
 	versions := make(map[string]int64, len(uniqueIDs))
+	// forceRechecked echoes the forced runtimes that actually reach the SELECT
+	// below, so the daemon consumes the hint only for those (see the doc comment).
+	forceRechecked := make([]string, 0, len(forceRecheck))
 	for _, rid := range uniqueIDs {
 		key := util.UUIDToString(rid)
-		if _, forced := forceRecheck[key]; !forced && s.EmptyClaim.IsEmpty(ctx, key) {
+		_, forced := forceRecheck[key]
+		if !forced && s.EmptyClaim.IsEmpty(ctx, key) {
 			continue
+		}
+		if forced {
+			forceRechecked = append(forceRechecked, key)
 		}
 		versions[key] = s.EmptyClaim.CurrentVersion(ctx, key)
 		nonEmpty = append(nonEmpty, rid)
 	}
 	if len(nonEmpty) == 0 {
-		return claimed, nil
+		return claimed, forceRechecked, nil
 	}
 
 	// 4. One candidate SELECT across the non-empty set.
@@ -3875,9 +3892,11 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		if len(claimed) > 0 {
 			slog.Error("batch claim: candidate query failed after partial success; returning claimed tasks to avoid loss",
 				"error", err, "claimed", len(claimed))
-			return claimed, nil
+			// The SELECT errored, so the forced runtimes were not confirmed
+			// scanned — echo nothing so the daemon re-notes and retries them.
+			return claimed, nil, nil
 		}
-		return nil, fmt.Errorf("list queued claim candidates: %w", err)
+		return nil, nil, fmt.Errorf("list queued claim candidates: %w", err)
 	}
 
 	// 5. Mark runtimes with zero candidates empty so their next idle poll skips
@@ -3892,6 +3911,19 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		key := util.UUIDToString(rid)
 		if _, ok := withCandidates[key]; !ok {
 			s.EmptyClaim.MarkEmpty(ctx, key, versions[key])
+			continue
+		}
+		// Blocker 1 (#7452): a FORCED runtime that yielded ≥1 candidate still
+		// carries the stale "empty" verdict that made it need forcing (the lost
+		// Bump). The batch's one-attempt-per-agent rule can claim only one of two
+		// same-agent tasks and leave the second queued; without invalidating the
+		// verdict here the next NORMAL poll would short-circuit that runtime and
+		// strand the second task until the TTL. Bump so the stale verdict is
+		// rejected on the next read and the poll re-checks it (step 5 re-marks it
+		// empty if it is genuinely idle by then). Non-forced positives already
+		// passed IsEmpty, so they have no stale verdict to clear.
+		if _, forced := forceRecheck[key]; forced {
+			s.EmptyClaim.Bump(ctx, key)
 		}
 	}
 
@@ -3918,9 +3950,12 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 			if len(claimed) > 0 {
 				slog.Error("batch claim: claim task failed after partial success; returning claimed tasks to avoid loss",
 					"error", err, "claimed", len(claimed))
-				return claimed, nil
+				// The candidate SELECT already ran and step 5 already invalidated
+				// forced-positive verdicts, so the forced runtimes were confirmed
+				// scanned this cycle — echo them.
+				return claimed, forceRechecked, nil
 			}
-			return nil, fmt.Errorf("claim task: %w", err)
+			return nil, nil, fmt.Errorf("claim task: %w", err)
 		}
 		if task == nil {
 			continue
@@ -3934,7 +3969,7 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		claimed = append(claimed, *task)
 	}
 
-	return claimed, nil
+	return claimed, forceRechecked, nil
 }
 
 // cancelSupersededDeferredRetries drops deferred auto-retry rows that an active

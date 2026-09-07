@@ -1702,7 +1702,7 @@ func (h *Handler) ClaimTasksByRuntime(w http.ResponseWriter, r *http.Request) {
 		forceRecheck = append(forceRecheck, ruid)
 	}
 
-	claimed, err := h.TaskService.ClaimTasksForRuntimes(r.Context(), authorized, maxTasks, forceRecheck...)
+	claimed, forceRechecked, err := h.TaskService.ClaimTasksForRuntimes(r.Context(), authorized, maxTasks, forceRecheck...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to claim tasks: "+err.Error())
 		return
@@ -1798,7 +1798,16 @@ func (h *Handler) ClaimTasksByRuntime(w http.ResponseWriter, r *http.Request) {
 			"runtimes", len(authorized), "requested_max", maxTasks, "claimed", len(out),
 			"total_ms", time.Since(start).Milliseconds())
 	}
-	writeMeasuredJSON(w, http.StatusOK, map[string]any{"tasks": out})
+	// force_rechecked_runtime_ids echoes the forced runtimes the service actually
+	// scanned (#7452), so the daemon consumes the wakeup hint only for those and
+	// re-notes the rest. Additive/optional: an older daemon ignores it.
+	if forceRechecked == nil {
+		forceRechecked = []string{}
+	}
+	writeMeasuredJSON(w, http.StatusOK, map[string]any{
+		"tasks":                       out,
+		"force_rechecked_runtime_ids": forceRechecked,
+	})
 }
 
 // claimBuildFailure captures a pre-response failure from
