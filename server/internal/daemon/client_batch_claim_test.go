@@ -36,7 +36,7 @@ func TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks(t *testing.T) {
 	c := NewClient(srv.URL)
 	c.SetToken("tok")
 
-	tasks, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a", "rt-b", "rt-c"}, 3)
+	tasks, _, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a", "rt-b", "rt-c"}, 3)
 	if err != nil {
 		t.Fatalf("ClaimTasks: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestClient_ClaimTasks_EmptyResult(t *testing.T) {
 	c := NewClient(srv.URL)
 	c.SetToken("tok")
 
-	tasks, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a"}, 1)
+	tasks, _, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a"}, 1)
 	if err != nil {
 		t.Fatalf("ClaimTasks: %v", err)
 	}

@@ -4831,7 +4831,7 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 		// re-check for them so a stale cached "empty" verdict cannot strand their
 		// queued task until the TTL (#7452).
 		forceRecheck := d.drainWokenRuntimes()
-		tasks, err := d.ClaimTasksWSFirst(pollerCtx, d.cfg.DaemonID, runtimeIDs, len(slots), forceRecheck...)
+		tasks, forceRechecked, err := d.ClaimTasksWSFirst(pollerCtx, d.cfg.DaemonID, runtimeIDs, len(slots), forceRecheck...)
 		if err != nil {
 			d.exitClaim()
 			releaseSlots(slots)
@@ -4848,6 +4848,8 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 			}
 			continue
 		}
+
+		d.consumeForceRecheckHints(forceRecheck, forceRechecked)
 
 		// Dispatch each claimed task into a slot. activeTasks is incremented for
 		// every dispatched task BEFORE exitClaim so the auto-update barrier never
@@ -4919,6 +4921,33 @@ func (d *Daemon) noteWokenRuntime(runtimeID string) {
 	}
 	d.forceRecheckRuntimes[runtimeID] = struct{}{}
 	d.forceRecheckMu.Unlock()
+}
+
+// consumeForceRecheckHints implements the "consume the hint only on confirmed
+// execution" contract (#7452). After a successful claim it re-notes every
+// drained force-recheck runtime the server did NOT confirm scanning, so the next
+// claim forces its re-check again. confirmed is the server's
+// force_rechecked_runtime_ids echo:
+//   - a normal claim echoes the subset actually scanned, so a runtime skipped
+//     because reclaim already filled the batch (server early-return) is re-noted;
+//   - the send-nothing cooldown branch echoes nothing, so the whole drained set
+//     is re-noted;
+//   - the uncertain-after-send and legacy fallbacks echo the full drained set,
+//     so nothing is re-noted (an uncertain claim must not replay the hint, and an
+//     old server cannot honor it — TTL is the outer bound).
+func (d *Daemon) consumeForceRecheckHints(drained, confirmed []string) {
+	if len(drained) == 0 {
+		return
+	}
+	confirmedSet := make(map[string]struct{}, len(confirmed))
+	for _, rid := range confirmed {
+		confirmedSet[rid] = struct{}{}
+	}
+	for _, rid := range drained {
+		if _, ok := confirmedSet[rid]; !ok {
+			d.noteWokenRuntime(rid)
+		}
+	}
 }
 
 // drainWokenRuntimes returns and clears the runtimes woken since the last claim.

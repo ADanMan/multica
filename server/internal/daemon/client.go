@@ -265,16 +265,23 @@ const batchClaimRequestTimeout = 5 * time.Second
 // (batchClaimRequestTimeout) rather than the shared 30s control-plane timeout so
 // one slow claim cannot stall the whole batch; the deadline propagates to the
 // server and cancels the in-flight query there too.
-func (c *Client) ClaimTasks(ctx context.Context, daemonID string, runtimeIDs []string, maxTasks int, forceRecheckIDs ...string) ([]*Task, error) {
+//
+// The second return value is the server's force_rechecked_runtime_ids echo
+// (#7452): the forced runtimes the server actually scanned this cycle. The
+// caller consumes the wakeup hint only for those and re-notes the rest. An older
+// server omits the field, yielding an empty echo so every forced runtime is
+// re-noted (TTL remains the outer bound).
+func (c *Client) ClaimTasks(ctx context.Context, daemonID string, runtimeIDs []string, maxTasks int, forceRecheckIDs ...string) ([]*Task, []string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, batchClaimRequestTimeout)
 	defer cancel()
 	var resp struct {
-		Tasks []*Task `json:"tasks"`
+		Tasks                    []*Task  `json:"tasks"`
+		ForceRecheckedRuntimeIDs []string `json:"force_rechecked_runtime_ids"`
 	}
 	if err := c.postJSON(reqCtx, "/api/daemon/tasks/claim", claimTasksBody(daemonID, runtimeIDs, maxTasks, forceRecheckIDs...), &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.Tasks, nil
+	return resp.Tasks, resp.ForceRecheckedRuntimeIDs, nil
 }
 
 // claimTasksBody builds the batch-claim request body shared by the HTTP and
