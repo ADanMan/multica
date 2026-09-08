@@ -4831,7 +4831,7 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 		// re-check for them so a stale cached "empty" verdict cannot strand their
 		// queued task until the TTL (#7452).
 		forceRecheck := d.drainWokenRuntimes()
-		tasks, forceRechecked, err := d.ClaimTasksWSFirst(pollerCtx, d.cfg.DaemonID, runtimeIDs, len(slots), forceRecheck...)
+		tasks, acknowledged, err := d.ClaimTasksWSFirst(pollerCtx, d.cfg.DaemonID, runtimeIDs, len(slots), forceRecheck...)
 		if err != nil {
 			d.exitClaim()
 			releaseSlots(slots)
@@ -4849,7 +4849,7 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 			continue
 		}
 
-		d.consumeForceRecheckHints(forceRecheck, forceRechecked)
+		d.consumeForceRecheckHints(forceRecheck, acknowledged)
 
 		// Dispatch each claimed task into a slot. activeTasks is incremented for
 		// every dispatched task BEFORE exitClaim so the auto-update barrier never
@@ -4923,28 +4923,31 @@ func (d *Daemon) noteWokenRuntime(runtimeID string) {
 	d.forceRecheckMu.Unlock()
 }
 
-// consumeForceRecheckHints implements the "consume the hint only on confirmed
-// execution" contract (#7452). After a successful claim it re-notes every
-// drained force-recheck runtime the server did NOT confirm scanning, so the next
-// claim forces its re-check again. confirmed is the server's
-// force_rechecked_runtime_ids echo:
-//   - a normal claim echoes the subset actually scanned, so a runtime skipped
-//     because reclaim already filled the batch (server early-return) is re-noted;
-//   - the send-nothing cooldown branch echoes nothing, so the whole drained set
-//     is re-noted;
-//   - the uncertain-after-send and legacy fallbacks echo the full drained set,
-//     so nothing is re-noted (an uncertain claim must not replay the hint, and an
-//     old server cannot honor it — TTL is the outer bound).
-func (d *Daemon) consumeForceRecheckHints(drained, confirmed []string) {
-	if len(drained) == 0 {
+// consumeForceRecheckHints decides which drained force-recheck runtimes stay
+// forced after a claim (#7452). acknowledged is the server's
+// force_rechecked_runtime_ids, as a pointer so absence is distinguishable from
+// emptiness:
+//   - acknowledged == nil: the server never returned the field, so it is older
+//     than #7452 and can never act on the hint. Drop the drained hints (the
+//     pre-#7452 behaviour) rather than re-forcing forever; the empty-claim TTL
+//     remains the outer bound.
+//   - acknowledged non-nil: an upgraded server spoke. It lists only the forced
+//     runtimes it observed genuinely idle (a zero-candidate scan, cache
+//     re-armed). Every other drained runtime is re-noted and forced again next
+//     cycle, including when the list is empty. A forced runtime whose scan found
+//     candidates is deliberately in that group: it keeps its stale cached
+//     verdict until a scan comes back empty, so the fix never depends on a
+//     Redis repair write succeeding.
+func (d *Daemon) consumeForceRecheckHints(drained []string, acknowledged *[]string) {
+	if len(drained) == 0 || acknowledged == nil {
 		return
 	}
-	confirmedSet := make(map[string]struct{}, len(confirmed))
-	for _, rid := range confirmed {
-		confirmedSet[rid] = struct{}{}
+	acked := make(map[string]struct{}, len(*acknowledged))
+	for _, rid := range *acknowledged {
+		acked[rid] = struct{}{}
 	}
 	for _, rid := range drained {
-		if _, ok := confirmedSet[rid]; !ok {
+		if _, ok := acked[rid]; !ok {
 			d.noteWokenRuntime(rid)
 		}
 	}

@@ -266,17 +266,19 @@ const batchClaimRequestTimeout = 5 * time.Second
 // one slow claim cannot stall the whole batch; the deadline propagates to the
 // server and cancels the in-flight query there too.
 //
-// The second return value is the server's force_rechecked_runtime_ids echo
-// (#7452): the forced runtimes the server actually scanned this cycle. The
-// caller consumes the wakeup hint only for those and re-notes the rest. An older
-// server omits the field, yielding an empty echo so every forced runtime is
-// re-noted (TTL remains the outer bound).
-func (c *Client) ClaimTasks(ctx context.Context, daemonID string, runtimeIDs []string, maxTasks int, forceRecheckIDs ...string) ([]*Task, []string, error) {
+// The second return value is the server's force_rechecked_runtime_ids
+// acknowledgement (#7452): the forced runtimes the server observed genuinely
+// idle this cycle. It is a POINTER so absence is distinguishable from
+// emptiness: a non-nil empty slice means an upgraded server acknowledged
+// nothing (keep every forced runtime forced), while nil means the server
+// omitted the field entirely and cannot honour the hint at all, so the caller
+// drops it rather than re-forcing forever.
+func (c *Client) ClaimTasks(ctx context.Context, daemonID string, runtimeIDs []string, maxTasks int, forceRecheckIDs ...string) ([]*Task, *[]string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, batchClaimRequestTimeout)
 	defer cancel()
 	var resp struct {
-		Tasks                    []*Task  `json:"tasks"`
-		ForceRecheckedRuntimeIDs []string `json:"force_rechecked_runtime_ids"`
+		Tasks                    []*Task   `json:"tasks"`
+		ForceRecheckedRuntimeIDs *[]string `json:"force_rechecked_runtime_ids"`
 	}
 	if err := c.postJSON(reqCtx, "/api/daemon/tasks/claim", claimTasksBody(daemonID, runtimeIDs, maxTasks, forceRecheckIDs...), &resp); err != nil {
 		return nil, nil, err
