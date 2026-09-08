@@ -90,7 +90,7 @@ func TestClaimTasksForRuntimes_ForceRecheckReArmsCacheOnZeroCandidates(t *testin
 
 	// Force a re-check on the now-idle runtime: nothing to claim, but the empty
 	// verdict must be re-armed for the next idle poll.
-	got, _, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt2ID}, 5, rt2ID)
+	got, acknowledged, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt2ID}, 5, rt2ID)
 	if err != nil {
 		t.Fatalf("forced idle claim: %v", err)
 	}
@@ -100,18 +100,25 @@ func TestClaimTasksForRuntimes_ForceRecheckReArmsCacheOnZeroCandidates(t *testin
 	if !svc.EmptyClaim.IsEmpty(ctx, rt2) {
 		t.Fatal("forced re-check on a zero-candidate runtime must re-arm the empty verdict")
 	}
+	// A zero-candidate scan is the ONLY thing that acknowledges a forced runtime
+	// (#7452): the runtime is confirmed idle and its cache entry was just re-armed
+	// from a real SELECT, so the daemon may drop the hint.
+	if len(acknowledged) != 1 || acknowledged[0] != rt2 {
+		t.Fatalf("acknowledged set = %v, want [rt2] after a zero-candidate forced scan", acknowledged)
+	}
 }
 
-// TestClaimTasksForRuntimes_ForcedPositiveReleasesSecondSameAgentTask is
-// blocker 1 of #7452: a forced runtime whose SELECT returns candidates must not
-// keep its stale "empty" verdict. The batch claims at most one task per agent
-// per call, so a forced claim on a runtime with TWO queued tasks for the same
-// agent takes only the first and leaves the second queued. Without invalidating
-// the verdict on that forced positive, the next NORMAL poll would short-circuit
-// the runtime and strand the second task until the empty key's TTL (~3 min). The
-// fix Bumps the verdict on a forced positive, so the very next normal claim
-// re-checks the runtime and takes the second task immediately.
-func TestClaimTasksForRuntimes_ForcedPositiveReleasesSecondSameAgentTask(t *testing.T) {
+// TestClaimTasksForRuntimes_ForcedPositiveIsNotAcknowledged pins refinement 1 of
+// #7452: a forced runtime whose SELECT returns candidates is NOT acknowledged,
+// so the daemon keeps it forced and re-forces it next cycle. The batch claims at
+// most one task per agent per call, so a forced claim on a runtime with TWO
+// queued tasks for the same agent takes only the first and leaves the second
+// queued behind a stale "empty" verdict. Acknowledging here would have made
+// correctness depend on a Redis repair write landing — and that write can fail in
+// the very outage that lost the enqueue-side Bump. Staying forced until a scan
+// comes back empty needs no such write: the next forced claim takes the second
+// task immediately, without waiting for the ~3 minute TTL.
+func TestClaimTasksForRuntimes_ForcedPositiveIsNotAcknowledged(t *testing.T) {
 	ctx := context.Background()
 	pool := newTaskClaimRacePool(t)
 	rdb := newRedisTestClient(t)
@@ -130,34 +137,53 @@ func TestClaimTasksForRuntimes_ForcedPositiveReleasesSecondSameAgentTask(t *test
 		t.Fatal("precondition: rt1 must read as cached-empty")
 	}
 
-	// Forced claim: bypasses the short-circuit, claims exactly one of the two
-	// same-agent tasks, and echoes rt1 as force-rechecked (it reached the SELECT).
-	forced, forceRechecked, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5, rt1ID)
+	// Forced claim: bypasses the short-circuit and claims exactly one of the two
+	// same-agent tasks. Because the scan found candidates, rt1 is NOT acknowledged.
+	forced, acknowledged, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5, rt1ID)
 	if err != nil {
 		t.Fatalf("forced claim: %v", err)
 	}
 	if len(forced) != 1 || util.UUIDToString(forced[0].RuntimeID) != rt1 {
 		t.Fatalf("forced claim = %d tasks on %v, want exactly 1 on rt1", len(forced), forced)
 	}
-	if len(forceRechecked) != 1 || forceRechecked[0] != rt1 {
-		t.Fatalf("force-rechecked echo = %v, want [rt1]", forceRechecked)
+	if len(acknowledged) != 0 {
+		t.Fatalf("acknowledged set = %v, want empty: a forced scan that found candidates must stay forced", acknowledged)
 	}
 
-	// The stale verdict must now be invalidated so a plain poll re-checks rt1.
-	if svc.EmptyClaim.IsEmpty(ctx, rt1) {
-		t.Fatal("forced positive must invalidate the stale empty verdict, else the second task waits for TTL")
-	}
-
-	// Next NORMAL claim (no force set): it re-checks rt1 and takes the second
-	// same-agent task instead of stranding it.
-	second, _, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5)
-	if err != nil {
+	// A NORMAL poll still short-circuits on the stale verdict, which is exactly
+	// why the runtime must stay forced rather than be acknowledged here.
+	if stranded, _, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5); err != nil {
 		t.Fatalf("normal follow-up claim: %v", err)
+	} else if len(stranded) != 0 {
+		t.Fatalf("normal follow-up claim = %d tasks, want 0 (the stale verdict still short-circuits)", len(stranded))
+	}
+
+	// The daemon kept rt1 forced, so the next FORCED claim takes the second
+	// same-agent task instead of stranding it until the TTL.
+	second, secondAck, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5, rt1ID)
+	if err != nil {
+		t.Fatalf("second forced claim: %v", err)
 	}
 	if len(second) != 1 || util.UUIDToString(second[0].RuntimeID) != rt1 {
-		t.Fatalf("follow-up claim = %d tasks on %v, want the second task on rt1", len(second), second)
+		t.Fatalf("second forced claim = %d tasks on %v, want the second task on rt1", len(second), second)
 	}
 	if forced[0].ID == second[0].ID {
-		t.Fatal("follow-up claim returned the same task, want the distinct second same-agent task")
+		t.Fatal("second forced claim returned the same task, want the distinct second same-agent task")
+	}
+	if len(secondAck) != 0 {
+		t.Fatalf("acknowledged set = %v, want empty: this scan also found candidates", secondAck)
+	}
+
+	// Once the queue really is drained, a forced scan comes back empty and only
+	// THEN is rt1 acknowledged, so the daemon finally drops the hint.
+	drained, drainedAck, err := svc.ClaimTasksForRuntimes(ctx, []pgtype.UUID{rt1ID}, 5, rt1ID)
+	if err != nil {
+		t.Fatalf("drained forced claim: %v", err)
+	}
+	if len(drained) != 0 {
+		t.Fatalf("drained forced claim = %d tasks, want 0", len(drained))
+	}
+	if len(drainedAck) != 1 || drainedAck[0] != rt1 {
+		t.Fatalf("acknowledged set = %v, want [rt1] once the forced scan is empty", drainedAck)
 	}
 }

@@ -1798,9 +1798,12 @@ func (h *Handler) ClaimTasksByRuntime(w http.ResponseWriter, r *http.Request) {
 			"runtimes", len(authorized), "requested_max", maxTasks, "claimed", len(out),
 			"total_ms", time.Since(start).Milliseconds())
 	}
-	// force_rechecked_runtime_ids echoes the forced runtimes the service actually
-	// scanned (#7452), so the daemon consumes the wakeup hint only for those and
-	// re-notes the rest. Additive/optional: an older daemon ignores it.
+	// force_rechecked_runtime_ids acknowledges the forced runtimes whose scan came
+	// back with zero candidates (#7452): those are confirmed idle and cache-repaired,
+	// so the daemon drops the wakeup hint for them and keeps every other forced
+	// runtime forced. The field is ALWAYS emitted, even when empty, so a daemon can
+	// tell "acknowledged nothing" from an older server that omits it entirely.
+	// Additive/optional: an older daemon ignores it.
 	if forceRechecked == nil {
 		forceRechecked = []string{}
 	}

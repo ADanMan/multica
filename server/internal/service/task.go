@@ -3728,13 +3728,28 @@ func (s *TaskService) RequeueTaskAfterClaimFailure(ctx context.Context, task db.
 // every cycle. It is an optional, additive signal: an empty set reproduces the
 // exact pre-#7452 behavior, and ids not in runtimeIDs are ignored.
 //
-// The second return value echoes the subset of forceRecheckRuntimeIDs that
-// actually reached the candidate SELECT this cycle (were in the non-empty set
-// step 4 queried), as canonical uuid strings. It drives the daemon's
-// "consume the hint only on confirmed execution" contract: a forced runtime the
-// server did NOT scan — because reclaim already filled the batch (step 2 early
-// return) or an error cut the cycle short — is absent from the echo, so the
-// daemon re-notes it and forces the re-check again next cycle.
+// The second return value ACKNOWLEDGES the subset of forceRecheckRuntimeIDs
+// whose candidate SELECT came back with ZERO candidates this cycle, as
+// canonical uuid strings. A forced runtime is acknowledged only once it has
+// been observed genuinely idle and MarkEmpty-repaired (step 5): its cache entry
+// is then freshly authoritative, so the hint has done its job and the daemon
+// can drop it.
+//
+// Everything else is deliberately NOT acknowledged, so the daemon keeps the
+// runtime forced and re-forces it next cycle:
+//   - a forced runtime whose SELECT found candidates. The batch's
+//     one-attempt-per-agent rule can claim one of two same-agent tasks and leave
+//     the second queued, and the stale verdict that made the runtime need
+//     forcing is still cached. Acknowledging here would depend on a repair write
+//     (a Bump/invalidate) succeeding, and that write can fail in the very Redis
+//     outage that lost the enqueue-side Bump, silently restoring the stale
+//     verdict. Staying forced until a scan is empty needs no such write.
+//   - a forced runtime the server never scanned, because reclaim already filled
+//     the batch (step 2 early return) or an error cut the cycle short.
+//
+// The set is meaningful even when empty, and the handler always emits the field,
+// so a daemon can tell "this server acknowledged nothing" from "this server does
+// not know the field at all".
 func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pgtype.UUID, maxTasks int, forceRecheckRuntimeIDs ...pgtype.UUID) ([]db.AgentTaskQueue, []string, error) {
 	if len(runtimeIDs) == 0 || maxTasks <= 0 {
 		return nil, nil, nil
@@ -3847,8 +3862,8 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		// "empty" verdict this cycle. That is self-healing: the daemon re-drives
 		// the same free slots on the next poll (and the wakeup that set the force
 		// signal recurs), so the bypass lands then; the TTL is the outer bound.
-		// The forced runtimes were never scanned, so the echo is empty and the
-		// daemon re-notes every one of them for the next cycle.
+		// Nothing was scanned, so nothing is acknowledged: the daemon keeps every
+		// forced runtime forced and the bypass lands on the next poll.
 		return claimed[:maxTasks], nil, nil
 	}
 
@@ -3856,20 +3871,18 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 	// A runtime named in forceRecheck skips the IsEmpty short-circuit and always
 	// runs the real candidate SELECT (step 4), repairing a stale "empty" verdict
 	// left by a lost Bump (#7452). It still samples the version so step 5 can
-	// MarkEmpty-repair it when the SELECT confirms it is genuinely idle.
+	// MarkEmpty-repair it, and acknowledge it, when the SELECT confirms it is
+	// genuinely idle.
 	nonEmpty := make([]pgtype.UUID, 0, len(uniqueIDs))
 	versions := make(map[string]int64, len(uniqueIDs))
-	// forceRechecked echoes the forced runtimes that actually reach the SELECT
-	// below, so the daemon consumes the hint only for those (see the doc comment).
+	// forceRechecked acknowledges the forced runtimes that step 5 confirms idle,
+	// so every other forced runtime stays forced (see the doc comment).
 	forceRechecked := make([]string, 0, len(forceRecheck))
 	for _, rid := range uniqueIDs {
 		key := util.UUIDToString(rid)
 		_, forced := forceRecheck[key]
 		if !forced && s.EmptyClaim.IsEmpty(ctx, key) {
 			continue
-		}
-		if forced {
-			forceRechecked = append(forceRechecked, key)
 		}
 		versions[key] = s.EmptyClaim.CurrentVersion(ctx, key)
 		nonEmpty = append(nonEmpty, rid)
@@ -3892,8 +3905,8 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		if len(claimed) > 0 {
 			slog.Error("batch claim: candidate query failed after partial success; returning claimed tasks to avoid loss",
 				"error", err, "claimed", len(claimed))
-			// The SELECT errored, so the forced runtimes were not confirmed
-			// scanned — echo nothing so the daemon re-notes and retries them.
+			// The SELECT errored, so no forced runtime was observed idle:
+			// acknowledge none of them and let the daemon keep them forced.
 			return claimed, nil, nil
 		}
 		return nil, nil, fmt.Errorf("list queued claim candidates: %w", err)
@@ -3911,19 +3924,15 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 		key := util.UUIDToString(rid)
 		if _, ok := withCandidates[key]; !ok {
 			s.EmptyClaim.MarkEmpty(ctx, key, versions[key])
-			continue
-		}
-		// Blocker 1 (#7452): a FORCED runtime that yielded ≥1 candidate still
-		// carries the stale "empty" verdict that made it need forcing (the lost
-		// Bump). The batch's one-attempt-per-agent rule can claim only one of two
-		// same-agent tasks and leave the second queued; without invalidating the
-		// verdict here the next NORMAL poll would short-circuit that runtime and
-		// strand the second task until the TTL. Bump so the stale verdict is
-		// rejected on the next read and the poll re-checks it (step 5 re-marks it
-		// empty if it is genuinely idle by then). Non-forced positives already
-		// passed IsEmpty, so they have no stale verdict to clear.
-		if _, forced := forceRecheck[key]; forced {
-			s.EmptyClaim.Bump(ctx, key)
+			// The runtime is confirmed idle and its cache entry has just been
+			// re-armed from a real SELECT, so the force hint has done its job:
+			// acknowledge it and let the daemon drop it (#7452). A forced runtime
+			// that DID yield candidates is intentionally left unacknowledged: it
+			// stays forced until a later scan comes back empty, which is what makes
+			// the contract independent of any Redis repair write succeeding.
+			if _, forced := forceRecheck[key]; forced {
+				forceRechecked = append(forceRechecked, key)
+			}
 		}
 	}
 
@@ -3950,9 +3959,8 @@ func (s *TaskService) ClaimTasksForRuntimes(ctx context.Context, runtimeIDs []pg
 			if len(claimed) > 0 {
 				slog.Error("batch claim: claim task failed after partial success; returning claimed tasks to avoid loss",
 					"error", err, "claimed", len(claimed))
-				// The candidate SELECT already ran and step 5 already invalidated
-				// forced-positive verdicts, so the forced runtimes were confirmed
-				// scanned this cycle — echo them.
+				// Step 5 already ran, so any forced runtime it confirmed idle is
+				// safely acknowledged; the rest stay forced.
 				return claimed, forceRechecked, nil
 			}
 			return nil, nil, fmt.Errorf("claim task: %w", err)
