@@ -312,6 +312,8 @@ export interface AgentTask {
   // coarse values; `string & {}` admits the rest without collapsing the
   // hints.
   failure_reason?: TaskFailureReason | (string & {}) | "";
+  /** The input comment was edited or deleted, invalidating this run. */
+  cancelled_by_comment_change?: boolean;
   created_at: string;
   /** Non-empty when the task was spawned from a chat session. */
   chat_session_id?: string;
@@ -347,13 +349,6 @@ export interface AgentTask {
    * or deleted.
    */
   trigger_summary?: string;
-  /**
-   * Handoff instruction the assigner attached when starting this run (MUL-3375).
-   * Present only on assignment-triggered runs that carried a note; the execution
-   * log shows it inline as the trigger reason. Absent (legacy / no note) falls
-   * back to the generic "initial run" label.
-   */
-  handoff_note?: string;
   /**
    * Server-computed source discriminator used by the activity row to label
    * tasks that have no linked issue (so e.g. quick-create tasks render
@@ -414,8 +409,8 @@ export interface AgentTask {
   attribution?: TaskAttribution;
   /**
    * This run's own token consumption, one entry per (provider, model) it used.
-   * Present on the issue execution-log endpoint only; the daemon claim path
-   * omits it.
+   * Present on issue execution logs and explicit agent-history accounting
+   * requests; normal UI history and daemon claims omit it.
    *
    * `undefined` (old backend, or a surface that doesn't hydrate it) and `[]`
    * (backend hydrated, this run has no recorded usage) both mean "no number to
@@ -473,6 +468,8 @@ export interface Agent {
   runtime_id: string;
   /** False exactly when the agent has no runtime. Older backends omit it. */
   runtime_bound?: boolean;
+  /** Privacy-safe coarse liveness for a runtime hidden from the runtime list. */
+  runtime_availability?: "online" | "unstable" | "offline";
   name: string;
   description: string;
   /** What this agent's owner wrote. For a system agent this holds only the

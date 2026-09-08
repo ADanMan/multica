@@ -298,8 +298,9 @@ var concurrentIndexCleanups = map[string]string{
 	"443_issue_project_status_index":                            "idx_issue_project_status",
 	"445_comment_delegated_failure_unsettled_index":             "idx_comment_delegated_failure_unsettled",
 	"446_issue_properties_bigm_index":                           "idx_issue_properties_bigm",
-	"451_issue_scheduled_trigger_pending_index":                 "uq_issue_scheduled_trigger_pending_issue",
-	"452_issue_scheduled_trigger_scan_index":                    "idx_issue_scheduled_trigger_status_run_at",
+	"452_agent_task_pending_thread_unique":                      "idx_one_pending_task_per_issue_agent_thread",
+	"455_issue_scheduled_trigger_pending_index":                 "uq_issue_scheduled_trigger_pending_issue",
+	"456_issue_scheduled_trigger_scan_index":                    "idx_issue_scheduled_trigger_status_run_at",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction
@@ -323,6 +324,8 @@ var concurrentDownIndexCleanups = map[string]string{
 	"375_drop_issue_last_activity_index":                    "idx_issue_workspace_last_activity",
 	"391_drop_agent_task_queue_dispatched_prepare_index":    "idx_agent_task_queue_dispatched_prepare",
 	"437_drop_agent_runtime_last_seen_at_index":             "idx_agent_runtime_last_seen_at",
+	"450_drop_comment_delegated_failure_pending_index":      "idx_comment_delegated_failure_pending",
+	"453_drop_pending_issue_agent_unique":                   "idx_one_pending_task_per_issue_agent_v2",
 }
 
 var preMigrationHooks = func() map[string]preMigrationHook {
