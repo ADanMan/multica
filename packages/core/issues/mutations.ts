@@ -1170,6 +1170,9 @@ export function useCancelIssueSchedule(issueId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: issueKeys.schedule(wsId, issueId) });
     },
+  });
+}
+
 export function useCancelIssueRun(issueId: string) {
   const client = useQueryClient();
   return useMutation({
