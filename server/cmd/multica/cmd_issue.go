@@ -397,6 +397,10 @@ var validIssuePriorities = []string{
 	"urgent", "high", "medium", "low", "none",
 }
 
+// issueListMaxPageSize mirrors the page clamp in the server's ListIssues
+// handler; the two must move together.
+const issueListMaxPageSize = 100
+
 // validIssueSortColumns are the sort keys `issue list --sort` accepts. They
 // mirror the server's ListIssues handler. "position" is the default and is
 // always sorted ascending (the board's manual drag order), so --direction is
@@ -512,8 +516,8 @@ func init() {
 	issueListCmd.Flags().String("project", "", "Filter by project ID")
 	issueListCmd.Flags().StringSlice("metadata", nil, "Filter by metadata key=value (repeatable; combined with AND). Value is JSON-parsed: 'true'/'false' → bool, numbers → number, otherwise string. Wrap as '\"42\"' to force a string when the value would otherwise sniff as a number.")
 	issueListCmd.Flags().StringArray("property", nil, `Filter by custom property, written as "Name=Value" (repeatable, one value per flag). Name is a property name (case-insensitive) or its UUID. Value depends on the type: an option name or id for select and multi_select, true or false for checkbox, a member name, email, or id for actor types, and the value itself for text, url, number, and date (YYYY-MM-DD). Use __none__ to match issues where the property is unset; it works for every type, so an option or member actually named __none__ has to be given by id, as does a property whose name contains "=" or ends in <, > or ! (the >=, <=, and != spellings are reserved for comparison filters). Repeating a property matches ANY of its values; different properties must ALL match.`)
-	issueListCmd.Flags().Int("limit", 50, "Maximum number of issues to return in one page (the server caps a page at 100; use --offset to page through more)")
-	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination)")
+	issueListCmd.Flags().Int("limit", 50, fmt.Sprintf("Page size, 1 to %d (the server returns at most %d issues per request; use --offset to page through more)", issueListMaxPageSize, issueListMaxPageSize))
+	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination; while --output json reports has_more, advance it by the number of issues in that same response)")
 	issueListCmd.Flags().String("sort", "", "Sort column: position (default, manual board order), title, created_at, start_date, due_date, priority, or property:<name-or-id> to sort by a custom property (select properties sort by option order)")
 	issueListCmd.Flags().String("direction", "", "Sort direction (asc or desc); requires --sort to be a non-position column or a property sort (position is always ascending)")
 	issueListCmd.Flags().String("fields", "", "JSON output only: comma-separated list of issue fields to include (e.g. id,title,status,priority). Filtering happens client-side after the full response is fetched, so this shrinks CLI output size and agent context cost, not network/server-side cost. Omit for the full issue object (default, unchanged). Valid fields: "+strings.Join(validIssueFields, ", "))
@@ -665,6 +669,19 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// The server clamps limit and applies its own default when the flag is
+	// missing, so reject a value it cannot honour up front (before any
+	// request) rather than report a page that was never returned. Same
+	// reasoning as the --direction guard below.
+	limit, _ := cmd.Flags().GetInt("limit")
+	if limit < 1 || limit > issueListMaxPageSize {
+		return fmt.Errorf("--limit must be between 1 and %d (the server returns at most %d issues per request); use --offset to page through more", issueListMaxPageSize, issueListMaxPageSize)
+	}
+	offset, _ := cmd.Flags().GetInt("offset")
+	if offset < 0 {
+		return fmt.Errorf("--offset must be zero or greater")
+	}
+
 	params := url.Values{}
 	params.Set("workspace_id", client.WorkspaceID)
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
@@ -673,8 +690,9 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 	if v, _ := cmd.Flags().GetString("priority"); v != "" {
 		params.Set("priority", v)
 	}
-	if v, _ := cmd.Flags().GetInt("limit"); v > 0 {
-		params.Set("limit", fmt.Sprintf("%d", v))
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	if offset > 0 {
+		params.Set("offset", fmt.Sprintf("%d", offset))
 	}
 	_, aID, hasAssignee, resolveErr := pickAssigneeFromFlags(ctx, client, cmd, "assignee", "assignee-id", issueAssigneeKinds)
 	if resolveErr != nil {
@@ -682,9 +700,6 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 	}
 	if hasAssignee {
 		params.Set("assignee_id", aID)
-	}
-	if v, _ := cmd.Flags().GetInt("offset"); v > 0 {
-		params.Set("offset", fmt.Sprintf("%d", v))
 	}
 	if v, _ := cmd.Flags().GetString("project"); v != "" {
 		project, err := resolveProjectID(ctx, client, v)
@@ -800,6 +815,26 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 	}
 
 	issuesRaw, _ := result["issues"].([]any)
+	total, totalOK := result["total"].(float64)
+	returned := len(issuesRaw)
+	// total cannot end a walk on its own. The server answers with the row
+	// count it just returned when its count query fails, and a newer backend
+	// may drop the field; either one reports has_more false beside a full page
+	// and truncates the walk in silence. So total is trusted only when it is
+	// larger than this page, which a failed count never is; otherwise the page
+	// decides. The one cost is a first page that fills exactly: it cannot tell
+	// a genuine total from a failed count, so it probes onward and the next
+	// request comes back empty.
+	totalTrusted := totalOK && int(total) > returned
+	hasMore := false
+	switch {
+	case returned == 0:
+		// An empty page ends a walk whatever total says.
+	case totalTrusted:
+		hasMore = offset+returned < int(total)
+	default:
+		hasMore = returned == limit
+	}
 
 	output, _ := cmd.Flags().GetString("output")
 	if output == "json" {
@@ -815,10 +850,6 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 				return err
 			}
 		}
-		total, _ := result["total"].(float64)
-		limit, _ := cmd.Flags().GetInt("limit")
-		offset, _ := cmd.Flags().GetInt("offset")
-		hasMore := offset+len(issuesRaw) < int(total)
 		wrapped := map[string]any{
 			"issues":   issuesRaw,
 			"total":    int(total),
@@ -874,6 +905,27 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 		rows = append(rows, row)
 	}
 	cli.PrintTable(os.Stdout, headers, rows)
+	// Page footer on stderr so stdout stays a plain table. It speaks whenever
+	// there is more or the page was offset, and stays silent for a short
+	// first page. "of N" appears only while total is trusted, so the line
+	// never claims a page is the whole list beside a pointer to the next one.
+	switch {
+	case returned == 0 && offset > 0:
+		if totalTrusted {
+			fmt.Fprintf(os.Stderr, "No issues at --offset %d (%d total).\n", offset, int(total))
+		} else {
+			fmt.Fprintf(os.Stderr, "No issues at --offset %d.\n", offset)
+		}
+	case hasMore || offset > 0:
+		line := fmt.Sprintf("Showing issues %d-%d.", offset+1, offset+returned)
+		if totalTrusted {
+			line = fmt.Sprintf("Showing %d-%d of %d issues.", offset+1, offset+returned, int(total))
+		}
+		if hasMore {
+			line += fmt.Sprintf(" Next page: --offset %d", offset+returned)
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
 	return nil
 }
 
@@ -1865,10 +1917,10 @@ func fetchIssue(ctx context.Context, client *cli.APIClient, id string) (map[stri
 
 // fetchIssueColumn returns every issue in a status column ordered by position
 // ascending, paginating through the list endpoint so columns larger than one
-// page (the server caps a page at 100) still produce a complete, correctly
-// ordered set. A non-empty projectID scopes the column to that project,
-// matching a project board; an empty projectID lists the whole workspace
-// column.
+// page (the server caps a page at issueListMaxPageSize) still produce a
+// complete, correctly ordered set. A non-empty projectID scopes the column to
+// that project, matching a project board; an empty projectID lists the whole
+// workspace column.
 func fetchIssueColumn(ctx context.Context, client *cli.APIClient, workspaceID, projectID, status string) ([]map[string]any, error) {
 	var all []map[string]any
 	offset := 0
@@ -1880,7 +1932,7 @@ func fetchIssueColumn(ctx context.Context, client *cli.APIClient, workspaceID, p
 			params.Set("project_id", projectID)
 		}
 		params.Set("sort", "position")
-		params.Set("limit", "100")
+		params.Set("limit", fmt.Sprintf("%d", issueListMaxPageSize))
 		params.Set("offset", fmt.Sprintf("%d", offset))
 
 		var result map[string]any
