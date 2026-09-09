@@ -4,7 +4,6 @@ Product contracts the runtime brief does not fully encode.
 
 - [PR linking and close intent are two distinct contracts](#pr-linking-and-close-intent-are-two-distinct-contracts)
 - [Reading a linked PR's real state](#reading-a-linked-prs-real-state)
-- [Metadata: durable custom state](#metadata-durable-custom-state)
 - [Custom properties: typed workflow state](#custom-properties-typed-workflow-state)
 - [Status changes have server side effects](#status-changes-have-server-side-effects)
 - [Claim ownership without duplicating a run](#claim-ownership-without-duplicating-a-run)
@@ -24,7 +23,7 @@ reference-only rule below: a key that appears **only** as a bare mention in the
 body is linked yet hidden from that list.
 
 ```text
-MUL-123: add the thing the issue asks for        # title prefix → links, shown
+MUL-123: add the thing the issue asks for        # key anywhere in title → links, shown
 agent/dana/mul-123-add-the-thing             # branch ref   → links, shown
 ```
 
@@ -41,8 +40,8 @@ Resolves MUL-123
 Fix login MUL-123                                 # links only — keyword not adjacent
 ```
 
-Consequence: a bare title prefix or a branch reference links the PR but does not
-close the issue on merge. A closing keyword immediately adjacent to the issue key
+Consequence: a bare key in the title or a branch reference links the PR but does
+not close the issue on merge. A closing keyword immediately adjacent to the issue key
 records close intent; on merge, that close intent can move the linked issue to
 `done`.
 
@@ -69,13 +68,15 @@ an unconditional command: if no code changed, say no PR is needed; if PR creatio
 is blocked by auth, failing tests, or missing remote state, report that blocker
 instead of pretending the run is complete.
 
-Use a routable issue key in the PR title, body, or branch so the webhook can link
-the PR back to the issue. If the PR should close the issue on merge, put the key
-immediately after a closing keyword in the title or body, for example:
+To make the PR show on the issue, put a routable issue key in the PR **title**
+(preferred) or the **branch**. A key that appears only as a bare mention in the
+body is reference-only and hidden from the issue PR list. Do not use a closing
+keyword (`Closes` / `Fixes` / `Resolves`) unless the issue should auto-advance
+to `done` on merge.
 
 ```text
-MUL-123: fix login redirect        # links only
-Closes MUL-123                     # links and records close intent
+MUL-123: fix login redirect        # key anywhere in title → links and shown
+Closes MUL-123                     # only when merge should mark the issue done
 ```
 
 In the final issue comment, include the PR URL when a PR exists. If the task did
@@ -85,8 +86,8 @@ that explicitly.
 ## Reading a linked PR's real state
 
 When a step depends on PR state, query Multica's link table — do not infer it
-from branch names, GitHub search, memory, or `pr_url` metadata (which can be
-stale).
+from branch names, GitHub search, memory, or stale values left on the issue by
+an earlier run.
 
 ```bash
 multica issue pull-requests <issue-id> --output json
@@ -123,34 +124,13 @@ not observe a routable issue key in the PR title/body/branch — or the only mat
 was a bare body mention, which links as `reference_only` and is hidden from this
 list (see the reference-only rule above).
 
-## Metadata: durable custom state
-
-Metadata is a free-form KV bag of durable issue state. Reading metadata is safe.
-Writing a metadata key is a state mutation and should be tied to an explicit
-task requirement to record that state for later readers or runs. Keys are
-whatever your workflow needs — the platform curates no vocabulary; pick short
-snake_case names and reuse them consistently within your workspace.
-
-Never store secrets, tokens, or API keys in metadata.
-Not metadata: logs or summaries; runtime bookkeeping such as timestamps,
-attempt counts, or agent IDs; or other single-run details such as
-files touched and investigation notes — those belong in the result comment.
-
-```bash
-multica issue metadata set <issue-id> --key <key> --value <value>
-multica issue metadata delete <issue-id> --key <stale-key>
-```
-
-`--value` is JSON-parsed by default (bool/number are sniffed); pass `--type
-string|number|bool` to force a type.
-
 ## Custom properties: typed workflow state
 
 Workspaces may define custom issue properties (Severity, Environment, QA
-Status, Reviewer, ...). Properties are the typed, user-visible sibling of
-metadata: values are validated against the definition (select options, date
-format, http(s) URL, member reference), visible in the issue sidebar, and
-addressed by name.
+Status, Reviewer, ...). They are the place for durable, typed issue state:
+values are validated against the definition (select options, date format,
+http(s) URL, member reference), visible in the issue sidebar, and addressed
+by name.
 
 - Read what exists before writing: `multica property list` shows the catalog;
   `multica issue property list <issue-id>` shows values set on the issue.
@@ -172,9 +152,9 @@ multica issue property unset <issue-id> --name Environment
   it does not change the property's type or value validation.
 - Agents cannot create or edit property definitions (owner/admin humans only).
   If a needed property does not exist, propose it in a comment instead.
-- Property vs metadata: if the value is workflow state a human should see and
-  filter by, and a definition exists, prefer the property. Metadata stays the
-  free-form bag for durable custom issue state.
+- Where state belongs: workflow state a human should see and filter by goes in
+  a property; the stage the issue is at goes in its status; everything else —
+  what you did this run, what you found — goes in the result comment.
 - `issue list` filters and sorts by property with the same name addressing:
 
 ```bash
@@ -197,6 +177,19 @@ multica issue list --sort property:Impact --direction desc --output json
   text/url by value; issues without the property sort last either way.
   Archived properties and types without an order (multi_select, checkbox,
   actor kinds) are rejected up front.
+- `issue list` and `issue get` return `properties` as a map of definition id
+  to stored value. Add `--resolve-properties` in JSON mode to get the rows
+  `issue property list` prints instead (name, type, stored value, display
+  names); the CLI makes at most one catalog request for the whole page, so
+  no `property list` call is needed:
+
+```bash
+multica issue list --status in_progress --output json --resolve-properties
+multica issue get <issue-id> --resolve-properties
+```
+
+  Read `display` for a single value and `display_values` for a multi_select
+  or multi_actor value; `value` keeps the stored ids.
 
 ## Status changes have server side effects
 
@@ -271,6 +264,14 @@ turns that do — before opening a PR against code a sibling issue also touches:
 multica issue runs <issue-id> --active --output json     # in-flight runs on this issue
 multica issue runs <issue-id> --siblings --output json   # ...and across the sub-issue family
 ```
+
+Comment replies stay with the directly replied-to agent or the thread owner;
+they never schedule a delayed run for the issue assignee. Waiting for an offline
+or busy agent does not change the recipient. Explicitly @-mention another agent to
+involve it. New top-level comments without a target still route to the assignee.
+Issue and agent run history omit unused assignee fallbacks from older versions;
+cancelled fallbacks are hidden even if dispatched, provided execution never
+started. Ordinary cancellations and fallbacks that started remain visible.
 
 `--active` drops the execution history and returns only `queued` / `dispatched`
 / `running` / `waiting_local_directory` runs. `--siblings` widens the same read
