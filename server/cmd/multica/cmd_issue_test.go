@@ -2894,6 +2894,7 @@ func newIssueUpdateTestCmd() *cobra.Command {
 	cmd.Flags().Float64("position", 0, "")
 	cmd.Flags().Bool("no-start", false, "")
 	cmd.Flags().String("output", "json", "")
+	cmd.Flags().Int64("expected-revision", 0, "")
 	return cmd
 }
 
@@ -2904,6 +2905,7 @@ func newIssueAssignTestCmd() *cobra.Command {
 	cmd.Flags().Bool("unassign", false, "")
 	cmd.Flags().Bool("no-start", false, "")
 	cmd.Flags().String("output", "json", "")
+	cmd.Flags().Int64("expected-revision", 0, "")
 	return cmd
 }
 
@@ -2911,6 +2913,7 @@ func newIssueStatusTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "status"}
 	cmd.Flags().Bool("no-start", false, "")
 	cmd.Flags().String("output", "table", "")
+	cmd.Flags().Int64("expected-revision", 0, "")
 	return cmd
 }
 
