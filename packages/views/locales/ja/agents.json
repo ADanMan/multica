@@ -802,6 +802,7 @@
   },
   "task_failure": {
     "cancelled_by_system": "システムによってキャンセルされました",
+    "cancelled_by_actor": "{{name}} がキャンセル",
     "reasons": {
       "queued_expired": "キュー内で期限切れになりました",
       "runtime_offline": "デーモンがオフライン",
