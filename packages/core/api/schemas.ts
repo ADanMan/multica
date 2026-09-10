@@ -516,7 +516,7 @@ export const ListIssueStatusesResponseSchema = z.object({
 // to a server that predates this endpoint still has the canonical list.
 export const EMPTY_LIST_ISSUE_STATUSES_RESPONSE: ListIssueStatusesResponse = {
   statuses: [],
-  categories: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
+  categories: ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"],
   total: 0,
 };
 
@@ -1730,6 +1730,12 @@ const TaskAttributionSchema = z.object({
   rerun_of_task_id: z.string().optional(),
 }).loose();
 
+const TaskCancellationActorSchema = z.object({
+  type: z.string().default(""),
+  id: z.string().optional(),
+  name: z.string().optional(),
+}).loose();
+
 const OptionalStringArraySchema = z.preprocess(
   (value) =>
     Array.isArray(value) && value.every((item) => typeof item === "string")
@@ -1754,6 +1760,7 @@ const TaskUsageSchema = z.object({
 
 export const AgentTaskSchema = z.object({
   cancelled_by_comment_change: z.boolean().optional().catch(undefined),
+  cancelled_by: TaskCancellationActorSchema.optional().catch(undefined),
   id: z.string(),
   agent_id: z.string().default(""),
   runtime_id: z.string().default(""),
