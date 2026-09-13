@@ -296,8 +296,10 @@ var issueCommentAddCmd = &cobra.Command{
 var issueCommentDeleteCmd = &cobra.Command{
 	Use:   "delete <comment-id>",
 	Short: "Delete a comment",
-	Args:  exactArgs(1),
-	RunE:  runIssueCommentDelete,
+	Long: "Delete a single comment. Its replies are kept: a comment that has replies stays in the thread " +
+		"as an empty placeholder (deleted_at set) so they keep their place.",
+	Args: exactArgs(1),
+	RunE: runIssueCommentDelete,
 }
 
 var issueCommentResolveCmd = &cobra.Command{
@@ -372,8 +374,11 @@ var issueRunMessagesCmd = &cobra.Command{
 var issueUsageCmd = &cobra.Command{
 	Use:   "usage <issue-id>",
 	Short: "Show aggregated token usage for an issue",
-	Args:  exactArgs(1),
-	RunE:  runIssueUsage,
+	Long: "Show aggregated token usage for an issue.\n\n" +
+		"In table output, RUNS counts terminal runs. Token totals prefixed with >= " +
+		"are lower bounds because one or more terminal runs did not report usage.",
+	Args: exactArgs(1),
+	RunE: runIssueUsage,
 }
 
 var issueRerunCmd = &cobra.Command{
@@ -1962,6 +1967,7 @@ func fetchIssue(ctx context.Context, client *cli.APIClient, id string) (map[stri
 // workspace column.
 func fetchIssueColumn(ctx context.Context, client *cli.APIClient, workspaceID, projectID, status string) ([]map[string]any, error) {
 	var all []map[string]any
+	seen := make(map[string]struct{})
 	offset := 0
 	for {
 		params := url.Values{}
@@ -1978,15 +1984,31 @@ func fetchIssueColumn(ctx context.Context, client *cli.APIClient, workspaceID, p
 		if err := client.GetJSON(ctx, "/api/issues?"+params.Encode(), &result); err != nil {
 			return nil, err
 		}
-		page, _ := result["issues"].([]any)
-		for _, raw := range page {
-			if m, ok := raw.(map[string]any); ok {
-				all = append(all, m)
-			}
+		page, ok := result["issues"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid issue column response: expected an issues array")
 		}
-		total, _ := result["total"].(float64)
+		for _, raw := range page {
+			m, ok := raw.(map[string]any)
+			if !ok || strVal(m, "id") == "" {
+				return nil, fmt.Errorf("invalid issue in column response")
+			}
+			id := strVal(m, "id")
+			if _, exists := seen[id]; exists {
+				return nil, fmt.Errorf("issue column returned duplicate issue %s; retry the reorder", id)
+			}
+			seen[id] = struct{}{}
+			all = append(all, m)
+		}
+		total, totalOK := result["total"].(float64)
 		offset += len(page)
-		if len(page) == 0 || offset >= int(total) {
+		// Older servers substitute the page length when COUNT fails. Such a
+		// total cannot prove the column is complete. Without a usable count,
+		// read through the empty page, including when the server uses smaller
+		// pages; a short page does not establish its applied limit. Duplicate
+		// IDs above reject a repeated page before any position is written.
+		totalTrusted := totalOK && total > float64(len(page))
+		if len(page) == 0 || (totalTrusted && float64(offset) >= total) {
 			break
 		}
 	}
@@ -2176,6 +2198,10 @@ func runIssueCommentList(cmd *cobra.Command, args []string) error {
 	rows := make([][]string, 0, len(comments))
 	for _, c := range comments {
 		content := strVal(c, "content")
+		if strVal(c, "deleted_at") != "" {
+			// A deleted comment kept only so its replies stay attached.
+			content = "(deleted)"
+		}
 		if utf8.RuneCountInString(content) > 80 {
 			runes := []rune(content)
 			content = string(runes[:77]) + "..."
@@ -2284,7 +2310,16 @@ func runIssueCommentDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := cli.APIContext(context.Background())
 	defer cancel()
 
-	if err := client.DeleteJSON(ctx, "/api/comments/"+args[0]); err != nil {
+	// The keep-replies route exists only on servers that keep a deleted
+	// comment's replies. An older server does not route it — a plain-text 404,
+	// unlike the JSON "comment not found" — and would delete the replies too,
+	// so refuse there rather than fall back.
+	err = client.DeleteJSON(ctx, "/api/comments/"+args[0]+"/keep-replies")
+	var httpErr *cli.HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound && !strings.HasPrefix(httpErr.Body, "{") {
+		return fmt.Errorf("delete comment: this server would delete the comment's replies too; upgrade the server first")
+	}
+	if err != nil {
 		return fmt.Errorf("delete comment: %w", err)
 	}
 
@@ -2467,18 +2502,51 @@ func runIssueUsage(cmd *cobra.Command, args []string) error {
 		return cli.PrintJSON(os.Stdout, result)
 	}
 
-	// JSON numbers decode to float64; formatMetadataValue renders them as clean
-	// integers (no scientific notation for large cache-token counts).
-	headers := []string{"INPUT_TOKENS", "OUTPUT_TOKENS", "CACHE_READ", "CACHE_WRITE", "RUNS"}
+	terminal, hasTerminal := result["terminal_task_count"]
+	metered, hasMetered := result["metered_task_count"]
+	unreported, hasUnreported := result["unreported_task_count"]
+	if !hasTerminal {
+		terminal = result["task_count"]
+	}
+	if !hasMetered {
+		metered = result["task_count"]
+	}
+	if !hasUnreported {
+		unreported = "—"
+	}
+	usageRows := result["task_count"]
+
+	// JSON numbers decode to float64; formatIssueUsageTokens and
+	// formatMetadataValue render them as clean integers (no scientific
+	// notation for large cache-token counts).
+	headers := []string{"INPUT_TOKENS", "OUTPUT_TOKENS", "CACHE_READ", "CACHE_WRITE", "RUNS", "METERED_RUNS", "UNREPORTED"}
 	rows := [][]string{{
-		formatMetadataValue(result["total_input_tokens"]),
-		formatMetadataValue(result["total_output_tokens"]),
-		formatMetadataValue(result["total_cache_read_tokens"]),
-		formatMetadataValue(result["total_cache_write_tokens"]),
-		formatMetadataValue(result["task_count"]),
+		formatIssueUsageTokens(result["total_input_tokens"], terminal, metered, usageRows, hasTerminal && hasMetered),
+		formatIssueUsageTokens(result["total_output_tokens"], terminal, metered, usageRows, hasTerminal && hasMetered),
+		formatIssueUsageTokens(result["total_cache_read_tokens"], terminal, metered, usageRows, hasTerminal && hasMetered),
+		formatIssueUsageTokens(result["total_cache_write_tokens"], terminal, metered, usageRows, hasTerminal && hasMetered),
+		formatMetadataValue(terminal),
+		formatMetadataValue(metered),
+		formatMetadataValue(unreported),
 	}}
 	cli.PrintTable(os.Stdout, headers, rows)
 	return nil
+}
+
+func formatIssueUsageTokens(value, terminal, metered, usageRows any, coverageKnown bool) string {
+	if !coverageKnown {
+		return formatMetadataValue(value)
+	}
+	terminalCount, terminalOK := terminal.(float64)
+	meteredCount, meteredOK := metered.(float64)
+	if !terminalOK || !meteredOK || terminalCount <= meteredCount {
+		return formatMetadataValue(value)
+	}
+	usageRowCount, usageRowsOK := usageRows.(float64)
+	if meteredCount == 0 && usageRowsOK && usageRowCount == 0 {
+		return "—"
+	}
+	return ">=" + formatMetadataValue(value)
 }
 
 func runIssueRunMessages(cmd *cobra.Command, args []string) error {
