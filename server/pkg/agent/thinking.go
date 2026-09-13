@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"sync"
@@ -306,7 +307,7 @@ const (
 )
 
 // codexDebugModelsResponse mirrors the JSON shape emitted by
-// `codex debug models --bundled` (Codex 0.122.0+). Only the fields we
+// `codex debug models` (Codex 0.122.0+). Only the fields we
 // consume are typed; unknown keys are ignored.
 type codexDebugModelsResponse struct {
 	Models []codexDebugModel `json:"models"`
@@ -332,32 +333,46 @@ type codexDebugServiceTier struct {
 	Description string `json:"description"`
 }
 
-// discoverCodexModels returns the installed Codex binary's bundled visible
+// discoverCodexModels returns the installed Codex binary's effective visible
 // catalog, including reasoning metadata. Version detection happens before the
 // debug command so old binaries do not log a predictable "unknown command"
 // failure on every cache refresh.
-func discoverCodexModels(ctx context.Context, cmd Command) []Model {
+//
+// Every path that could not read the effective catalog — an unknown version, a
+// too-old binary, a failed/timed-out debug call, or an empty/malformed payload
+// — returns codexStaticModels marked Catalog.Fallback. That flag is what keeps
+// the daemon's 60s discovery cache and the server's last-known-good catalog
+// from pinning a transient discovery failure as authoritative, and what lets
+// the execution-time validators preserve a configured override for a model the
+// static stand-in does not contain (#8205 review). Dropping --bundled made this
+// remote-refresh failure materially more likely, so the distinction matters.
+func discoverCodexModels(ctx context.Context, cmd Command) Catalog {
 	if cmd.Path == "" {
 		cmd.Path = "codex"
 	}
 	version, err := DetectVersion(ctx, cmd)
 	if err != nil {
-		return codexStaticModels()
+		// Version unknown, so explicit-standard support cannot be annotated.
+		return Catalog{Models: codexStaticModels(), Fallback: true}
 	}
 	supportsExplicitStandard := codexSupportsExplicitStandardServiceTier(version)
+	fallback := Catalog{
+		Models:   annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard),
+		Fallback: true,
+	}
 	if !codexSupportsDebugModels(version) {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+		return fallback
 	}
 
 	raw, err := runCodexDebugModels(ctx, cmd)
 	if err != nil {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+		return fallback
 	}
 	models, err := parseCodexModelCatalog(raw)
 	if err != nil || len(models) == 0 {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+		return fallback
 	}
-	return annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)
+	return Catalog{Models: annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)}
 }
 
 func codexSupportsDebugModels(version string) bool {
@@ -642,6 +657,15 @@ func parseACPCodebuddyEffort(raw json.RawMessage) (levels []string, defaultLevel
 
 // ── Shared validation ────────────────────────────────────────────────
 
+// errCatalogUnavailable reports that discovery fell back to a static catalog,
+// so a selection the fallback does not contain cannot be judged unsupported.
+// The Validate*With functions return it for an EXPLICIT model that is absent
+// from a Catalog.Fallback list; the daemon treats it like any other catalog
+// lookup failure and passes the persisted override through rather than dropping
+// it. Discovery being merely unavailable must not silently discard a configured
+// custom model's thinking_level / service_tier (#8205 review).
+var errCatalogUnavailable = errors.New("agent: model catalog unavailable (discovery fell back to static)")
+
 // catalogLoader adapts the ambient ListModels call into the lazy loader the
 // Validate*With functions take, so the ctx-based entry points stay one line.
 func catalogLoader(ctx context.Context, providerType string, cmd Command) func() (Catalog, error) {
@@ -748,6 +772,17 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 		}
 		return false, nil
 	}
+	// The explicit model is absent from the catalog. For codex on a fallback
+	// catalog that absence means discovery was unavailable, not that the runtime
+	// rejects the model — the effective model_catalog_json may well define it
+	// with this level, and the static stand-in cannot contain custom entries.
+	// Route through the lookup-unavailable path so the daemon preserves the
+	// override instead of dropping it. Other providers' static fallbacks are
+	// curated authoritative lists, so "not found" there still fails closed, as
+	// does a real (non-fallback) codex catalog. (#8205 review.)
+	if catalog.Fallback && providerType == "codex" {
+		return false, errCatalogUnavailable
+	}
 	return false, nil
 }
 
@@ -795,6 +830,13 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 			}
 		}
 		return false, nil
+	}
+	// Explicit model absent from the catalog: same reasoning as
+	// ValidateThinkingLevelWith — a fallback catalog cannot prove the tier
+	// unsupported, so preserve a configured override rather than dropping it,
+	// while a real catalog still fails closed. (#8205 review.)
+	if catalog.Fallback {
+		return false, errCatalogUnavailable
 	}
 	return false, nil
 }

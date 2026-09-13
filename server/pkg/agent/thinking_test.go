@@ -350,11 +350,14 @@ echo '{"models":[{"slug":"runtime-model","display_name":"Runtime Model","visibil
 		writeTestExecutable(t, fake, []byte(script))
 
 		got := discoverCodexModels(context.Background(), Command{Path: fake})
-		if len(got) != 1 || got[0].ID != "runtime-model" || got[0].Thinking == nil || !hasThinkingLevel(got[0].Thinking, "high") {
-			t.Fatalf("expected runtime catalog, got %+v", got)
+		if got.Fallback {
+			t.Fatalf("a live discovered catalog must not be marked Fallback: %+v", got)
 		}
-		if got[0].SupportsExplicitStandardServiceTier {
-			t.Fatalf("Codex 0.122.0 must not advertise explicit-standard support: %+v", got[0])
+		if len(got.Models) != 1 || got.Models[0].ID != "runtime-model" || got.Models[0].Thinking == nil || !hasThinkingLevel(got.Models[0].Thinking, "high") {
+			t.Fatalf("expected runtime catalog, got %+v", got.Models)
+		}
+		if got.Models[0].SupportsExplicitStandardServiceTier {
+			t.Fatalf("Codex 0.122.0 must not advertise explicit-standard support: %+v", got.Models[0])
 		}
 	})
 
@@ -367,11 +370,14 @@ echo '{"models":[{"slug":"runtime-model","display_name":"Runtime Model","visibil
 		writeTestExecutable(t, fake, []byte(script))
 
 		got := discoverCodexModels(context.Background(), Command{Path: fake})
-		if len(got) == 0 || got[0].ID != "gpt-5.6-sol" {
-			t.Fatalf("expected static fallback, got %+v", got)
+		if !got.Fallback {
+			t.Fatalf("a static answer after discovery was unavailable must be marked Fallback: %+v", got)
 		}
-		if got[0].SupportsExplicitStandardServiceTier {
-			t.Fatalf("old Codex must not advertise explicit-standard support: %+v", got[0])
+		if len(got.Models) == 0 || got.Models[0].ID != "gpt-5.6-sol" {
+			t.Fatalf("expected static fallback, got %+v", got.Models)
+		}
+		if got.Models[0].SupportsExplicitStandardServiceTier {
+			t.Fatalf("old Codex must not advertise explicit-standard support: %+v", got.Models[0])
 		}
 	})
 
@@ -384,11 +390,14 @@ echo '{"models":[{"slug":"runtime-model","display_name":"Runtime Model","visibil
 		writeTestExecutable(t, fake, []byte(script))
 
 		got := discoverCodexModels(context.Background(), Command{Path: fake})
-		if len(got) == 0 || got[0].ID != "gpt-5.6-sol" || got[0].Thinking == nil {
-			t.Fatalf("expected model + thinking fallback, got %+v", got)
+		if !got.Fallback {
+			t.Fatalf("a static answer after the debug call failed must be marked Fallback: %+v", got)
 		}
-		if !got[0].SupportsExplicitStandardServiceTier {
-			t.Fatalf("supported Codex version must retain explicit-standard capability through catalog fallback: %+v", got[0])
+		if len(got.Models) == 0 || got.Models[0].ID != "gpt-5.6-sol" || got.Models[0].Thinking == nil {
+			t.Fatalf("expected model + thinking fallback, got %+v", got.Models)
+		}
+		if !got.Models[0].SupportsExplicitStandardServiceTier {
+			t.Fatalf("supported Codex version must retain explicit-standard capability through catalog fallback: %+v", got.Models[0])
 		}
 	})
 }
@@ -493,6 +502,93 @@ func readFileString(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// TestListModelsCodexFallbackNotCachedThenRecovers pins the #8205 review's
+// first issue: a failed Codex discovery must report Catalog.Fallback and must
+// NOT be pinned in the 60s discovery cache, so the next successful poll is not
+// masked by the static stand-in. The stand-in codex fails its first
+// `debug models` (forcing a fallback) and returns a live catalog afterwards.
+func TestListModelsCodexFallbackNotCachedThenRecovers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake binary requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	counter := filepath.Join(dir, "n.txt")
+	// --version always succeeds. `debug models` fails once (n<=1) then serves a
+	// live catalog. The version probe returns before the counter so it never
+	// consumes an invocation.
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = \"--version\" ]; then echo 'codex-cli 0.144.1'; exit 0; fi\n" +
+		"done\n" +
+		"n=$(cat '" + counter + "' 2>/dev/null || echo 0)\n" +
+		"n=$((n+1))\n" +
+		"echo \"$n\" > '" + counter + "'\n" +
+		"if [ \"$n\" -le 1 ]; then exit 1; fi\n" +
+		"echo '{\"models\":[{\"slug\":\"runtime-model\",\"visibility\":\"list\",\"default_reasoning_level\":\"high\",\"supported_reasoning_levels\":[{\"effort\":\"high\"}]}]}'\n"
+	writeTestExecutable(t, fake, []byte(script))
+
+	hasModel := func(c Catalog, id string) bool {
+		for _, m := range c.Models {
+			if m.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	first, err := ListModels(context.Background(), "codex", Command{Path: fake})
+	if err != nil {
+		t.Fatalf("ListModels (failed discovery): %v", err)
+	}
+	if !first.Fallback {
+		t.Fatalf("a failed discovery must report Fallback=true, got %+v", first)
+	}
+	if hasModel(first, "runtime-model") {
+		t.Fatalf("expected the static fallback, got the live catalog: %+v", first.Models)
+	}
+
+	second, err := ListModels(context.Background(), "codex", Command{Path: fake})
+	if err != nil {
+		t.Fatalf("ListModels (recovery): %v", err)
+	}
+	if second.Fallback {
+		t.Fatalf("the recovered live catalog must not be Fallback, got %+v", second)
+	}
+	if !hasModel(second, "runtime-model") {
+		t.Fatalf("the static fallback was cached and masked the recovered catalog: %+v", second.Models)
+	}
+}
+
+// TestValidateCodexCustomModelSurvivesFallback pins the #8205 review's second
+// issue: when discovery is merely unavailable (here, a missing binary → static
+// fallback), a configured thinking_level / service_tier for a custom model that
+// exists only in the effective model_catalog_json must be PRESERVED rather than
+// dropped. The validators signal that by returning an error (lookup
+// unavailable), which the daemon treats as "pass the override through". An
+// empty Codex model still fails closed.
+func TestValidateCodexCustomModelSurvivesFallback(t *testing.T) {
+	t.Parallel()
+	cmd := Command{Path: "/nonexistent/codex"} // discovery fails → static fallback
+
+	if ok, err := ValidateThinkingLevel(context.Background(), "codex", cmd, "gateway/custom-codex", "high"); err == nil {
+		t.Errorf("custom-model thinking_level on a fallback catalog must report lookup-unavailable so the override survives, got ok=%v err=nil", ok)
+	}
+	if ok, err := ValidateServiceTier(context.Background(), "codex", cmd, "gateway/custom-codex", "priority"); err == nil {
+		t.Errorf("custom-model service_tier on a fallback catalog must report lookup-unavailable so the override survives, got ok=%v err=nil", ok)
+	}
+
+	// Fail-closed for an empty Codex model is preserved: no catalog can know
+	// which model config.toml resolves to, so the override is dropped (false,nil),
+	// never passed through.
+	if ok, err := ValidateThinkingLevel(context.Background(), "codex", cmd, "", "high"); ok || err != nil {
+		t.Errorf("empty codex model must fail closed (false,nil), got ok=%v err=%v", ok, err)
+	}
+	if ok, err := ValidateServiceTier(context.Background(), "codex", cmd, "", "priority"); ok || err != nil {
+		t.Errorf("empty codex model service_tier must fail closed (false,nil), got ok=%v err=%v", ok, err)
+	}
 }
 
 func TestValidateThinkingLevelCodexPerModelFallbackCatalog(t *testing.T) {
