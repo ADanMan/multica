@@ -14,6 +14,7 @@ import {
   EMPTY_LIST_TELEGRAM_INSTALLATIONS_RESPONSE,
   EMPTY_REDEEM_TELEGRAM_BINDING_TOKEN_RESPONSE,
   AgentTaskListSchema,
+  TaskMessageListSchema,
   AutopilotQuotaUsageSchema,
   AutopilotRunSchema,
   FALLBACK_AUTOPILOT_RUN,
@@ -478,14 +479,14 @@ describe("IssueTriggerPreviewSchema", () => {
   it("parses a well-formed response", () => {
     const parsed = IssueTriggerPreviewSchema.parse({
       triggers: [
-        { issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true },
-        { issue_id: "i2", agent_id: "a2", source: "status", handoff_supported: false },
+        { issue_id: "i1", agent_id: "a1", source: "assign" },
+        { issue_id: "i2", agent_id: "a2", source: "status" },
       ],
       total_count: 2,
     });
     expect(parsed.total_count).toBe(2);
     expect(parsed.triggers).toHaveLength(2);
-    expect(parsed.triggers[0]).toMatchObject({ issue_id: "i1", agent_id: "a1", source: "assign", handoff_supported: true });
+    expect(parsed.triggers[0]).toMatchObject({ issue_id: "i1", agent_id: "a1", source: "assign" });
   });
 
   it("defaults missing top-level fields (empty / older backend)", () => {
@@ -500,7 +501,6 @@ describe("IssueTriggerPreviewSchema", () => {
       issue_id: "i1",
       agent_id: "",
       source: "",
-      handoff_supported: false,
     });
   });
 
@@ -557,9 +557,80 @@ describe("TimelineEntriesSchema", () => {
 
     expect(parsed[0]?.source_task_id).toBe("task-1");
   });
+
+  it("preserves server-hydrated historical actor identity", () => {
+    const parsed = TimelineEntriesSchema.parse([
+      {
+        type: "comment",
+        id: "comment-1",
+        actor_type: "member",
+        actor_id: "former-user-1",
+        actor_name: "Former Member",
+        actor_avatar_url: "https://profiles.example.com/former.png",
+        created_at: "2026-01-01T00:00:00Z",
+        content: "Authored before leaving",
+      },
+    ]);
+
+    expect(parsed[0]?.actor_name).toBe("Former Member");
+    expect(parsed[0]?.actor_avatar_url).toBe(
+      "https://profiles.example.com/former.png",
+    );
+  });
+
+  it("preserves the deleted-comment tombstone marker", () => {
+    const parsed = TimelineEntriesSchema.parse([
+      {
+        type: "comment",
+        id: "comment-1",
+        actor_type: "member",
+        actor_id: "user-1",
+        created_at: "2026-01-01T00:00:00Z",
+        content: "",
+        deleted_at: "2026-01-02T00:00:00Z",
+      },
+    ]);
+
+    expect(parsed[0]?.deleted_at).toBe("2026-01-02T00:00:00Z");
+  });
+
+  it("reads a malformed tombstone marker as a live comment instead of failing the timeline", () => {
+    const parsed = TimelineEntriesSchema.parse([
+      {
+        type: "comment",
+        id: "comment-1",
+        actor_type: "member",
+        actor_id: "user-1",
+        created_at: "2026-01-01T00:00:00Z",
+        content: "still here",
+        deleted_at: 42,
+      },
+    ]);
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.deleted_at).toBeUndefined();
+  });
 });
 
 describe("AgentTaskListSchema", () => {
+  it.each([true, false, undefined, null, "true", 1])("safely parses comment cancellation metadata: %s", (value) => {
+    const parsed = AgentTaskListSchema.parse([{ id: "run", cancelled_by_comment_change: value }]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.cancelled_by_comment_change).toBe(typeof value === "boolean" ? value : undefined);
+  });
+
+  it("parses cancellation actor metadata without making it required", () => {
+    const parsed = AgentTaskListSchema.parse([
+      { id: "new", cancelled_by: { type: "member", id: "user-1", name: "Jiayuan" } },
+      { id: "legacy" },
+      { id: "malformed", cancelled_by: "member" },
+    ]);
+
+    expect(parsed[0]?.cancelled_by).toEqual({ type: "member", id: "user-1", name: "Jiayuan" });
+    expect(parsed[1]?.cancelled_by).toBeUndefined();
+    expect(parsed[2]?.cancelled_by).toBeUndefined();
+  });
+
   const task = {
     id: "task-1",
     agent_id: "agent-1",
@@ -1037,6 +1108,34 @@ describe("dashboard + runtime usage schema drift", () => {
     ).toBe(0);
   });
 
+  it("preserves optional usage coverage without rejecting older or malformed rows", () => {
+    const parsed = DashboardAgentRunTimeListSchema.parse([
+      {
+        agent_id: "new-server",
+        total_seconds: 42,
+        task_count: 3,
+        metered_task_count: 2,
+        failed_count: 0,
+      },
+      {
+        agent_id: "old-server",
+        total_seconds: 42,
+        task_count: 3,
+        failed_count: 0,
+      },
+      {
+        agent_id: "drifted-server",
+        total_seconds: 42,
+        task_count: 3,
+        metered_task_count: "not-a-number",
+        failed_count: 0,
+      },
+    ]);
+    expect(parsed[0]?.metered_task_count).toBe(2);
+    expect(parsed[1]?.metered_task_count).toBeUndefined();
+    expect(parsed[2]?.metered_task_count).toBeUndefined();
+  });
+
   it("coerces a missing agent_id key to \"\" for the usage-by-agent panel", () => {
     const parsed = DashboardUsageByAgentListSchema.parse([
       { model: "claude-opus-4-7", input_tokens: 7 },
@@ -1121,6 +1220,23 @@ describe("dashboard + runtime usage schema drift", () => {
 // it does not reject the mode either — it drops execution_mode and answers 201,
 // leaving the task to run in the user's working copy (#7113). So the absent
 // case has to parse as false, not as "unknown, probably fine".
+// An older server deletes a comment's replies with it and omits this field,
+// so absent or malformed must parse as false: the client then promises nothing
+// about replies and keeps the legacy delete route (#8296).
+describe("AppConfigSchema comment_delete_keep_replies_supported drift", () => {
+  it.each([
+    [undefined, false],
+    ["yes", false],
+    [true, true],
+  ])("%j parses as %s", (value, expected) => {
+    const parsed = AppConfigSchema.parse({
+      cdn_domain: "cdn.example.com",
+      comment_delete_keep_replies_supported: value,
+    });
+    expect(parsed.comment_delete_keep_replies_supported).toBe(expected);
+  });
+});
+
 describe("AppConfigSchema local_worktree_supported drift", () => {
   it("defaults to false when the server predates the signal", () => {
     const parsed = AppConfigSchema.parse({ cdn_domain: "cdn.example.com" });
@@ -1537,6 +1653,7 @@ describe("RuntimeModelListRequestSchema", () => {
           default_level: "low",
         },
         service_tiers: [{ id: "fast", name: "Fast" }],
+        supports_explicit_standard_service_tier: true,
       },
     ],
   };
@@ -1555,6 +1672,9 @@ describe("RuntimeModelListRequestSchema", () => {
       { value: "high", label: "High" },
     ]);
     expect(parsed.models?.[0]?.service_tiers).toEqual([{ id: "fast", name: "Fast" }]);
+    expect(
+      parsed.models?.[0]?.supports_explicit_standard_service_tier,
+    ).toBe(true);
     expect(parsed.cached).toBeUndefined();
   });
 
@@ -1584,6 +1704,66 @@ describe("RuntimeModelListRequestSchema", () => {
     expect(parsed.cached).toBeUndefined();
   });
 
+  // MUL-6961: models the runtime cannot run arrive in their OWN list. The
+  // separation is the compatibility contract — a client that never learned the
+  // field reads `models` and therefore cannot offer one — so the schema must
+  // keep them apart rather than folding them together.
+  it("parses unavailable models without letting them into the selectable list", () => {
+    const parsed = parseWithFallback(
+      {
+        ...completed,
+        unavailable_models: [
+          {
+            id: "cc-update-required-1",
+            label: "Fable 5.1 (disabled)",
+            reason: "Update to 2.1.255+ to use Fable 5.1",
+          },
+        ],
+      },
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.unavailable_models?.[0]?.id).toBe("cc-update-required-1");
+    expect(parsed.unavailable_models?.[0]?.reason).toBe(
+      "Update to 2.1.255+ to use Fable 5.1",
+    );
+    expect(parsed.models?.map((m) => m.id)).not.toContain(
+      "cc-update-required-1",
+    );
+  });
+
+  // An older daemon or server sends no such key. The picker then shows no
+  // unavailable section, which is exactly the pre-MUL-6961 behaviour.
+  it("tolerates a backend that omits unavailable models entirely", () => {
+    const parsed = parseWithFallback(
+      completed,
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+    expect(parsed.unavailable_models).toBeUndefined();
+    expect(parsed.models?.length).toBe(1);
+  });
+
+  it("treats an older daemon that omits explicit-standard support as unsupported", () => {
+    const model = completed.models[0]!;
+    const {
+      supports_explicit_standard_service_tier: _omitted,
+      ...oldDaemonModel
+    } = model;
+    const parsed = parseWithFallback(
+      { ...completed, models: [oldDaemonModel] },
+      RuntimeModelListRequestSchema,
+      MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
+      { endpoint: "test" },
+    );
+
+    expect(
+      parsed.models?.[0]?.supports_explicit_standard_service_tier,
+    ).toBeUndefined();
+  });
+
   it("passes an unknown status through instead of failing the whole response", () => {
     const parsed = parseWithFallback(
       { ...completed, status: "superseded" },
@@ -1608,6 +1788,15 @@ describe("RuntimeModelListRequestSchema", () => {
       { ...completed, supported: "yes" },
       { ...completed, models: "nope" },
       { ...completed, models: [{ label: "no id" }] },
+      {
+        ...completed,
+        models: [
+          {
+            ...completed.models[0],
+            supports_explicit_standard_service_tier: "yes",
+          },
+        ],
+      },
     ]) {
       const parsed = parseWithFallback(
         malformed,
@@ -1945,7 +2134,7 @@ describe("issue status catalog schemas", () => {
   it("parses a full catalog response", () => {
     const parsed = ListIssueStatusesResponseSchema.parse({
       statuses: [baseStatus],
-      categories: ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"],
+      categories: ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"],
       total: 1,
     });
     expect(parsed.statuses[0]?.key).toBe("human_review");
@@ -2009,5 +2198,67 @@ describe("issue status catalog schemas", () => {
       { endpoint: "POST /api/issue-statuses" },
     );
     expect(parsed).toEqual(EMPTY_ISSUE_STATUS_ENTRY);
+  });
+});
+
+describe("TaskMessageListSchema", () => {
+  const row = { task_id: "task-1", issue_id: "issue-1", seq: 1, type: "tool_result", output: "log line" };
+
+  // The whole point of the field: a server that never sends it is saying
+  // "nobody measured this", and only `undefined` can carry that. A default of
+  // false would make every historical row assert it is complete.
+  it("leaves a missing truncation flag undefined rather than false", () => {
+    const parsed = TaskMessageListSchema.parse([row]);
+    expect(parsed[0]).not.toHaveProperty("output_truncated", false);
+    expect(parsed[0]?.output_truncated).toBeUndefined();
+  });
+
+  it("keeps both measured values", () => {
+    const parsed = TaskMessageListSchema.parse([
+      { ...row, seq: 1, output_truncated: true },
+      { ...row, seq: 2, output_truncated: false },
+    ]);
+    expect(parsed.map((m) => m.output_truncated)).toEqual([true, false]);
+  });
+
+  // Drift defense. Without a field-level catch, one bad boolean fails its row,
+  // the array fails with it, and parseWithFallback hands the viewer an empty
+  // transcript — a malformed flag would delete the whole run from the screen.
+  // Degrading the field to "unknown" is the correct loss.
+  it("keeps the record and forgets the field when the flag is malformed", () => {
+    const parsed = parseWithFallback<{ output?: string; output_truncated?: boolean }[]>(
+      [{ ...row, output_truncated: "false" }],
+      TaskMessageListSchema,
+      [],
+      { endpoint: "GET /api/tasks/:id/messages" },
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.output).toBe("log line");
+    expect(parsed[0]?.output_truncated).toBeUndefined();
+  });
+
+  it("keeps the surrounding rows when one row's flag is malformed", () => {
+    const parsed = TaskMessageListSchema.parse([
+      { ...row, seq: 1, output_truncated: true },
+      { ...row, seq: 2, output_truncated: 12345 },
+      { ...row, seq: 3, output_truncated: false },
+    ]);
+    expect(parsed.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(parsed.map((m) => m.output_truncated)).toEqual([true, undefined, false]);
+  });
+
+  it("falls back to an empty transcript when the response is not a list", () => {
+    const parsed = parseWithFallback(
+      { messages: "nope" },
+      TaskMessageListSchema,
+      [],
+      { endpoint: "GET /api/tasks/:id/messages" },
+    );
+    expect(parsed).toEqual([]);
+  });
+
+  it("downgrades an unknown message type instead of dropping the transcript", () => {
+    const parsed = TaskMessageListSchema.parse([{ ...row, type: "video" }]);
+    expect(parsed[0]?.type).toBe("text");
   });
 });

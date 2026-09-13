@@ -258,10 +258,11 @@ func TestClaimTasks_AcknowledgementPresenceOverTheWire(t *testing.T) {
 
 			c := NewClient(srv.URL)
 			c.SetToken("tok")
-			_, acknowledged, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt1"}, 1, "rt1")
+			result, err := c.claimTasksWithHints(context.Background(), "daemon-x", []string{"rt1"}, 1, "rt1")
 			if err != nil {
-				t.Fatalf("ClaimTasks: %v", err)
+				t.Fatalf("claimTasksWithHints: %v", err)
 			}
+			acknowledged := result.ForceRecheckedRuntimeIDs
 			if tc.present != (acknowledged != nil) {
 				t.Fatalf("acknowledged presence = %v, want %v (body %s)", acknowledged != nil, tc.present, tc.body)
 			}

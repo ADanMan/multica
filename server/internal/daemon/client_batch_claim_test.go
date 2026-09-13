@@ -6,7 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks verifies the machine-level
@@ -15,6 +18,7 @@ import (
 // each task's runtime_id so the daemon can route it locally.
 func TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks(t *testing.T) {
 	var gotPath string
+	var gotCapabilities string
 	var gotBody struct {
 		DaemonID   string   `json:"daemon_id"`
 		RuntimeIDs []string `json:"runtime_ids"`
@@ -23,6 +27,7 @@ func TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotCapabilities = r.Header.Get("X-Client-Capabilities")
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &gotBody)
 		w.Header().Set("Content-Type", "application/json")
@@ -36,13 +41,16 @@ func TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks(t *testing.T) {
 	c := NewClient(srv.URL)
 	c.SetToken("tok")
 
-	tasks, _, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a", "rt-b", "rt-c"}, 3)
+	tasks, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a", "rt-b", "rt-c"}, 3)
 	if err != nil {
 		t.Fatalf("ClaimTasks: %v", err)
 	}
 
 	if gotPath != "/api/daemon/tasks/claim" {
 		t.Errorf("path = %q, want /api/daemon/tasks/claim", gotPath)
+	}
+	if strings.Contains(gotCapabilities, protocol.DaemonCapabilityClaimPollHintsV1) {
+		t.Errorf("HTTP capabilities = %q, unexpectedly advertise WS-only %q", gotCapabilities, protocol.DaemonCapabilityClaimPollHintsV1)
 	}
 	if gotBody.DaemonID != "daemon-x" {
 		t.Errorf("posted daemon_id = %q, want daemon-x", gotBody.DaemonID)
@@ -61,6 +69,24 @@ func TestClient_ClaimTasks_PostsRuntimeSetAndParsesTasks(t *testing.T) {
 	}
 }
 
+func TestClient_ClaimTasksWithHints_ParsesSchedulingMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"tasks":[],"claim_poll_hint_supported":true,"next_deferred_task_after_ms":4750}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	c.SetToken("tok")
+	result, err := c.claimTasksWithHints(context.Background(), "daemon-x", []string{"rt-a"}, 1)
+	if err != nil {
+		t.Fatalf("claimTasksWithHints: %v", err)
+	}
+	if !result.ClaimPollHintSupported || result.NextDeferredTaskAfterMillis != 4750 {
+		t.Fatalf("result = %+v, want supported hint after 4750ms", result)
+	}
+}
+
 // TestClient_ClaimTasks_EmptyResult confirms an empty batch (idle daemon) is
 // returned as a nil/empty slice, not an error.
 func TestClient_ClaimTasks_EmptyResult(t *testing.T) {
@@ -73,7 +99,7 @@ func TestClient_ClaimTasks_EmptyResult(t *testing.T) {
 	c := NewClient(srv.URL)
 	c.SetToken("tok")
 
-	tasks, _, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a"}, 1)
+	tasks, err := c.ClaimTasks(context.Background(), "daemon-x", []string{"rt-a"}, 1)
 	if err != nil {
 		t.Fatalf("ClaimTasks: %v", err)
 	}

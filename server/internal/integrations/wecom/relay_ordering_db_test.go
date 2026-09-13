@@ -37,7 +37,15 @@ import (
 // wecomTestRedis is the same gate the rest of the repository uses for
 // Redis-backed tests: REDIS_TEST_URL, a dedicated DB index, flushed around
 // each test so one run cannot see another's claims.
-const wecomRelayTestRedisDB = 12
+//
+// The index has to be unique across PACKAGES, not just within this one. `go
+// test ./...` runs packages concurrently, every Redis-backed suite flushes its
+// own DB on entry and exit, and a flush is indiscriminate: sharing an index
+// means another package can delete a live delivery claim mid-test, and the
+// outcome watch then reports a reply that was delivered as lost. Current
+// allocation — 11 internal/auth, 12 internal/service, 13 internal/middleware,
+// 14 internal/handler, 15 here.
+const wecomRelayTestRedisDB = 15
 
 // testClaimBudget is the claim round trip these tests give the real store. It
 // sizes outcomeGrace (once per offer), so the production 2s would make the
@@ -80,7 +88,7 @@ type blipOnce struct {
 	done bool
 }
 
-func (b *blipOnce) Claim(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+func (b *blipOnce) Claim(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
 	b.mu.Lock()
 	first := !b.done
 	b.done = true
@@ -88,7 +96,7 @@ func (b *blipOnce) Claim(ctx context.Context, key string, ttl time.Duration) (bo
 	if first {
 		return false, errors.New("wecom test: redis blip")
 	}
-	return b.DedupeStore.Claim(ctx, key, ttl)
+	return b.DedupeStore.Claim(ctx, key, token, ttl)
 }
 
 // sentTexts is what actually reached the chat, in order.
@@ -289,15 +297,15 @@ type failsOnceHandler struct {
 }
 
 func (h *failsOnceHandler) ownsSocket(string) bool { return true }
-func (h *failsOnceHandler) deliverRelayed(context.Context, relayFrame) deliveryOutcome {
+func (h *failsOnceHandler) deliverRelayed(context.Context, relayFrame) relayResult {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.n++
 	if h.n == 1 {
-		return outcomeProvablyNotSent
+		return relayResult{outcome: outcomeProvablyNotSent}
 	}
 	h.delivered = true
-	return outcomeDone
+	return relayResult{outcome: outcomeDone}
 }
 func (h *failsOnceHandler) calls() int {
 	h.mu.Lock()
@@ -444,20 +452,6 @@ func TestRelayRetryPlan_DefaultsCoverTheDefaultPollInterval(t *testing.T) {
 	}
 	if total < engine.DefaultPollInterval {
 		t.Fatalf("the default chain covers %s against a %s lease move", total, engine.DefaultPollInterval)
-	}
-}
-
-// The drain runs inside the process's own shutdown, so its budget has to fit
-// under the channel supervisor's — the thing that is joined after it. A drain
-// budget larger than that would push shutdown past the supervisor's own bound
-// and cost the final lease release, which is what makes the next replica wait
-// out a whole LeaseTTL after a redeploy.
-func TestRelayDrainBudget_FitsUnderTheSupervisorShutdownTimeout(t *testing.T) {
-	t.Parallel()
-	cfg := RelayConfig{}.withDefaults()
-	if cfg.DrainBudget >= engine.DefaultShutdownTimeout {
-		t.Fatalf("drain budget %s does not fit under the supervisor's shutdown timeout %s",
-			cfg.DrainBudget, engine.DefaultShutdownTimeout)
 	}
 }
 

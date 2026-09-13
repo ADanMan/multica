@@ -115,8 +115,8 @@ func (d *Daemon) runTaskWakeupConnection(ctx context.Context, runtimeIDs []strin
 	if d.client.os != "" {
 		headers.Set("X-Client-OS", d.client.os)
 	}
-	// Advertise the same capabilities as the HTTP path so a claim built over
-	// this WS connection gets identical capability gating (MUL-4257).
+	// WS claims use the common capabilities plus scheduling hints that only the
+	// healthy-connection poller can consume.
 	headers.Set("X-Client-Capabilities", daemonClientCapabilities())
 
 	// A hand-built websocket.Dialer has Proxy == nil, which gorilla reads as
@@ -148,9 +148,10 @@ func (d *Daemon) runTaskWakeupConnection(ctx context.Context, runtimeIDs []strin
 	// the workspace sync loop park on coarse tickers (5s and 30s) that do not
 	// observe the wakeup channel, so anything the server changed during the
 	// WS gap — task cancellation or runtime updates — stays invisible to
-	// them until the next tick. Repository bindings and workspace settings
-	// refresh when a checkout needs them. The reconcile broadcaster nudges
-	// those loops to re-check immediately. broadcast() debounces back-to-back
+	// them until the next tick. The reconcile broadcaster nudges those loops to
+	// re-check immediately — including workspace settings, which the sync loop
+	// re-reads for tracked workspaces on reconcile precisely because a settings
+	// edit made during the gap left no hint behind (MUL-6921). broadcast() debounces back-to-back
 	// calls so a flapping connection cannot fan out into a request stampede.
 	if d.reconcile != nil {
 		d.reconcile.broadcast()
@@ -231,6 +232,10 @@ func (d *Daemon) runTaskWakeupConnection(ctx context.Context, runtimeIDs []strin
 		// frame will be dropped), and flip the send-closed flag under sendMu so
 		// any in-flight guarded send finishes before we close writes.
 		d.wsRPC.attach(nil)
+		// A healthy WS connection lets the claim poller use a longer fallback
+		// interval. Wake it as soon as the connection drops so it immediately
+		// observes the detach and resumes the configured HTTP cadence.
+		d.signalTaskWakeup(taskWakeups, "")
 		sendMu.Lock()
 		sendClosed = true
 		sendMu.Unlock()
@@ -477,18 +482,25 @@ func (d *Daemon) handleRuntimeProfilesChanged(payload protocol.RuntimeProfilesCh
 }
 
 // signalTaskWakeup delivers a targeted (or catch-up) task wakeup to the poller.
-// The channel is a coalescing nudge, so a full channel already carries a pending
-// wakeup — dropping the send loses only the runtime id it would have delivered.
-// For a targeted wakeup that id is the #7452 force-recheck signal, so on a full
-// channel record it directly in the woken set instead: the already-queued nudge
-// still drives the next claim, and the runtime is now forced there. A catch-up
-// wakeup (empty runtimeID) has nothing to preserve and is simply dropped.
+// For a targeted wakeup the runtime id is the #7452 force-recheck signal, so it
+// is recorded in the woken set BEFORE the send is attempted. Recording after the
+// send would race: the `default` branch is only reached because a nudge is
+// already queued, and between a failed send and a late note the poller can
+// consume that queued nudge AND drain the woken set — stranding the id in a set
+// nobody will drain, with no nudge left to trigger a claim, until the next
+// scheduled poll. Recording first is strictly safe: if a drain races in, it
+// picks the id up and the subsequent nudge is merely redundant. The channel is a
+// coalescing nudge, so a full channel already carries a pending wakeup that will
+// drive the next claim, where the runtime is now forced. A catch-up wakeup
+// (empty runtimeID) has nothing to preserve.
 func (d *Daemon) signalTaskWakeup(taskWakeups chan<- taskWakeup, runtimeID string) {
+	if runtimeID != "" {
+		d.noteWokenRuntime(runtimeID)
+	}
 	select {
 	case taskWakeups <- taskWakeup{runtimeID: runtimeID}:
 	default:
 		if runtimeID != "" {
-			d.noteWokenRuntime(runtimeID)
 			d.logger.Debug("task wakeup channel full; coalesced runtime into force-recheck set", "runtime_id", runtimeID)
 		}
 	}
