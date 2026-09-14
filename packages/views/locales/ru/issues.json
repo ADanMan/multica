@@ -1,4 +1,26 @@
 {
+  "inline_run": {
+    "label": "Запуск {{name}}",
+    "stop": "Остановить",
+    "stopping": "Остановка...",
+    "queued": "Ожидание доступного агента.",
+    "starting": "Подготовка сессии агента.",
+    "waiting_directory": "Ожидание, пока другой запуск освободит рабочую директорию.",
+    "thinking": "Думает",
+    "waiting_response": "Ожидание ответа агента.",
+    "view_activity": "Показать активность",
+    "steps_one": "{{count}} шаг",
+    "steps_other": "{{count}} шагов",
+    "loading": "Загрузка активности...",
+    "load_failed": "Не удалось загрузить активность.",
+    "try_again": "Повторить",
+    "empty": "Активность пока не зафиксирована.",
+    "show_earlier": "Показать ещё {{count}} предыдущих шагов",
+    "full_log": "Открыть полный журнал",
+    "message": "Сообщение агента",
+    "error": "Ошибка",
+    "waiting_result": "Ожидание результата инструмента..."
+  },
   "status_catalog_error": {
     "title": "Не удалось загрузить список статусов",
     "hint": "Задачи скрыты до загрузки, потому что без него нельзя применить фильтр по статусу.",
@@ -69,7 +91,6 @@
   "revision": {
     "conflict": "Задача или комментарий были изменены. Загружена последняя версия; сравните её перед повторным сохранением.",
     "compare_title": "Заголовок был изменён параллельно. Сравните обе версии.",
-    "compare_description": "Описание было изменено параллельно. Сравните обе версии.",
     "compare_comment": "Комментарий был изменён параллельно. Сравните обе версии.",
     "server_version": "Последняя версия на сервере",
     "local_version": "Ваша локальная версия",
@@ -91,6 +112,12 @@
     "done": "Готово",
     "blocked": "Заблокировано",
     "cancelled": "Отменено"
+  },
+  "status_category": {
+    "unstarted": "Не начато",
+    "started": "Начато",
+    "done": "Готово",
+    "closed": "Закрыто"
   },
   "priority": {
     "urgent": "Срочный",
@@ -123,6 +150,9 @@
     "section_priority": "Приоритет",
     "section_assignee": "Исполнитель",
     "section_creator": "Создатель",
+    "chip_op_contains": "содержит {{value}}",
+    "chip_op_before": "до {{value}}",
+    "chip_op_after": "после {{value}}",
     "section_project": "Проект",
     "section_label": "Метка",
     "section_date": "Дата",
@@ -160,6 +190,16 @@
     "card_properties_section": "Свойства карточки",
     "ascending_title": "По возрастанию",
     "descending_title": "По убыванию",
+    "newest_first": "Сначала новые",
+    "oldest_first": "Сначала старые",
+    "highest_priority_first": "Сначала высокий приоритет",
+    "lowest_priority_first": "Сначала низкий приоритет",
+    "earliest_first": "Сначала ранние",
+    "latest_first": "Сначала поздние",
+    "workflow_order": "Порядок рабочего процесса",
+    "reverse_workflow_order": "Обратный порядок рабочего процесса",
+    "alphabetical_order": "От А до Я",
+    "reverse_alphabetical_order": "От Я до А",
     "group_status": "Статус",
     "group_assignee": "Исполнитель",
     "group_parent": "Родительская задача",
@@ -314,7 +354,8 @@
     "empty_column": "Нет задач",
     "empty_grouping": "Нет подходящих задач",
     "no_value": "Нет значения",
-    "ordered_by": "Доска упорядочена по {{field}}"
+    "ordered_by": "Доска упорядочена по {{field}}",
+    "manual_reorder_hint": "Переключитесь на ручной порядок, чтобы переставлять задачи внутри столбца."
   },
   "detail": {
     "not_found": "Эта задача не существует или была удалена в этом рабочем пространстве.",
@@ -404,26 +445,6 @@
     "unpin_tooltip": "Открепить от боковой панели",
     "thread_nav_label": "Перейти к треду комментариев",
     "thread_nav_resolved_label": "{{title}} (решено)",
-    "thread_nav": {
-      "button_label_one": "Треды комментариев ({{count}})",
-      "button_label_other": "Треды комментариев ({{count}})",
-      "search_placeholder": "Поиск по тредам или авторам",
-      "match_count_one": "{{count}} совпадение",
-      "match_count_other": "{{count}} совпадений",
-      "filter_all": "Все",
-      "filter_unresolved": "Нерешённые",
-      "filter_resolved": "Решённые",
-      "filter_mine": "@я",
-      "group": {
-        "today": "Сегодня",
-        "yesterday": "Вчера",
-        "earlier": "Ранее"
-      },
-      "empty": "Нет подходящих тредов",
-      "hint_select": "выбрать",
-      "hint_jump": "перейти",
-      "hint_close": "закрыть"
-    },
     "sidebar_tooltip": "Показать/скрыть правую панель",
     "find": {
       "placeholder": "Найти в задаче...",
@@ -477,9 +498,14 @@
     "show_more_activities_other": "Показать ещё {{count}} событий"
   },
   "comment": {
+    "add_reaction": "Добавить реакцию",
+    "collapse_thread": "Свернуть тред",
+    "expand_thread": "Развернуть тред",
     "delete_title": "Удалить комментарий",
     "delete_desc": "Этот комментарий будет удалён без возможности восстановления.",
     "delete_desc_with_replies": "Этот комментарий и все ответы на него будут удалены без возможности восстановления.",
+    "delete_desc_replies_kept": "Этот комментарий будет удалён без возможности восстановления. Ответы на него останутся в треде.",
+    "deleted_placeholder": "Этот комментарий был удалён",
     "delete_action": "Удалить",
     "cancel_action": "Отмена",
     "edit_placeholder": "Изменить комментарий...",
@@ -499,12 +525,14 @@
     "trigger_blocked_target_unavailable": "Эта цель недоступна",
     "trigger_blocked_runtime_offline": "Среда выполнения этой цели офлайн",
     "trigger_blocked_runtime_unusable": "CLI агента этой цели не может выполняться на своей машине — переустановите его там",
+    "trigger_blocked_runtime_profile_missing": "У CLI агента этой цели отсутствует профиль среды выполнения на своей машине — установите его там",
     "trigger_blocked_agent_runtime_required": "У этой цели нет среды выполнения — привяжите её, чтобы запустить",
     "trigger_blocked_generic": "Эта цель не будет запущена",
     "trigger_blocked_short_invocation_not_allowed": "Не найдено или нет прав",
     "trigger_blocked_short_target_unavailable": "Недоступно",
     "trigger_blocked_short_runtime_offline": "Среда выполнения офлайн",
     "trigger_blocked_short_runtime_unusable": "CLI не может выполняться",
+    "trigger_blocked_short_runtime_profile_missing": "Отсутствует профиль среды выполнения",
     "trigger_blocked_short_agent_runtime_required": "Нужна среда выполнения",
     "trigger_blocked_short_generic": "Не запустится",
     "send_reply_failed": "Не удалось отправить ответ",
@@ -551,7 +579,26 @@
     }
   },
   "reply": {
-    "placeholder": "Оставить ответ..."
+    "placeholder": "Оставить ответ...",
+    "annotations": {
+      "confirm_add": "Добавить аннотацию",
+      "save": "Сохранить аннотацию",
+      "add_comment": "Добавить к комментарию",
+      "add": "Добавить к ответу",
+      "note_label": "Комментарий",
+      "count_one": "{{count}} аннотация",
+      "count_other": "{{count}} аннотаций",
+      "quote_limit": "Выделяйте не более {{count}} символов за раз.",
+      "count_limit": "Комментарий может содержать не более {{count}} аннотаций.",
+      "remove": "Удалить аннотацию {{number}}",
+      "source_changed": "Источник изменился или недоступен. Ваша сохранённая цитата сохранена.",
+      "intent_hint": "Добавьте заметку к аннотации или напишите сообщение перед отправкой.",
+      "target_deleted": "Цель ответа была удалена. Удалите все аннотации в этом черновике, затем аннотируйте оставшийся комментарий, чтобы начать новый ответ.",
+      "selection_failed": "Не удалось захватить выделение. Выделите текст в пределах одного комментария или описания и попробуйте снова.",
+      "source_label": "Комментарий от {{name}}",
+      "edit": "Изменить аннотацию {{number}}",
+      "note_placeholder": "Добавить комментарий…"
+    }
   },
   "agent_activity": {
     "hover_header_one": "{{count}} агент работает",
@@ -610,7 +657,6 @@
     "trigger_autopilot": "Запуск автопилота",
     "trigger_comment": "Триггер по комментарию",
     "trigger_initial": "Первый запуск",
-    "trigger_handoff_prefix": "Передача: ",
     "included_comments_one": "Включает {{count}} комментарий",
     "included_comments_other": "Включает {{count}} комментариев",
     "status_queued": "В очереди",
@@ -726,6 +772,11 @@
     "custom_property": {
       "empty": "Пусто",
       "none": "Нет значения",
+      "op_is": "равно",
+      "op_contains": "содержит",
+      "op_before": "до",
+      "op_after": "после",
+      "operator_label": "Оператор фильтра",
       "true_label": "Да",
       "false_label": "Нет",
       "value_placeholder": "Введите значение…",

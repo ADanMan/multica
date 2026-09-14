@@ -52,8 +52,10 @@
     "new_issue": "Новая задача",
     "new_issue_shortcut": "C",
     "pinned_label": "Закреплённые",
-    "workspace_group": "Рабочее пространство",
-    "configure_group": "Настройка",
+    "work_group": "Работа",
+    "ai_team_group": "ИИ-команда",
+    "show_more_pins": "Показать ещё {{count}}…",
+    "show_fewer_pins": "Показать меньше",
     "unread_overflow": "99+",
     "discord_card": {
       "title": "Присоединяйтесь к нашему Discord",

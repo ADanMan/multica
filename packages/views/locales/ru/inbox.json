@@ -51,7 +51,9 @@
     "retry_with_context": "Повторить с контекстом",
     "edit_advanced": "Редактировать как расширенную форму",
     "archive": "Архивировать",
-    "unarchive": "Восстановить из архива"
+    "unarchive": "Восстановить из архива",
+    "autopilot_quota_exceeded_body": "Это рабочее пространство достигло лимита в {{limit}} запусков Автопилота за текущий период. Новые запуски Автопилота не начнутся, пока лимит не будет сброшен {{resetAt}}.",
+    "autopilot_quota_upgrade": "Посмотреть варианты обновления"
   },
   "types": {
     "issue_assigned": "Назначено",
@@ -72,7 +74,9 @@
     "reaction_added": "Реакция",
     "quick_create_done": "Создано с помощью агента",
     "quick_create_failed": "Ошибка создания с помощью агента",
-    "quick_create_unconfirmed": "Создание с помощью агента не подтверждено"
+    "quick_create_unconfirmed": "Создание с помощью агента не подтверждено",
+    "autopilot_paused": "Автопилот приостановлен",
+    "autopilot_quota_exceeded": "Достигнут лимит запусков Автопилота"
   },
   "labels": {
     "set_status_to": "Установлен статус",
@@ -85,7 +89,8 @@
     "removed_due_date": "Срок удалён",
     "reacted_to_comment": "Отреагировал(а) {{emoji}} на ваш комментарий",
     "created_with_agent": "Создано с помощью агента: {{identifier}}",
-    "failed_with_detail": "Ошибка: {{detail}}"
+    "failed_with_detail": "Ошибка: {{detail}}",
+    "autopilot_quota_blocked": "Запуск заблокирован, так как достигнут лимит"
   },
   "toasts": {
     "source_context_retry_started": "Повтор запущен с исходным контекстом",
