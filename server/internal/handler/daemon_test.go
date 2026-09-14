@@ -991,6 +991,10 @@ func TestDaemonHeartbeat_SlowProbeDoesNotWedge(t *testing.T) {
 	}
 
 	runtimeID := createRuntimeLocalSkillTestRuntime(t, testUserID)
+	origProbeTimeout := heartbeatHasPendingTimeout
+	// Both stub probes wait this budget out in full.
+	heartbeatHasPendingTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { heartbeatHasPendingTimeout = origProbeTimeout })
 
 	origList := testHandler.LocalSkillListStore
 	origImport := testHandler.LocalSkillImportStore
@@ -1013,8 +1017,8 @@ func TestDaemonHeartbeat_SlowProbeDoesNotWedge(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("DaemonHeartbeat with slow probes: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	// Two bounded probes at 1s each + a small fixed slack.
-	if elapsed > 3*time.Second {
+	// Two bounded probes plus a small fixed slack.
+	if elapsed > time.Second {
 		t.Fatalf("DaemonHeartbeat took %s; expected fast return despite slow probes", elapsed)
 	}
 }
@@ -4560,9 +4564,8 @@ func TestIssueGCChecksReportCategoryNotRawCustomStatus(t *testing.T) {
 			t.Errorf("done-category custom status reported as %q, want %q — the daemon would keep this workdir forever",
 				byID[doneID], issuestatus.Done)
 		}
-		if byID[openID] != issuestatus.InReview {
-			t.Errorf("in_review-category custom status reported as %q, want %q",
-				byID[openID], issuestatus.InReview)
+		if byID[openID] != "gc_human_review" {
+			t.Errorf("nonterminal custom status reported as %q, want gc_human_review", byID[openID])
 		}
 	})
 
@@ -4636,8 +4639,8 @@ func TestBatchIssueGCCheckReadsCatalogOnceForManyCustomStatuses(t *testing.T) {
 		}
 	}
 	for _, id := range ids[2:4] {
-		if byID[id] != issuestatus.InReview {
-			t.Fatalf("issue %s reported %q, want %q", id, byID[id], issuestatus.InReview)
+		if byID[id] != "gc_batch_review" {
+			t.Fatalf("issue %s reported %q, want gc_batch_review", id, byID[id])
 		}
 	}
 

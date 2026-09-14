@@ -5,5 +5,7 @@
 -- is gone. The application owns that lifecycle; nothing here relies on the
 -- legacy parent_id cascade.
 --
--- Nullable with no default, so this is a metadata-only change.
-ALTER TABLE comment ADD COLUMN deleted_at TIMESTAMPTZ NULL;
+-- Nullable with no default, so this is a metadata-only change. IF NOT EXISTS
+-- lets development databases that applied this migration under its original
+-- unreleased 468 stem advance to the corrected ledger version safely.
+ALTER TABLE comment ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;

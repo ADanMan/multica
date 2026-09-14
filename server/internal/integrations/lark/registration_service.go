@@ -69,7 +69,8 @@ type RegistrationServiceConfig struct {
 	// for the frontend to fetch the final status after the dialog
 	// closes, short enough that abandoned sessions do not pin memory
 	// forever. Independent of the device-flow expiry (Lark's
-	// expire_in, ~10 min).
+	// expires_in, currently 1h), which bounds the PENDING phase; this
+	// TTL only starts once a session has already terminated.
 	SessionTTL time.Duration
 
 	// Now is overridable for deterministic expiry-bound tests.
