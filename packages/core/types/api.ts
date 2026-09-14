@@ -77,10 +77,6 @@ export interface UpdateIssueRequest {
    *  MUL-3375). The assignee/status change still applies. Control field —
    *  strip from optimistic cache patches; never written onto the Issue. */
   suppress_run?: boolean;
-  /** Free-text handoff instruction injected into the started run's opening
-   *  context (MUL-3375). Only consumed when a run actually starts. Control
-   *  field — strip from optimistic cache patches. */
-  handoff_note?: string;
 }
 
 /**
@@ -112,14 +108,11 @@ export interface IssueTriggerPreviewParams {
 }
 
 /** One issue that WILL start a run under the prospective write. `agent_id` is
- *  the runnable agent (squad leader for squads). `handoff_supported` is the
- *  soft-gate signal: false when the target runtime is too old to render a
- *  handoff note (gray the note box; the assignment still works). */
+ *  the runnable agent (squad leader for squads). */
 export interface IssueTriggerPreviewItem {
   issue_id: string;
   agent_id: string;
   source: string;
-  handoff_supported: boolean;
 }
 
 export interface IssueTriggerPreview {
@@ -137,10 +130,9 @@ export interface ListIssuesParams {
   /** Multi-value table facet. OR within the field. */
   statuses?: IssueStatus[];
   /**
-   * Filter by status CATEGORY rather than by exact key, so one bucket holds a
-   * category's canonical status plus every custom status that inherits it.
-   * This is what keeps the board's fan-out fixed at 7 requests however many
-   * custom statuses a workspace defines. (MUL-6243)
+   * Filter by lifecycle category rather than by exact key, so one bucket holds
+   * all concrete and custom statuses in that phase. Task views use exact
+   * status keys for their columns instead.
    */
   status_category?: IssueStatusCategory;
   /** Multi-value form of `status_category`. OR within the field. */
@@ -345,12 +337,10 @@ export type IssueTableGroupSpec =
   /**
    * Group by the CATEGORY a status behaves as, not by the status key.
    *
-   * Board columns, list sections and swimlane cells are categories, so a custom
-   * status folds into the column it behaves as instead of getting one of its
-   * own — which is what keeps the surface's fan-out pinned at 7 no matter how
-   * many statuses a workspace defines. The descriptor still reports
-   * `value.kind === "status"` because a category's value IS its canonical
-   * status key; the group KEY is what distinguishes the two contracts.
+   * Retained for installed clients. New Board/List/Swimlane surfaces group by
+   * concrete status keys, not categories. The descriptor still reports
+   * `value.kind === "status"` for response compatibility; the group KEY is
+   * what distinguishes lifecycle categories from concrete statuses.
    * (MUL-6243)
    */
   | { kind: "status_category" }
@@ -523,7 +513,6 @@ export interface SearchIssueResult extends Issue {
 
 export interface SearchIssuesResponse {
   issues: SearchIssueResult[];
-  total: number;
 }
 
 export interface SearchProjectResult extends Project {
@@ -533,7 +522,6 @@ export interface SearchProjectResult extends Project {
 
 export interface SearchProjectsResponse {
   projects: SearchProjectResult[];
-  total: number;
 }
 
 export interface UpdateMeRequest {

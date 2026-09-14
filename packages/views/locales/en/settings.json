@@ -1,7 +1,7 @@
 {
   "issue_statuses": {
     "title": "Issue Statuses",
-    "description": "Define the workflow your issues move through. Each status inherits its behavior from its category.",
+    "description": "Organize issue statuses into four lifecycle categories.",
     "loading": "Loading statuses…",
     "add": "Add status",
     "show_archived": "Show archived ({{count}})",
@@ -9,43 +9,78 @@
     "archived_hint": "Retired from new assignments. Issues already on it keep it.",
     "reorder_failed": "Could not save the new order.",
     "actions": {
+      "move_up": "Move up",
+      "move_down": "Move down",
       "open": "Actions for {{name}}",
       "edit": "Edit",
       "archive": "Archive",
       "reorder": "Reorder {{name}}"
     },
+    "reorder_hint": "Drag statuses within a category to set their order in boards, lists, and status menus.",
+    "built_in_dialog": {
+      "title": "Built-in status cannot be changed",
+      "description": "Built-in statuses are used by Multica and cannot be edited or archived. You can still change their order within the category.",
+      "confirm": "Got it"
+    },
     "editor": {
       "create_title": "New status",
       "edit_title": "Edit status",
-      "behavior_hint": "This status behaves exactly like {{category}}.",
       "name": "Name",
       "name_placeholder": "e.g. Code Review",
       "key_hint": "Referred to as {{key}} by the API and the CLI.",
       "created": "Status created. The API and the CLI refer to it as {{key}}.",
       "category": "Category",
-      "category_locked": "Category cannot be changed — issues already on this status depend on it.",
+      "category_locked": "Category cannot be changed after a status is created.",
       "description": "Description",
       "description_placeholder": "What this status means for your team",
       "color": "Color",
+      "icon": "Icon shape",
+      "icon_shapes": {
+        "default": "Default",
+        "dotted": "Dotted circle",
+        "circle": "Circle",
+        "half": "Half-filled circle",
+        "three_quarters": "Three-quarter circle",
+        "check": "Checkmark",
+        "slash": "Slash",
+        "cross": "Cross"
+      },
       "cancel": "Cancel",
       "save": "Save",
       "saving": "Saving…",
       "save_failed": "Could not save the status."
     },
     "archive_dialog": {
+      "retry": "Retry archive",
       "title": "Archive this status?",
-      "description": "\"{{name}}\" stops being available for new issues. Issues already on it keep it and keep behaving exactly as they do now.",
+      "description": "Move all issues out of \"{{name}}\" before archiving it. Once empty, it will be removed from boards and status pickers.",
+      "in_use_title": "Move issues before archiving",
+      "in_use": "Issues still using this status: {{count}}. Move them to another status, including completed and canceled issues, then try again.",
+      "view_issues": "View issues",
+      "archiving": "Archiving...",
       "cancel": "Cancel",
       "confirm": "Archive",
       "failed": "Could not archive the status."
     },
+    "category_labels": {
+      "unstarted": "Unstarted",
+      "started": "Started",
+      "done": "Done",
+      "closed": "Closed"
+    },
     "categories": {
+      "unstarted": "Work that has not started, whether planned or in the backlog.",
+      "started": "Work that is active, under review, or blocked.",
+      "done": "Work that has been finished.",
+      "closed": "Work that will not be completed."
+    },
+    "built_in_descriptions": {
       "backlog": "Parked. Assigning an issue here never starts an agent run.",
       "todo": "Queued. Moving an issue here starts the assigned agent.",
       "in_progress": "Actively being worked on.",
       "in_review": "Delivered, waiting on human review. Finalizes the autopilot run.",
-      "done": "Completed.",
       "blocked": "Stalled on an external dependency.",
+      "done": "Completed.",
       "cancelled": "Decided not to do."
     }
   },
@@ -128,7 +163,12 @@
     "sticky_comment_bar": {
       "title": "Sticky comment bar",
       "hint": "Keep the comment bar pinned to the bottom while scrolling an issue page."
-    }
+    },
+    "description": "Customize how you work in Multica.",
+    "issue_title": "Issue creation",
+    "comments_title": "Comments",
+    "device_hint": "Saved on this device.",
+    "issue_scope": "These preferences apply to this workspace on this device. They only change which fields you see when creating an issue."
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",
@@ -183,10 +223,6 @@
       "findInIssue": {
         "label": "Find in issue",
         "description": "Search within the open issue detail."
-      },
-      "openThreadNav": {
-        "label": "Open thread navigator",
-        "description": "List, search, and jump between the comment threads of the open issue."
       },
       "archiveInboxItem": {
         "label": "Archive notification",
@@ -291,22 +327,32 @@
     "title": "MCP",
     "description": "A library of MCP servers for this workspace. Adding one here gives it to no agent — an agent owner assigns it on the agent's own MCP tab, where it also gets a per-agent on/off toggle.",
     "servers_title": "Shared servers",
-    "write_only_note": "Saved configurations are write-only — urls, commands, headers, and environment values are never shown again, so editing a server replaces its configuration. Renaming is safe: agents keep their assignment.",
+    "write_only_note": "For security, saved URLs, commands, headers, and environment values aren't shown again. To change them, enter a complete new configuration. Renaming keeps the current configuration and agent assignments.",
     "add_server": "Add server",
-    "edit_server": "Edit server",
+    "rename_server": "Rename server",
+    "rename_action": "Rename",
+    "replace_config": "Replace configuration",
+    "rename_save": "Save name",
+    "rename_cancel": "Cancel rename",
+    "rename_required": "Enter a server name.",
+    "rename_invalid": "Use only letters, numbers, hyphens, and underscores.",
+    "rename_duplicate": "A server with this name already exists.",
     "remove_server": "Remove server",
+    "remove_action": "Delete",
     "empty_title": "No shared MCP servers",
     "empty_description": "Add a server here, then assign it to the agents that should use it from their own MCP tab.",
     "disabled_badge": "Disabled",
     "admin_only_note": "Only workspace owners and admins can change the shared MCP servers.",
     "delete_title": "Remove shared server?",
-    "delete_description": "{{name}} will be removed from the library and from every agent it is assigned to, taking effect on their next task.",
+    "delete_description": "{{name}} will be removed from the library and from every agent it is assigned to, taking effect on their next run.",
     "delete_confirm": "Remove",
     "cancel": "Cancel",
     "added_toast": "Shared MCP server added",
     "updated_toast": "Shared MCP server updated",
+    "renamed_toast": "Shared MCP server renamed",
     "removed_toast": "Shared MCP server removed",
     "save_failed_toast": "Could not save the shared MCP server",
+    "rename_failed_toast": "Could not rename the shared MCP server",
     "remove_failed_toast": "Could not remove the shared MCP server"
   },
   "page": {
@@ -334,7 +380,16 @@
       "plugins": "Plugins",
       "mcp": "MCP",
       "billing": "Billing"
-    }
+    },
+    "groups": {
+      "personal": "Personal",
+      "workspace": "Workspace",
+      "issues": "Issue configuration",
+      "connections": "Connections & extensions",
+      "device": "Desktop app"
+    },
+    "navigate": "Go to settings page",
+    "device_scope": "This device"
   },
   "plugins": {
     "title": "Plugins",
@@ -396,8 +451,8 @@
       "issues_write": "Create and edit issues",
       "comments_read": "Read comments",
       "comments_write": "Post comments",
-      "tasks_read": "Read agent tasks",
-      "tasks_write": "Start and update agent tasks",
+      "tasks_read": "Read agent runs",
+      "tasks_write": "Start and update agent runs",
       "agents_read": "Read the agent list",
       "members_read": "Read the member list",
       "storage_user": "Store data for each member individually",
@@ -588,7 +643,7 @@
       },
       "agent_activity": {
         "label": "Agent activity",
-        "description": "When an agent task completes or fails"
+        "description": "When an agent run completes or fails"
       }
     },
     "system": {
@@ -691,7 +746,7 @@
   },
   "delete_workspace_dialog": {
     "title": "Delete workspace",
-    "description": "This cannot be undone. All issues, agents, chats, and task history will be permanently removed.",
+    "description": "This cannot be undone. All issues, agents, chats, and run history will be permanently removed.",
     "type_to_confirm_prefix": "To confirm, type",
     "type_to_confirm_suffix": " below.",
     "cancel": "Cancel",
@@ -710,8 +765,8 @@
     "master_description_off": "GitHub features are turned off. The PR sidebar, co-author trailer, and auto-link are paused. Data on the backend is not deleted.",
     "section_connection": "Connection",
     "connection_title": "GitHub App",
-    "connection_description_prefix": "Link issues to pull requests automatically. When a PR with",
-    "connection_description_suffix": "in its branch, title, or body is merged, the corresponding issue moves to",
+    "connection_description_prefix": "Link issues to pull requests automatically. A PR links when",
+    "connection_description_suffix": "is in its branch name or title, or its body says Closes MUL-123. Merging a PR with that closing keyword also moves the issue to",
     "connection_description_done": "Done",
     "connection_identifier_example": "MUL-123",
     "connected_to": "Connected to {{login}}",
@@ -740,7 +795,7 @@
     "feature_co_author_description_prefix": "Append",
     "feature_co_author_description_suffix": "to commits authored by agents.",
     "feature_auto_link_label": "Auto-link issues and PRs",
-    "feature_auto_link_description": "Match PR titles, bodies, and branch names against issue identifiers and create the link automatically.",
+    "feature_auto_link_description": "Match PR titles and branch names against issue identifiers, along with identifiers after a closing keyword in the body, and create the link automatically.",
     "section_repositories": "Repositories",
     "repositories_shortcut_label": "Repository URLs live in the Repositories tab",
     "repositories_shortcut_link": "Manage repositories →",
@@ -1158,7 +1213,7 @@
       "settings_saved": "Daemon settings saved",
       "settings_save_failed": "Failed to save daemon settings",
       "signin_expired": "Sign-in expired",
-      "signin_expired_description": "The local daemon couldn't authenticate, so this device can't take tasks. Sign in again to restore it.",
+      "signin_expired_description": "The local daemon couldn't authenticate, so this device can't take runs. Sign in again to restore it.",
       "signin_again": "Sign in again",
       "external_description_before": "This device's daemon runs outside the app — for example inside WSL2 — so the app can't start or stop it. Start or stop it from that environment with",
       "external_description_after": ".",
@@ -1199,10 +1254,10 @@
       "stop": "Stop",
       "start": "Start",
       "retry_setup": "Retry setup",
-      "stop_confirm_title_one": "Stop daemon with {{count}} active task?",
-      "stop_confirm_title_other": "Stop daemon with {{count}} active tasks?",
-      "stop_confirm_description_one": "{{count}} task is currently running on this device. Stopping now will interrupt it — affected tasks get marked failed once the timeout hits. The daemon won't auto-restart.",
-      "stop_confirm_description_other": "{{count}} tasks are currently running on this device. Stopping now will interrupt them — affected tasks get marked failed once the timeout hits. The daemon won't auto-restart.",
+      "stop_confirm_title_one": "Stop daemon with {{count}} active run?",
+      "stop_confirm_title_other": "Stop daemon with {{count}} active runs?",
+      "stop_confirm_description_one": "{{count}} run is currently active on this device. Stopping now will interrupt it — affected runs get marked failed once the timeout hits. The daemon won't auto-restart.",
+      "stop_confirm_description_other": "{{count}} runs are currently active on this device. Stopping now will interrupt them — affected runs get marked failed once the timeout hits. The daemon won't auto-restart.",
       "cancel": "Cancel",
       "stop_daemon": "Stop daemon",
       "logs_title": "Local daemon logs",
@@ -1302,5 +1357,21 @@
     "expiry_7d": "7 days",
     "expiry_30d": "30 days",
     "expiry_never": "Never"
+  },
+  "integrations": {
+    "description": "Connect your tools and manage each integration in one place.",
+    "code_title": "Code & repositories",
+    "messaging_title": "Messaging channels",
+    "apps_title": "Your connected apps",
+    "apps_scope": "These app connections belong to your account. Workspace channel connections are managed above.",
+    "github_hint": "Connect GitHub and configure pull request linking.",
+    "vcs_hint": "Connect GitLab, Gitea, or Forgejo.",
+    "apps_hint": "Authorize apps for your agents through Composio.",
+    "back": "All integrations",
+    "status_connected": "Connected",
+    "status_not_connected": "Not connected",
+    "status_loading": "Checking...",
+    "status_unknown": "Status unavailable",
+    "channel_hint": "Chat with agents and create issues from {{channel}}."
   }
 }

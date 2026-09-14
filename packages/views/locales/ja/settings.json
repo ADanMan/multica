@@ -1,7 +1,7 @@
 {
   "issue_statuses": {
     "title": "タスクステータス",
-    "description": "タスクが辿るワークフローを定義します。各ステータスの挙動は所属するカテゴリが決めます。",
+    "description": "タスクのステータスを4つのライフサイクルカテゴリに整理します。",
     "loading": "ステータスを読み込み中…",
     "add": "ステータスを追加",
     "show_archived": "アーカイブ済みを表示（{{count}}）",
@@ -9,43 +9,78 @@
     "archived_hint": "新規の割り当てには使えません。すでにこのステータスのタスクはそのままです。",
     "reorder_failed": "並び順を保存できませんでした。",
     "actions": {
+      "move_up": "上に移動",
+      "move_down": "下に移動",
       "open": "{{name}} の操作",
       "edit": "編集",
       "archive": "アーカイブ",
       "reorder": "{{name}} を並べ替え"
     },
+    "reorder_hint": "カテゴリー内でステータスをドラッグすると、ボード、リスト、ステータスメニューの順序を変更できます。",
+    "built_in_dialog": {
+      "title": "組み込みステータスは変更できません",
+      "description": "組み込みステータスは Multica のシステム動作に使われるため、編集やアーカイブはできません。カテゴリー内の順序は変更できます。",
+      "confirm": "確認"
+    },
     "editor": {
       "create_title": "新しいステータス",
       "edit_title": "ステータスを編集",
-      "behavior_hint": "このステータスは「{{category}}」とまったく同じ挙動になります。",
       "name": "名前",
       "name_placeholder": "例: Code Review",
       "key_hint": "API と CLI では {{key}} として参照されます。",
       "created": "ステータスを作成しました。API と CLI では {{key}} として参照されます。",
       "category": "カテゴリ",
-      "category_locked": "カテゴリは変更できません。すでにこのステータスのタスクが依存しています。",
+      "category_locked": "ステータスの作成後はカテゴリを変更できません。",
       "description": "説明",
       "description_placeholder": "チームにとってこのステータスが意味すること",
       "color": "色",
+      "icon": "アイコンの形",
+      "icon_shapes": {
+        "default": "デフォルト",
+        "dotted": "点線の円",
+        "circle": "円",
+        "half": "半分塗りつぶし",
+        "three_quarters": "4分の3塗りつぶし",
+        "check": "チェック",
+        "slash": "斜線",
+        "cross": "バツ"
+      },
       "cancel": "キャンセル",
       "save": "保存",
       "saving": "保存中…",
       "save_failed": "ステータスを保存できませんでした。"
     },
     "archive_dialog": {
+      "retry": "アーカイブを再試行",
       "title": "このステータスをアーカイブしますか？",
-      "description": "「{{name}}」は新しいタスクに割り当てられなくなります。すでにこのステータスのタスクはそのまま残り、挙動も変わりません。",
+      "description": "「{{name}}」のすべてのタスクを別のステータスに移動してください。空になってからアーカイブすると、ボードとステータスの選択肢から削除されます。",
+      "in_use_title": "アーカイブ前にタスクを移動",
+      "in_use": "このステータスを使用中のタスクは {{count}} 件です。完了・キャンセル済みのタスクも別のステータスに移動してから、もう一度お試しください。",
+      "view_issues": "タスクを表示",
+      "archiving": "アーカイブ中...",
       "cancel": "キャンセル",
       "confirm": "アーカイブ",
       "failed": "アーカイブできませんでした。"
     },
+    "category_labels": {
+      "unstarted": "未着手",
+      "started": "開始済み",
+      "done": "完了",
+      "closed": "終了"
+    },
     "categories": {
+      "unstarted": "バックログや計画済みを含む、まだ始まっていない作業。",
+      "started": "進行中、レビュー中、またはブロック中の作業。",
+      "done": "完了した作業。",
+      "closed": "完了しないことになった作業。"
+    },
+    "built_in_descriptions": {
       "backlog": "保留。ここに移動してもエージェントは起動しません。",
       "todo": "待機中。ここに移動すると担当エージェントが起動します。",
       "in_progress": "作業中。",
       "in_review": "納品済み、レビュー待ち。オートパイロットの実行を完了します。",
-      "done": "完了。",
       "blocked": "外部依存でブロック中。",
+      "done": "完了。",
       "cancelled": "見送り。"
     }
   },
@@ -94,7 +129,7 @@
     "prompt_hint": "そのまま送られます。タスクの内容は既に読めます。",
     "template_not_supported": "変数はまだサポートされていません。{{token}} を削除してください。エージェントはこのタスクを既に読めます。",
     "delete_title": "このクイックアクションを削除しますか？",
-    "delete_description": "すべてのタスクのサイドバーから消えます。過去の実行は実行ログに残ります。後で使う可能性があればアーカイブを選んでください。"
+    "delete_description": "すべてのタスクのサイドバーから消えます。過去の記録は実行ログに残ります。後で使う可能性があればアーカイブを選んでください。"
   },
   "auto_save": {
     "saving": "保存中…",
@@ -128,7 +163,12 @@
     "sticky_comment_bar": {
       "title": "コメントバーを固定",
       "hint": "タスクのページをスクロールしても、コメントバーを常に下部に固定します。"
-    }
+    },
+    "description": "Multica の使い方をカスタマイズします。",
+    "issue_title": "タスク作成",
+    "comments_title": "コメント",
+    "device_hint": "このデバイスに保存されます。",
+    "issue_scope": "この設定は、このデバイスの現在のワークスペースに適用され、タスク作成時に表示するフィールドのみを変更します。"
   },
   "shortcuts": {
     "title": "キーボードショートカット",
@@ -183,10 +223,6 @@
       "findInIssue": {
         "label": "タスク内を検索",
         "description": "開いているタスクの詳細を検索します。"
-      },
-      "openThreadNav": {
-        "label": "スレッドナビゲーターを開く",
-        "description": "開いているタスクのコメントスレッドを一覧・検索して移動します。"
       },
       "archiveInboxItem": {
         "label": "通知をアーカイブ",
@@ -291,22 +327,32 @@
     "title": "MCP",
     "description": "このワークスペースの MCP サーバーライブラリ。ここに追加してもどのエージェントにも割り当てられません。エージェントの所有者が各エージェントの MCP タブで割り当て、エージェントごとにオン/オフを切り替えます。",
     "servers_title": "共有サーバー",
-    "write_only_note": "保存された設定は書き込み専用です — url、コマンド、ヘッダー、環境変数は二度と表示されないため、サーバーの編集は設定の置き換えになります。名前の変更は安全です。割り当ては維持されます。",
+    "write_only_note": "機密情報を保護するため、保存した URL、コマンド、ヘッダー、環境変数は再表示されません。変更する場合は、新しい設定をすべて入力してください。名前だけを変更しても、現在の設定とエージェントへの割り当ては維持されます。",
     "add_server": "サーバーを追加",
-    "edit_server": "サーバーを編集",
+    "rename_server": "サーバー名を変更",
+    "rename_action": "名前を変更",
+    "replace_config": "設定を置き換え",
+    "rename_save": "名前を保存",
+    "rename_cancel": "名前の変更をキャンセル",
+    "rename_required": "サーバー名を入力してください。",
+    "rename_invalid": "英字、数字、ハイフン、アンダースコアのみ使用できます。",
+    "rename_duplicate": "同じ名前のサーバーがすでに存在します。",
     "remove_server": "サーバーを削除",
+    "remove_action": "削除",
     "empty_title": "共有 MCP サーバーはありません",
     "empty_description": "まずここにサーバーを追加し、使用するエージェントの MCP タブから割り当ててください。",
     "disabled_badge": "無効",
     "admin_only_note": "共有 MCP サーバーを変更できるのはワークスペースの owner と admin のみです。",
     "delete_title": "共有サーバーを削除しますか？",
-    "delete_description": "{{name}} はライブラリからも、割り当てられている全エージェントからも削除され、各エージェントの次の作業から反映されます。",
+    "delete_description": "{{name}} はライブラリからも、割り当てられている全エージェントからも削除され、各エージェントの次の実行から反映されます。",
     "delete_confirm": "削除",
     "cancel": "キャンセル",
     "added_toast": "共有 MCP サーバーを追加しました",
     "updated_toast": "共有 MCP サーバーを更新しました",
+    "renamed_toast": "共有 MCP サーバーの名前を変更しました",
     "removed_toast": "共有 MCP サーバーを削除しました",
     "save_failed_toast": "共有 MCP サーバーを保存できませんでした",
+    "rename_failed_toast": "共有 MCP サーバーの名前を変更できませんでした",
     "remove_failed_toast": "共有 MCP サーバーを削除できませんでした"
   },
   "page": {
@@ -334,7 +380,16 @@
       "plugins": "Plugins",
       "mcp": "MCP",
       "billing": "請求とプラン"
-    }
+    },
+    "groups": {
+      "personal": "個人設定",
+      "workspace": "ワークスペース管理",
+      "issues": "タスク設定",
+      "connections": "接続と拡張機能",
+      "device": "デスクトップアプリ"
+    },
+    "navigate": "設定ページへ移動",
+    "device_scope": "このデバイス"
   },
   "plugins": {
     "title": "Plugins",
@@ -395,8 +450,8 @@
       "issues_write": "タスクを作成・編集する",
       "comments_read": "コメントを読み取る",
       "comments_write": "コメントを投稿する",
-      "tasks_read": "agent task を読み取る",
-      "tasks_write": "agent task を開始・更新する",
+      "tasks_read": "エージェントの実行を読み取る",
+      "tasks_write": "エージェントの実行を開始・更新する",
       "agents_read": "agent 一覧を読み取る",
       "members_read": "メンバー一覧を読み取る",
       "storage_user": "メンバーごとにデータを保存する",
@@ -586,7 +641,7 @@
       },
       "agent_activity": {
         "label": "エージェントのアクティビティ",
-        "description": "エージェントの作業が完了または失敗したとき"
+        "description": "エージェントの実行が完了または失敗したとき"
       }
     },
     "system": {
@@ -708,8 +763,8 @@
     "master_description_off": "GitHub 機能はオフです。PR サイドバー、Co-authored-by トレーラー、自動リンクが一時停止されています。バックエンドのデータは削除されません。",
     "section_connection": "接続",
     "connection_title": "GitHub App",
-    "connection_description_prefix": "タスクを Pull request に自動でリンクします。ブランチ、タイトル、または本文に",
-    "connection_description_suffix": "を含む PR がマージされると、対応するタスクが次のステータスに移動します:",
+    "connection_description_prefix": "タスクを Pull request に自動でリンクします。PR のブランチ名かタイトルに",
+    "connection_description_suffix": "があるか、本文に Closes MUL-123 と書かれていれば、対応するタスクにリンクされます。その closing keyword を含む PR がマージされたときだけ、タスクが次のステータスに移動します:",
     "connection_description_done": "完了",
     "connection_identifier_example": "MUL-123",
     "connected_to": "{{login}} に接続済み",
@@ -738,7 +793,7 @@
     "feature_co_author_description_prefix": "エージェントが作成したコミットに",
     "feature_co_author_description_suffix": "を追加します。",
     "feature_auto_link_label": "タスクと PR を自動リンク",
-    "feature_auto_link_description": "PR のタイトル、本文、ブランチ名をタスク識別子と照合し、自動でリンクを作成します。",
+    "feature_auto_link_description": "PR のタイトルとブランチ名、および本文で closing keyword の直後にある番号をタスク識別子と照合し、自動でリンクを作成します。",
     "section_repositories": "リポジトリ",
     "repositories_shortcut_label": "リポジトリ URL はリポジトリタブにあります",
     "repositories_shortcut_link": "リポジトリを管理 →",
@@ -1155,7 +1210,7 @@
       "settings_saved": "デーモン設定を保存しました",
       "settings_save_failed": "デーモン設定を保存できませんでした",
       "signin_expired": "ログインの有効期限が切れました",
-      "signin_expired_description": "ローカルデーモンを認証できないため、このデバイスは作業を受け取れません。再度ログインしてください。",
+      "signin_expired_description": "ローカルデーモンを認証できないため、このデバイスは実行を受け取れません。再度ログインしてください。",
       "signin_again": "再度ログイン",
       "external_description_before": "このデバイスのデーモンはアプリの外部（WSL2 など）で実行されているため、アプリから起動や停止はできません。その環境で次を実行してください：",
       "external_description_after": "。",
@@ -1196,8 +1251,8 @@
       "stop": "停止",
       "start": "起動",
       "retry_setup": "セットアップを再試行",
-      "stop_confirm_title_other": "実行中の作業 {{count}} 件を中断してデーモンを停止しますか？",
-      "stop_confirm_description_other": "このデバイスで {{count}} 件の作業が実行中です。今停止すると作業は中断され、タイムアウト後に失敗としてマークされます。デーモンは自動再起動しません。",
+      "stop_confirm_title_other": "進行中の実行 {{count}} 件を中断してデーモンを停止しますか？",
+      "stop_confirm_description_other": "このデバイスで {{count}} 件の実行が進行中です。今停止すると実行は中断され、タイムアウト後に失敗としてマークされます。デーモンは自動再起動しません。",
       "cancel": "キャンセル",
       "stop_daemon": "デーモンを停止",
       "logs_title": "ローカルデーモンのログ",
@@ -1295,5 +1350,21 @@
     "expiry_7d": "7日",
     "expiry_30d": "30日",
     "expiry_never": "無期限"
+  },
+  "integrations": {
+    "description": "ツールを接続して、各連携を管理します。",
+    "code_title": "コードとリポジトリ",
+    "messaging_title": "メッセージチャネル",
+    "apps_title": "自分のアプリ接続",
+    "apps_scope": "これらのアプリ接続はあなたのアカウントに属します。ワークスペースのチャネル接続は上で管理します。",
+    "github_hint": "GitHub を接続し、プルリクエストの関連付けを設定します。",
+    "vcs_hint": "GitLab、Gitea、Forgejo を接続します。",
+    "apps_hint": "Composio 経由でエージェント用のアプリを認可します。",
+    "back": "すべての連携",
+    "status_connected": "接続済み",
+    "status_not_connected": "未接続",
+    "status_loading": "確認中...",
+    "status_unknown": "状態を取得できません",
+    "channel_hint": "{{channel}} でエージェントと会話し、タスクを作成します。"
   }
 }

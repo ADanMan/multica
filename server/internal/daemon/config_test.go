@@ -142,6 +142,46 @@ func TestLoadConfig_CompletedTaskTTLDefaultsDisabledOnSelfHostAndReadsEnv(t *tes
 	}
 }
 
+func TestLoadConfig_WSClaimPollIntervalPrecedence(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+	t.Setenv("MULTICA_DAEMON_WS_CLAIM_POLL_INTERVAL", "")
+	base := Overrides{ServerURL: "http://localhost:0", WorkspacesRoot: t.TempDir()}
+
+	cfg, err := LoadConfig(base)
+	if err != nil {
+		t.Fatalf("LoadConfig default: %v", err)
+	}
+	if cfg.WSClaimPollInterval != DefaultWSClaimPollInterval {
+		t.Fatalf("default WSClaimPollInterval = %s, want %s", cfg.WSClaimPollInterval, DefaultWSClaimPollInterval)
+	}
+
+	t.Setenv("MULTICA_DAEMON_WS_CLAIM_POLL_INTERVAL", "75s")
+	cfg, err = LoadConfig(base)
+	if err != nil {
+		t.Fatalf("LoadConfig env: %v", err)
+	}
+	if cfg.WSClaimPollInterval != 75*time.Second {
+		t.Fatalf("env WSClaimPollInterval = %s, want 75s", cfg.WSClaimPollInterval)
+	}
+
+	base.WSClaimPollInterval = 2 * time.Minute
+	cfg, err = LoadConfig(base)
+	if err != nil {
+		t.Fatalf("LoadConfig override: %v", err)
+	}
+	if cfg.WSClaimPollInterval != 2*time.Minute {
+		t.Fatalf("override WSClaimPollInterval = %s, want 2m", cfg.WSClaimPollInterval)
+	}
+
+	base.WSClaimPollInterval = 0
+	t.Setenv("MULTICA_DAEMON_WS_CLAIM_POLL_INTERVAL", "0s")
+	if _, err := LoadConfig(base); err == nil || !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("LoadConfig zero WS claim poll error = %v, want positive-duration validation", err)
+	}
+}
+
 func TestLoadConfig_CompletedTaskTTLDefaultsBoundedOnOfficialCloud(t *testing.T) {
 	stageFakeAgent(t)
 	t.Setenv("HOME", t.TempDir())
@@ -688,6 +728,34 @@ func TestLoadConfig_CodexHandshakeTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_CodexTurnInterruptTimeout(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("MULTICA_CODEX_TURN_INTERRUPT_TIMEOUT", "750ms")
+
+	cfg, err := LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig with interrupt timeout: %v", err)
+	}
+	if cfg.CodexTurnInterruptTimeout != 750*time.Millisecond {
+		t.Fatalf("CodexTurnInterruptTimeout = %s, want 750ms", cfg.CodexTurnInterruptTimeout)
+	}
+
+	t.Setenv("MULTICA_CODEX_TURN_INTERRUPT_TIMEOUT", "0")
+	cfg, err = LoadConfig(Overrides{
+		ServerURL:      "http://localhost:8080",
+		WorkspacesRoot: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig with zero interrupt timeout: %v", err)
+	}
+	if cfg.CodexTurnInterruptTimeout != DefaultCodexTurnInterruptTimeout {
+		t.Fatalf("CodexTurnInterruptTimeout = %s, want default %s", cfg.CodexTurnInterruptTimeout, DefaultCodexTurnInterruptTimeout)
+	}
+}
+
 // TestLoadConfig_CodexFirstTurnNoProgressTimeout pins the env-only
 // MULTICA_CODEX_FIRST_TURN_TIMEOUT resolution (GH #3262 / #5959): unset and an
 // explicit "0" both mean "keep the backend default" (0 = unset), while a positive
@@ -1203,6 +1271,11 @@ func TestResolveAgentsViaLoginShell_HardTimeoutOnBackgroundedStdout(t *testing.T
 	}
 	t.Setenv("SHELL", sh)
 	t.Setenv("ENV", rc)
+	// The shell itself exits at once, so the whole run is the wait delay; a
+	// short one proves the same ceiling without the test paying the real 2s.
+	origWaitDelay := loginShellResolveWaitDelay
+	loginShellResolveWaitDelay = 100 * time.Millisecond
+	t.Cleanup(func() { loginShellResolveWaitDelay = origWaitDelay })
 
 	// Cap = context timeout + wait delay + generous slack for goroutine
 	// scheduling. A bug that disables WaitDelay would blow past 60s here.

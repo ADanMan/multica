@@ -1,7 +1,7 @@
 {
   "issue_statuses": {
     "title": "태스크 상태",
-    "description": "태스크가 거치는 워크플로를 정의합니다. 각 상태의 동작은 속한 카테고리가 결정합니다.",
+    "description": "태스크 상태를 다섯 가지 수명 주기 카테고리로 구성합니다.",
     "loading": "상태를 불러오는 중…",
     "add": "상태 추가",
     "show_archived": "보관됨 표시 ({{count}})",
@@ -9,43 +9,78 @@
     "archived_hint": "새로 지정할 수 없습니다. 이미 이 상태인 태스크는 그대로 유지됩니다.",
     "reorder_failed": "새 순서를 저장하지 못했습니다.",
     "actions": {
+      "move_up": "위로 이동",
+      "move_down": "아래로 이동",
       "open": "{{name}} 작업",
       "edit": "편집",
       "archive": "보관",
       "reorder": "{{name}} 순서 변경"
     },
+    "reorder_hint": "카테고리 내에서 상태를 드래그하여 보드, 목록, 상태 메뉴의 순서를 변경하세요.",
+    "built_in_dialog": {
+      "title": "기본 상태는 변경할 수 없습니다",
+      "description": "기본 상태는 Multica 시스템 동작에 사용되므로 편집하거나 보관할 수 없습니다. 카테고리 내 순서는 변경할 수 있습니다.",
+      "confirm": "확인"
+    },
     "editor": {
       "create_title": "새 상태",
       "edit_title": "상태 편집",
-      "behavior_hint": "이 상태는 \"{{category}}\"와 정확히 같게 동작합니다.",
       "name": "이름",
       "name_placeholder": "예: Code Review",
       "key_hint": "API와 CLI에서는 {{key}}로 참조합니다.",
       "created": "상태를 만들었습니다. API와 CLI에서는 {{key}}로 참조합니다.",
       "category": "카테고리",
-      "category_locked": "카테고리는 변경할 수 없습니다. 이미 이 상태인 태스크가 이에 의존합니다.",
+      "category_locked": "상태를 만든 뒤에는 카테고리를 변경할 수 없습니다.",
       "description": "설명",
       "description_placeholder": "팀에게 이 상태가 의미하는 것",
       "color": "색상",
+      "icon": "아이콘 모양",
+      "icon_shapes": {
+        "default": "기본값",
+        "dotted": "점선 원",
+        "circle": "원",
+        "half": "반원 채우기",
+        "three_quarters": "4분의 3 채우기",
+        "check": "체크",
+        "slash": "사선",
+        "cross": "엑스"
+      },
       "cancel": "취소",
       "save": "저장",
       "saving": "저장 중…",
       "save_failed": "상태를 저장하지 못했습니다."
     },
     "archive_dialog": {
+      "retry": "보관 다시 시도",
       "title": "이 상태를 보관할까요?",
-      "description": "\"{{name}}\"은(는) 새 태스크에 지정할 수 없게 됩니다. 이미 이 상태인 태스크는 그대로 유지되며 동작도 달라지지 않습니다.",
+      "description": "\"{{name}}\"의 모든 태스크를 다른 상태로 이동하세요. 비어 있을 때 보관할 수 있으며, 보관하면 보드와 상태 선택 목록에서 제거됩니다.",
+      "in_use_title": "보관 전에 태스크 이동",
+      "in_use": "아직 {{count}}개의 태스크가 이 상태를 사용합니다. 완료되거나 취소된 태스크도 다른 상태로 이동한 후 다시 시도하세요.",
+      "view_issues": "태스크 보기",
+      "archiving": "보관 중...",
       "cancel": "취소",
       "confirm": "보관",
       "failed": "보관하지 못했습니다."
     },
+    "category_labels": {
+      "unstarted": "시작 전",
+      "started": "시작됨",
+      "done": "완료",
+      "closed": "종료"
+    },
     "categories": {
+      "unstarted": "백로그와 계획된 작업을 포함하여 아직 시작하지 않은 작업입니다.",
+      "started": "진행 중이거나 리뷰 또는 차단 상태인 작업입니다.",
+      "done": "완료된 작업입니다.",
+      "closed": "완료하지 않기로 한 작업입니다."
+    },
+    "built_in_descriptions": {
       "backlog": "보류. 여기로 옮겨도 에이전트가 시작되지 않습니다.",
       "todo": "대기 중. 여기로 옮기면 담당 에이전트가 시작됩니다.",
       "in_progress": "진행 중.",
       "in_review": "전달 완료, 리뷰 대기. 오토파일럿 실행을 마무리합니다.",
-      "done": "완료.",
       "blocked": "외부 의존성으로 중단됨.",
+      "done": "완료.",
       "cancelled": "진행하지 않기로 함."
     }
   },
@@ -128,7 +163,12 @@
     "sticky_comment_bar": {
       "title": "댓글 입력창 고정",
       "hint": "태스크 페이지를 스크롤할 때 댓글 입력창을 항상 하단에 고정합니다."
-    }
+    },
+    "description": "Multica 사용 환경을 맞춤 설정합니다.",
+    "issue_title": "태스크 생성",
+    "comments_title": "댓글",
+    "device_hint": "현재 기기에 저장됩니다.",
+    "issue_scope": "이 설정은 현재 기기의 현재 워크스페이스에 적용되며 태스크 생성 시 표시되는 필드만 변경합니다."
   },
   "shortcuts": {
     "title": "키보드 단축키",
@@ -183,10 +223,6 @@
       "findInIssue": {
         "label": "태스크에서 찾기",
         "description": "열린 태스크 상세 내용에서 검색합니다."
-      },
-      "openThreadNav": {
-        "label": "스레드 내비게이터 열기",
-        "description": "열린 태스크의 댓글 스레드를 나열하고 검색해 이동합니다."
       },
       "archiveInboxItem": {
         "label": "알림 보관",
@@ -291,22 +327,32 @@
     "title": "MCP",
     "description": "이 워크스페이스의 MCP 서버 라이브러리입니다. 여기에 추가해도 어떤 에이전트에도 할당되지 않으며, 에이전트 소유자가 해당 에이전트의 MCP 탭에서 할당하고 에이전트별로 켜고 끌 수 있습니다.",
     "servers_title": "공유 서버",
-    "write_only_note": "저장된 설정은 쓰기 전용이라 url, 명령, 헤더, 환경 변수는 다시 표시되지 않으므로 서버 편집은 설정을 교체하는 것입니다. 이름 변경은 안전하며 할당은 유지됩니다.",
+    "write_only_note": "민감한 정보를 보호하기 위해 저장된 URL, 명령, 헤더, 환경 변수는 다시 표시되지 않습니다. 변경하려면 새 설정을 모두 입력하세요. 이름만 바꾸면 현재 설정과 에이전트 할당은 그대로 유지됩니다.",
     "add_server": "서버 추가",
-    "edit_server": "서버 편집",
+    "rename_server": "서버 이름 변경",
+    "rename_action": "이름 변경",
+    "replace_config": "설정 교체",
+    "rename_save": "이름 저장",
+    "rename_cancel": "이름 변경 취소",
+    "rename_required": "서버 이름을 입력하세요.",
+    "rename_invalid": "문자, 숫자, 하이픈, 밑줄만 사용할 수 있습니다.",
+    "rename_duplicate": "같은 이름의 서버가 이미 있습니다.",
     "remove_server": "서버 제거",
+    "remove_action": "삭제",
     "empty_title": "공유 MCP 서버가 없습니다",
     "empty_description": "여기에 서버를 추가한 뒤, 사용할 에이전트의 MCP 탭에서 할당하세요.",
     "disabled_badge": "비활성화됨",
     "admin_only_note": "공유 MCP 서버는 워크스페이스 owner와 admin만 변경할 수 있습니다.",
     "delete_title": "공유 서버를 제거할까요?",
-    "delete_description": "{{name}}은(는) 라이브러리와 할당된 모든 에이전트에서 제거되며 각 에이전트의 다음 작업부터 적용됩니다.",
+    "delete_description": "{{name}}은(는) 라이브러리와 할당된 모든 에이전트에서 제거되며 각 에이전트의 다음 실행부터 적용됩니다.",
     "delete_confirm": "제거",
     "cancel": "취소",
     "added_toast": "공유 MCP 서버를 추가했습니다",
     "updated_toast": "공유 MCP 서버를 업데이트했습니다",
+    "renamed_toast": "공유 MCP 서버 이름을 변경했습니다",
     "removed_toast": "공유 MCP 서버를 제거했습니다",
     "save_failed_toast": "공유 MCP 서버를 저장하지 못했습니다",
+    "rename_failed_toast": "공유 MCP 서버 이름을 변경하지 못했습니다",
     "remove_failed_toast": "공유 MCP 서버를 제거하지 못했습니다"
   },
   "page": {
@@ -334,7 +380,16 @@
       "plugins": "Plugins",
       "mcp": "MCP",
       "billing": "결제 및 요금제"
-    }
+    },
+    "groups": {
+      "personal": "개인 설정",
+      "workspace": "워크스페이스 관리",
+      "issues": "태스크 설정",
+      "connections": "연결 및 확장",
+      "device": "데스크톱 앱"
+    },
+    "navigate": "설정 페이지로 이동",
+    "device_scope": "현재 기기"
   },
   "plugins": {
     "title": "Plugins",
@@ -395,8 +450,8 @@
       "issues_write": "태스크 생성 및 수정",
       "comments_read": "댓글 읽기",
       "comments_write": "댓글 작성",
-      "tasks_read": "agent task 읽기",
-      "tasks_write": "agent task 시작 및 업데이트",
+      "tasks_read": "에이전트 실행 읽기",
+      "tasks_write": "에이전트 실행 시작 및 업데이트",
       "agents_read": "agent 목록 읽기",
       "members_read": "멤버 목록 읽기",
       "storage_user": "멤버별로 데이터 저장",
@@ -586,7 +641,7 @@
       },
       "agent_activity": {
         "label": "에이전트 활동",
-        "description": "에이전트 작업이 완료되거나 실패할 때"
+        "description": "에이전트 실행이 완료되거나 실패할 때"
       }
     },
     "system": {
@@ -708,8 +763,8 @@
     "master_description_off": "GitHub 기능이 꺼져 있습니다. PR 사이드바, Co-authored-by 트레일러, 자동 연결이 일시 중지됩니다. 백엔드 데이터는 삭제되지 않습니다.",
     "section_connection": "연결",
     "connection_title": "GitHub App",
-    "connection_description_prefix": "태스크를 Pull request에 자동으로 연결합니다. 브랜치, 제목 또는 본문에",
-    "connection_description_suffix": "이(가) 있는 PR이 병합되면 해당 태스크가",
+    "connection_description_prefix": "태스크를 Pull request에 자동으로 연결합니다. PR의 브랜치 이름이나 제목에",
+    "connection_description_suffix": "이(가) 있거나 본문에 Closes MUL-123이 있으면 해당 태스크에 연결되고, 그 종료 키워드가 있는 PR이 병합될 때만 해당 태스크가",
     "connection_description_done": "완료",
     "connection_identifier_example": "MUL-123",
     "connected_to": "{{login}}에 연결됨",
@@ -738,7 +793,7 @@
     "feature_co_author_description_prefix": "에이전트가 작성한 커밋에",
     "feature_co_author_description_suffix": "을(를) 추가합니다.",
     "feature_auto_link_label": "태스크와 PR 자동 연결",
-    "feature_auto_link_description": "PR 제목, 본문, 브랜치 이름을 태스크 식별자와 대조해 자동으로 연결합니다.",
+    "feature_auto_link_description": "PR 제목과 브랜치 이름, 그리고 본문에서 종료 키워드 바로 뒤에 있는 번호를 태스크 식별자와 대조해 자동으로 연결합니다.",
     "section_repositories": "저장소",
     "repositories_shortcut_label": "저장소 URL은 저장소 탭에 있습니다",
     "repositories_shortcut_link": "저장소 관리 →",
@@ -893,7 +948,7 @@
       "settings_saved": "데몬 설정을 저장했습니다",
       "settings_save_failed": "데몬 설정을 저장하지 못했습니다",
       "signin_expired": "로그인이 만료되었습니다",
-      "signin_expired_description": "로컬 데몬을 인증할 수 없어 이 기기에서 작업을 받을 수 없습니다. 다시 로그인해 복구하세요.",
+      "signin_expired_description": "로컬 데몬을 인증할 수 없어 이 기기에서 실행을 받을 수 없습니다. 다시 로그인해 복구하세요.",
       "signin_again": "다시 로그인",
       "external_description_before": "이 기기의 데몬은 앱 외부(예: WSL2)에서 실행되므로 앱에서 시작하거나 중지할 수 없습니다. 해당 환경에서 다음 명령을 실행하세요:",
       "external_description_after": ".",
@@ -934,8 +989,8 @@
       "stop": "중지",
       "start": "시작",
       "retry_setup": "설정 재시도",
-      "stop_confirm_title_other": "활성 작업 {{count}}개를 중단하고 데몬을 중지할까요?",
-      "stop_confirm_description_other": "이 기기에서 작업 {{count}}개가 실행 중입니다. 지금 중지하면 작업이 중단되고 시간 초과 후 실패로 표시됩니다. 데몬은 자동으로 다시 시작되지 않습니다.",
+      "stop_confirm_title_other": "활성 실행 {{count}}개를 중단하고 데몬을 중지할까요?",
+      "stop_confirm_description_other": "이 기기에서 실행 {{count}}개가 진행 중입니다. 지금 중지하면 실행이 중단되고 시간 초과 후 실패로 표시됩니다. 데몬은 자동으로 다시 시작되지 않습니다.",
       "cancel": "취소",
       "stop_daemon": "데몬 중지",
       "logs_title": "로컬 데몬 로그",
@@ -1295,5 +1350,21 @@
     "byo_credentials_unverifiable": "WeCom에 연결하지 못해 이 봇을 확인할 수 없었어요. 인증 정보는 변경되지 않았어요. 잠시 후 다시 시도해 주세요.",
     "byo_install_failed": "봇을 저장하지 못했어요. 저희 쪽 문제입니다. 인증 정보는 변경되지 않았어요. 다시 시도해 보시고, 계속 실패하면 지원팀에 문의해 주세요.",
     "byo_failed_toast": "WeCom 봇을 연결하지 못했어요"
+  },
+  "integrations": {
+    "description": "도구를 연결하고 각 연동을 관리하세요.",
+    "code_title": "코드 및 저장소",
+    "messaging_title": "메시지 채널",
+    "apps_title": "내 앱 연결",
+    "apps_scope": "이 앱 연결은 내 계정에 속합니다. 워크스페이스 채널 연결은 위에서 관리합니다.",
+    "github_hint": "GitHub를 연결하고 풀 리퀘스트 연결을 설정합니다.",
+    "vcs_hint": "GitLab, Gitea 또는 Forgejo를 연결합니다.",
+    "apps_hint": "Composio를 통해 에이전트용 앱을 승인합니다.",
+    "back": "모든 연동",
+    "status_connected": "연결됨",
+    "status_not_connected": "연결되지 않음",
+    "status_loading": "확인 중...",
+    "status_unknown": "상태를 확인할 수 없음",
+    "channel_hint": "{{channel}}에서 에이전트와 대화하고 태스크를 생성합니다."
   }
 }
