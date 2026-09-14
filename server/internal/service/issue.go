@@ -164,6 +164,11 @@ var ErrIssueLabelNotFound = errors.New("issue label not found in this workspace"
 // it arrived, so retrying against the refreshed catalog is the remedy.
 var ErrIssueStatusUnavailable = errors.New("issue status is no longer available")
 
+// ErrStatusReservedForTriage signals a create that asked for the reserved
+// `triage` status. An issue enters Triage only through Triage intake, never
+// through an ordinary create; callers translate this into a 400.
+var ErrStatusReservedForTriage = errors.New("status triage is reserved for Triage intake")
+
 var ErrSourceContextAlreadyAttached = errors.New("source context is already attached")
 
 // IssueCreateResult is the typed return from IssueService.Create.
@@ -211,6 +216,11 @@ type IssueCreateResult struct {
 // Caller-owned validation is limited to transport-shaped checks: title
 // required, RFC3339 date format, assignee pair sanity.
 func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts IssueCreateOpts) (IssueCreateResult, error) {
+	// Checked here as well as at the transport so every create entry shares
+	// the rule; the built-in skip below would otherwise let the key through.
+	if p.Status == issuestatus.Triage {
+		return IssueCreateResult{}, ErrStatusReservedForTriage
+	}
 	issueCountPolicy := ResolveIssueCountPolicy(ctx, s.Entitlements, p.WorkspaceID)
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
@@ -728,8 +738,7 @@ func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue,
 		return pgtype.UUID{}
 	}
 	// Backlog is the parking lot: nothing runs from it, so nothing here needs
-	// explaining either. A custom status in the backlog category parks the
-	// same way. (MUL-6243)
+	// explaining either. Custom unstarted statuses do not inherit parking.
 	if issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, issue.Status) == "backlog" {
 		return pgtype.UUID{}
 	}
