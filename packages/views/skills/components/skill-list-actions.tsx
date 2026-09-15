@@ -54,7 +54,7 @@ import { useT } from "../../i18n";
 import { useIntentNavigate } from "../../navigation";
 import { isRefreshableOrigin, readOrigin } from "../lib/origin";
 import { RefreshSkillDialog } from "./refresh-skill-dialog";
-import type { SkillRow } from "./skills-page";
+import type { SkillRow } from "./skill-list-filter";
 
 // Shared context the row kebab and the batch toolbar both need. Assembled
 // once at the page level.

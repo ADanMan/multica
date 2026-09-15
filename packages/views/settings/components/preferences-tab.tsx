@@ -116,6 +116,7 @@ function GeneralPreferences() {
     { value: "zh-Hans", label: t(($) => $.preferences.language.chinese) },
     { value: "ko", label: t(($) => $.preferences.language.korean) },
     { value: "ja", label: t(($) => $.preferences.language.japanese) },
+    { value: "fr", label: t(($) => $.preferences.language.french) },
     { value: "ru", label: t(($) => $.preferences.language.russian) },
   ];
 
