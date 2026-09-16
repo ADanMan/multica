@@ -129,6 +129,64 @@ describe("ApiClient schema fallback", () => {
     });
   });
 
+  describe("listSkills", () => {
+    const baseSkill = {
+      id: "skill-1",
+      workspace_id: "ws-1",
+      name: "review-helper",
+      description: "",
+      config: {},
+      created_by: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    const skillLabel = {
+      id: "label-1",
+      workspace_id: "ws-1",
+      resource_type: "skill",
+      name: "mattpocock",
+      color: "#3b82f6",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+
+    it("falls back to an empty list when the response is malformed", async () => {
+      stubFetchJson({ skills: "not-an-array" });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listSkills();
+      expect(res).toEqual([]);
+    });
+
+    it("treats a missing labels field as an empty array (older backends)", async () => {
+      stubFetchJson([baseSkill]);
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listSkills();
+      expect(res).toHaveLength(1);
+      expect(res[0]?.id).toBe("skill-1");
+      expect(res[0]?.labels).toEqual([]);
+      // List parsing must not invent detail-only fields (GH #2174).
+      expect(res[0]).not.toHaveProperty("content");
+      expect(res[0]).not.toHaveProperty("files");
+    });
+
+    it("keeps a well-formed labels array", async () => {
+      stubFetchJson([{ ...baseSkill, labels: [skillLabel] }]);
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listSkills();
+      expect(res[0]?.labels?.map((l) => l.id)).toEqual(["label-1"]);
+      expect(res[0]?.labels?.[0]?.resource_type).toBe("skill");
+    });
+
+    it("catches malformed labels to [] without dropping the skill", async () => {
+      stubFetchJson([{ ...baseSkill, labels: [{ nope: true }] }]);
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.listSkills();
+      expect(res).toHaveLength(1);
+      expect(res[0]?.id).toBe("skill-1");
+      expect(res[0]?.labels).toEqual([]);
+    });
+  });
+
   describe("getIssue", () => {
     // Unlike a list, a single issue has no safe-empty shape, and the bare
     // identifier autolink caches this result for 5 minutes. A malformed 2xx
@@ -320,7 +378,14 @@ describe("ApiClient schema fallback", () => {
       stubFetchJson({ issues: "not-an-array", total: 0 });
       const client = new ApiClient("https://api.example.test");
       const res = await client.searchIssues({ q: "bug" });
-      expect(res).toEqual({ issues: [], total: 0 });
+      expect(res).toEqual({ issues: [] });
+    });
+
+    it("accepts a response without an exact total", async () => {
+      stubFetchJson({ issues: [] });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.searchIssues({ q: "bug" });
+      expect(res).toEqual({ issues: [] });
     });
   });
 
@@ -329,7 +394,14 @@ describe("ApiClient schema fallback", () => {
       stubFetchJson({ projects: "not-an-array", total: 0 });
       const client = new ApiClient("https://api.example.test");
       const res = await client.searchProjects({ q: "roadmap" });
-      expect(res).toEqual({ projects: [], total: 0 });
+      expect(res).toEqual({ projects: [] });
+    });
+
+    it("accepts a response without an exact total", async () => {
+      stubFetchJson({ projects: [] });
+      const client = new ApiClient("https://api.example.test");
+      const res = await client.searchProjects({ q: "roadmap" });
+      expect(res).toEqual({ projects: [] });
     });
   });
 

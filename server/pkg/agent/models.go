@@ -31,11 +31,12 @@ import (
 // default, which is always closer to what the user's account /
 // environment actually supports than a static guess here.
 type Model struct {
-	ID           string             `json:"id"`
-	Label        string             `json:"label"`
-	Provider     string             `json:"provider,omitempty"`
-	Default      bool               `json:"default,omitempty"`
-	ServiceTiers []ModelServiceTier `json:"service_tiers,omitempty"`
+	ID                                  string             `json:"id"`
+	Label                               string             `json:"label"`
+	Provider                            string             `json:"provider,omitempty"`
+	Default                             bool               `json:"default,omitempty"`
+	ServiceTiers                        []ModelServiceTier `json:"service_tiers,omitempty"`
+	SupportsExplicitStandardServiceTier bool               `json:"supports_explicit_standard_service_tier,omitempty"`
 	// Thinking advertises the runtime's reasoning/effort catalog for this
 	// model. nil means the runtime/model has no thinking-level control
 	// (or the daemon couldn't discover one); the UI hides its picker. The
@@ -43,6 +44,29 @@ type Model struct {
 	// per-model and Claude's `--effort` superset has known per-model gaps
 	// (`xhigh` is Opus-only, `max` is session-only). See MUL-2339.
 	Thinking *ModelThinking `json:"thinking,omitempty"`
+}
+
+// UnavailableModel is a model the runtime named but will not run on this host —
+// today only Claude Code, reporting one that needs a newer CLI than the
+// installed one. Reason is the runtime's own remedy ("Update to 2.1.255+ to use
+// Fable 5.1"), forwarded verbatim so the copy stays right without Multica
+// tracking upstream version floors.
+//
+// It is a distinct type, and travels in a distinct list, precisely so it can
+// never be mistaken for something selectable. Marking such a row with a flag
+// inside the models list was the first attempt and it was wrong twice over:
+// every consumer that did not learn the flag (the inspector picker, the agent
+// builder) kept offering it, and — the part a flag cannot fix — an already
+// installed desktop client does not know the field at all, so it would render
+// the row as an ordinary model and persist a model id the CLI rejects. Keeping
+// the two lists separate makes old clients correct by construction, since they
+// only ever read `models` (MUL-6961).
+type UnavailableModel struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Reason is display copy, not a machine contract: it comes from the
+	// runtime and may be empty when it offered none.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ModelServiceTier is one runtime-native execution tier advertised for a
@@ -83,6 +107,11 @@ type ThinkingLevel struct {
 // plus whether they were actually discovered.
 type Catalog struct {
 	Models []Model
+	// Unavailable carries models the runtime named but will not run here. It is
+	// deliberately NOT part of Models: every capability lookup in this package
+	// walks Models, so keeping these out is what makes an unrunnable model fail
+	// closed everywhere without each lookup having to remember a flag.
+	Unavailable []UnavailableModel
 	// Fallback reports that discovery did not succeed and Models is a static
 	// stand-in rather than the runtime's real catalog.
 	//
@@ -108,8 +137,9 @@ func discovered(models []Model, err error) (Catalog, error) {
 // modelCache memoizes dynamic discovery calls so repeated UI loads
 // don't re-shell the agent CLI. Entries expire after cacheTTL.
 type modelCacheEntry struct {
-	models    []Model
-	expiresAt time.Time
+	models      []Model
+	unavailable []UnavailableModel
+	expiresAt   time.Time
 }
 
 var (
@@ -121,15 +151,14 @@ const modelCacheTTL = 60 * time.Second
 
 // ListModels returns the models supported by the given agent provider.
 // For providers with a known static catalog it returns the baked-in
-// list; for providers with a CLI discovery mechanism (codex, opencode,
-// pi, openclaw) it shells out with caching and falls back where the
+// list; for providers with a CLI discovery mechanism (claude, codex,
+// opencode, pi, openclaw) it shells out with caching and falls back where the
 // provider has a safe static catalog.
 //
-// For claude, codex, opencode, pi, and kimi, the catalog is augmented with
-// per-model thinking-level options discovered from the local CLI. Codex
-// discovery failures fall back to a model + thinking snapshot; providers
-// without a safe fallback leave Thinking nil, which makes the UI hide the
-// thinking picker.
+// For claude, codex, opencode, pi, and kimi, the catalog carries per-model
+// thinking-level options taken from the local CLI. Claude and Codex discovery
+// failures fall back to a model + thinking snapshot; providers without a safe
+// fallback leave Thinking nil, which makes the UI hide the thinking picker.
 //
 // runtimeCmd lets the caller point at a non-default binary; pass the zero
 // Command to use the provider's default name on PATH. Its launch prefix — a
@@ -155,11 +184,9 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 	}
 	switch providerType {
 	case "claude":
-		models := claudeStaticModels()
-		annotateClaudeThinking(ctx, models, runtimeCmd)
-		// Claude's catalog is static by design, not by failure: there is no
-		// discovery step to fall back from, so this is authoritative.
-		return Catalog{Models: models}, nil
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discoverClaudeCatalog(ctx, runtimeCmd), nil
+		})
 	case "codex":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discovered(discoverCodexModels(ctx, runtimeCmd), nil)
@@ -213,6 +240,10 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 	case "opencode":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discovered(discoverOpenCodeModels(ctx, runtimeCmd))
+		})
+	case "codearts":
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discovered(discoverCodeArtsModels(ctx, runtimeCmd))
 		})
 	case "deveco":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
@@ -477,9 +508,9 @@ func modelHasKnownPrefix(model string) bool {
 func cachedDiscovery(key string, fn func() (Catalog, error)) (Catalog, error) {
 	modelCacheMu.Lock()
 	if entry, ok := modelCache[key]; ok && time.Now().Before(entry.expiresAt) {
-		out := entry.models
+		out, unavailable := entry.models, entry.unavailable
 		modelCacheMu.Unlock()
-		return Catalog{Models: out}, nil
+		return Catalog{Models: out, Unavailable: unavailable}, nil
 	}
 	modelCacheMu.Unlock()
 
@@ -504,7 +535,11 @@ func cachedDiscovery(key string, fn func() (Catalog, error)) (Catalog, error) {
 	}
 
 	modelCacheMu.Lock()
-	modelCache[key] = modelCacheEntry{models: catalog.Models, expiresAt: time.Now().Add(modelCacheTTL)}
+	modelCache[key] = modelCacheEntry{
+		models:      catalog.Models,
+		unavailable: catalog.Unavailable,
+		expiresAt:   time.Now().Add(modelCacheTTL),
+	}
 	modelCacheMu.Unlock()
 	return catalog, nil
 }
@@ -537,6 +572,7 @@ func claudeStaticModels() []Model {
 	return []Model{
 		{ID: "claude-sonnet-5", Label: "Claude Sonnet 5", Provider: "anthropic"},
 		{ID: "claude-sonnet-4-6", Label: "Claude Sonnet 4.6", Provider: "anthropic", Default: true},
+		{ID: "claude-fable-5-1", Label: "Claude Fable 5.1", Provider: "anthropic"},
 		{ID: "claude-fable-5", Label: "Claude Fable 5", Provider: "anthropic"},
 		{ID: "claude-opus-5", Label: "Claude Opus 5", Provider: "anthropic"},
 		{ID: "claude-opus-4-8", Label: "Claude Opus 4.8", Provider: "anthropic"},
@@ -564,8 +600,9 @@ func codexStaticModels() []Model {
 	// multica#2009). It is deliberately NOT used to validate effort for an
 	// empty (follow-CLI-config) model: that config can resolve to any model,
 	// so ValidateThinkingLevel fails an empty codex model closed rather than
-	// borrowing this entry's catalog (which alone advertises `ultra`) — see
-	// ValidateThinkingLevel and MUL-4347. Keep exactly one entry flagged.
+	// borrowing this entry's catalog (Astra/Sol/Terra advertise `ultra`; Luna
+	// does not) — see ValidateThinkingLevel and MUL-4347. Keep exactly one
+	// entry flagged.
 	standardThinking := func(defaultLevel string, includeMax, includeUltra bool) *ModelThinking {
 		levels := []ThinkingLevel{
 			{Value: "low", Label: "Low", Description: "Fast responses with lighter reasoning"},
@@ -593,7 +630,8 @@ func codexStaticModels() []Model {
 		}
 	}
 	return []Model{
-		{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Provider: "openai", Default: true, Thinking: standardThinking("low", true, true)},
+		{ID: "gpt-6-astra", Label: "GPT-6 Astra", Provider: "openai", Default: true, Thinking: standardThinking("low", true, true)},
+		{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Provider: "openai", Thinking: standardThinking("low", true, true)},
 		{ID: "gpt-5.6-terra", Label: "GPT-5.6 Terra", Provider: "openai", Thinking: standardThinking("medium", true, true)},
 		{ID: "gpt-5.6-luna", Label: "GPT-5.6 Luna", Provider: "openai", Thinking: standardThinking("medium", true, false)},
 		{ID: "gpt-5.5", Label: "GPT-5.5", Provider: "openai", Thinking: standardThinking("medium", false, false)},
@@ -1326,13 +1364,17 @@ func discoverOmpModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 // Using the bare id would let omp's internal provider priority ranking pick a
 // different backend for the same model id. Provider is kept for UI grouping.
 // The dedup key is the selector when present, falling back to provider/id.
+// Model.Thinking comes from the entry's `reasoning`/`thinking` fields — see
+// ompThinkingFromCatalogEntry for omp's own rules about what those mean.
 func parseOmpModels(data []byte) ([]Model, error) {
 	var wrapper struct {
 		Models []struct {
-			ID       string `json:"id"`
-			Provider string `json:"provider"`
-			Selector string `json:"selector"`
-			Name     string `json:"name"`
+			ID        string          `json:"id"`
+			Provider  string          `json:"provider"`
+			Selector  string          `json:"selector"`
+			Name      string          `json:"name"`
+			Reasoning bool            `json:"reasoning"`
+			Thinking  json.RawMessage `json:"thinking"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -1366,9 +1408,72 @@ func parseOmpModels(data []byte) ([]Model, error) {
 		if label == "" {
 			label = selector
 		}
-		models = append(models, Model{ID: selector, Label: label, Provider: provider})
+		models = append(models, Model{
+			ID:       selector,
+			Label:    label,
+			Provider: provider,
+			Thinking: ompThinkingFromCatalogEntry(e.Reasoning, e.Thinking),
+		})
 	}
 	return models, nil
+}
+
+// ompThinkingFromCatalogEntry maps one `omp models --json` entry's reasoning
+// metadata onto Multica's per-model effort catalog.
+//
+// The rules are omp's own, verified against can1357/oh-my-pi v18.2.0:
+//
+//   - `models --json` emits `thinking` as a concrete effort array or `null`,
+//     never an object — see ModelJson/toModelJson in cli/models-cli.ts.
+//   - omp's Effort vocabulary is minimal|low|medium|high|xhigh|max. `off` is
+//     NOT an effort and so never appears in that array (catalog/src/effort.ts).
+//   - `reasoning: true` with `thinking: null` means "reasons, but exposes no
+//     controllable effort dial": getSupportedEfforts documents that exact case.
+//     Inferring efforts there would offer levels omp then clamps away, which is
+//     the silent mismatch MUL-7412 exists to remove.
+//   - `off` is honoured for any model whatever its effort array, because
+//     resolveThinkingLevelForModel returns it before clamping runs
+//     (coding-agent/src/thinking.ts).
+//
+// So a reasoning model gets `off` plus exactly the efforts the catalog
+// advertised, and nothing inferred. A non-reasoning model gets no picker at
+// all, matching how Multica hides pi's inert `off`-only control.
+//
+// `auto` is deliberately excluded: omp keeps AUTO_THINKING as a session-level
+// sentinel that is explicitly never an Effort or ThinkingLevel and is resolved
+// per turn, so it is not a per-model capability, and providerThinkingEnums
+// rejects it (MUL-7412).
+func ompThinkingFromCatalogEntry(reasoning bool, raw json.RawMessage) *ModelThinking {
+	if !reasoning {
+		return nil
+	}
+	// `off` is always available; the catalog only ever adds efforts on top.
+	advertised := map[string]bool{"off": true}
+	for _, effort := range parseOmpEfforts(raw) {
+		advertised[strings.TrimSpace(effort)] = true
+	}
+	levels := make([]ThinkingLevel, 0, len(piThinkingLevelOrder))
+	for _, value := range piThinkingLevelOrder {
+		if advertised[value] {
+			levels = append(levels, ThinkingLevel{Value: value, Label: piThinkingLevelLabels[value]})
+		}
+	}
+	return &ModelThinking{SupportedLevels: levels}
+}
+
+// parseOmpEfforts reads the effort array out of a catalog entry's `thinking`
+// field. An absent field, `null`, and any shape that is not an array of strings
+// all yield no efforts: a payload we cannot read is not evidence that the model
+// supports anything.
+func parseOmpEfforts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var efforts []string
+	if err := json.Unmarshal(raw, &efforts); err != nil {
+		return nil
+	}
+	return efforts
 }
 
 // discoverHermesModels spins up a throwaway `hermes acp` process,
@@ -2578,6 +2683,17 @@ func discoverOpenclawAgents(ctx context.Context, runtimeCmd Command) ([]Model, e
 
 	// Try JSON modes first. Different openclaw builds expose the
 	// flag under different names; trying a couple is cheap.
+	//
+	// outputOwned, and this loop already has the salvage built in: a lingering
+	// `openclaw-config` helper makes Wait report exec.ErrWaitDelay with the
+	// catalog in the buffer, and `err != nil && len(out) == 0` lets a populated
+	// buffer through to the parse. The parse is the real gate — a truncated list
+	// does not unmarshal, so a short catalog cannot be mistaken for the real one.
+	//
+	// Not the collector in run_collect_quiet.go: it returns on the direct child's
+	// exit, and a wrapper that exits before the real CLI has printed would have
+	// its catalog killed mid-write. Pipe EOF is the signal that no more output is
+	// coming. See detectCLIVersion.
 	for _, jsonArgs := range [][]string{
 		{"agents", "list", "--json"},
 		{"agents", "list", "--output", "json"},

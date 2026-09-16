@@ -14,6 +14,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { getCurrentWsId } from "@multica/core/platform";
 import { flattenIssueBuckets, issueKeys } from "@multica/core/issues/queries";
 import { issueStatusCategory } from "@multica/core/issues";
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { useAuthStore } from "@multica/core/auth";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
@@ -202,7 +203,7 @@ function mergeMentionItems(
  */
 function isDemotedCancelled(item: MentionItem, query: string): boolean {
   if (isPinnedAboveTruncation(item, query)) return false;
-  if (item.type === "issue") return item.statusCategory === "cancelled";
+  if (item.type === "issue") return item.statusCategory === "closed";
   if (item.type === "project") return item.projectStatus === "cancelled";
   return false;
 }
@@ -262,6 +263,7 @@ function demoteCancelledItems(items: MentionItem[], query: string): MentionItem[
 export const MentionList = forwardRef<MentionListRef, MentionListProps>(
   function MentionList({ items, query, command, includeProjectSearch = false }, ref) {
     const { t } = useT("editor");
+    const { colorOf: statusColorOf, iconOf: statusIconOf } = useIssueStatuses(getCurrentWsId() ?? "");
     // Selection is tracked by item identity, NOT by a positional index. The
     // list is re-bucketed by groupItems() and grows asynchronously (server
     // search results), so a slot index is not a stable target — the row under
@@ -469,6 +471,12 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
           <MentionRow
             key={`${item.type}-${item.id}`}
             item={item}
+            statusIcon={item.type === "issue" && item.status ? statusIconOf(item.status) : null}
+            statusColor={
+              item.type === "issue" && item.status
+                ? statusColorOf(item.status)
+                : null
+            }
             selected={idx === selectedIndex}
             onSelect={() => selectItem(item)}
             buttonRef={(el) => { itemRefs.current[idx] = el; }}
@@ -517,11 +525,15 @@ export const MentionList = forwardRef<MentionListRef, MentionListProps>(
 
 function MentionRow({
   item,
+  statusColor,
+  statusIcon,
   selected,
   onSelect,
   buttonRef,
 }: {
   item: MentionItem;
+  statusColor?: string | null;
+  statusIcon?: string | null;
   selected: boolean;
   onSelect: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
@@ -532,7 +544,7 @@ function MentionRow({
     // Visually dim closed issues (done/cancelled) so they're distinguishable
     // from active ones in the suggestion list — they're still selectable.
     const isClosed =
-      item.statusCategory === "done" || item.statusCategory === "cancelled";
+      item.statusCategory === "done" || item.statusCategory === "closed";
     return (
       <button
         type="button"
@@ -547,6 +559,8 @@ function MentionRow({
             <StatusIcon
               status={item.status}
               category={item.statusCategory}
+              color={statusColor}
+              icon={statusIcon}
               className="h-3.5 w-3.5"
             />
           ) : (
@@ -624,14 +638,14 @@ function MentionRow({
         {item.type === "all" ? t(($) => $.mention.all_members) : item.label}
       </span>
       {item.type === "agent" && (
-        // "Agent" is a glossary-protected product term — kept un-translated.
-        // eslint-disable-next-line i18next/no-literal-string
-        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">Agent</Badge>
+        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">
+          {t(($) => $.mention.agent_badge)}
+        </Badge>
       )}
       {item.type === "squad" && (
-        // "Squad" is a glossary-protected product term — kept un-translated.
-        // eslint-disable-next-line i18next/no-literal-string
-        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">Squad</Badge>
+        <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">
+          {t(($) => $.mention.squad_badge)}
+        </Badge>
       )}
     </button>
   );

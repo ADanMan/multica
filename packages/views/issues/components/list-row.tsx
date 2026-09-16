@@ -25,14 +25,15 @@ import { LabelChip } from "../../labels/label-chip";
 import { CustomStatusChip } from "./custom-status-chip";
 import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
 import { useIssueSurfaceSelection } from "../surface/selection-context";
+import { useLocale } from "../../i18n";
 
 export interface ChildProgress {
   done: number;
   total: number;
 }
 
-function formatDate(date: string): string {
-  return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
+function formatDate(date: string, locale: string): string {
+  return formatDateOnly(date, { month: "short", day: "numeric" }, locale);
 }
 
 function ListRowContent({
@@ -54,6 +55,7 @@ function ListRowContent({
   containerProps?: Record<string, unknown>;
   checkboxProps?: Pick<React.HTMLAttributes<HTMLDivElement>, "onClick" | "onMouseDown" | "onPointerDown">;
 }) {
+  const locale = useLocale();
   const selection = useIssueSurfaceSelection();
   const selected = selection.selectedIds.has(issue.id);
   const toggle = selection.toggle;
@@ -90,10 +92,12 @@ function ListRowContent({
           className="relative flex shrink-0 items-center justify-center w-4 h-4"
           {...checkboxProps}
         >
-          <PriorityIcon
-            priority={issue.priority}
-            className={selected ? "hidden" : "group-hover/row:hidden"}
-          />
+          {storeProperties.priority && issue.priority !== "none" && (
+            <PriorityIcon
+              priority={issue.priority}
+              className={selected ? "hidden" : "group-hover/row:hidden"}
+            />
+          )}
           <input
             type="checkbox"
             checked={selected}
@@ -108,15 +112,14 @@ function ListRowContent({
           newTabTitle={issue.identifier}
           className={`flex flex-1 items-center gap-2 min-w-0 ${isDragging ? "pointer-events-none" : ""}`}
         >
-          <span className="w-16 shrink-0 text-caption text-muted-foreground">
+          <span className="min-w-16 shrink-0 text-caption text-muted-foreground">
             {issue.identifier}
           </span>
           <IssueAgentActivityIndicator issueId={issue.id} />
 
           <span className="flex min-w-0 flex-1 items-center gap-1.5">
             <span className="truncate">{issue.title}</span>
-            {/* List sections are categories, so a custom status needs to name
-                itself on the row. Silent for built-ins. (MUL-6243) */}
+            {/* Keep custom names visible when this row appears outside a status section. */}
             <CustomStatusChip status={issue.status} className="shrink-0" />
             {showChildProgress && (
               <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5">
@@ -160,12 +163,12 @@ function ListRowContent({
           )}
           {showStartDate && (
             <span className="shrink-0 text-caption text-muted-foreground">
-              {formatDate(issue.start_date!)}
+              {formatDate(issue.start_date!, locale)}
             </span>
           )}
           {showDueDate && (
             <span className="shrink-0 text-caption text-muted-foreground">
-              {formatDate(issue.due_date!)}
+              {formatDate(issue.due_date!, locale)}
             </span>
           )}
           {showAssignee && (

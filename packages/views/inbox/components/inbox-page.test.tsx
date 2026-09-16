@@ -17,17 +17,31 @@ vi.mock("react-resizable-panels", () => ({
 // The page runs two queries — the active list and the archived one. They are
 // told apart by the queryKey their options carry, so each test can stock the
 // two lists independently.
-const listData: { active: InboxItem[]; archived: InboxItem[] } = {
+const listData: { active: InboxItem[]; archived: InboxItem[]; lookup?: InboxItem[] } = {
   active: [],
   archived: [],
 };
 
+const queryCalls: Array<{ queryKey: readonly unknown[]; enabled?: boolean }> = [];
+const lookupState = { isLoading: false, isError: false, refetch: vi.fn() };
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: (options: { queryKey: readonly unknown[] }) => ({
-    data: options.queryKey.includes("archived") ? listData.archived : listData.active,
+  useQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
+    queryCalls.push(options);
+    return ({
+    data: options.queryKey.includes("archived") ? { items: listData.lookup ?? listData.archived, hasMore: false, nextCursor: null } : listData.active,
     isLoading: false,
     isError: false,
-  }),
+    refetch: vi.fn(),
+    ...(options.queryKey.includes("lookup") ? lookupState : {}),
+  }); },
+  useInfiniteQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
+    queryCalls.push(options);
+    return ({
+    data: { pages: [{ items: listData.archived, hasMore: false, nextCursor: null }] },
+    isLoading: false, isError: false, hasNextPage: false,
+    isFetchingNextPage: false, isFetchNextPageError: false,
+    fetchNextPage: vi.fn(), refetch: vi.fn(),
+  }); },
 }));
 
 vi.mock("@multica/core/hooks", () => ({
@@ -55,7 +69,8 @@ vi.mock("@multica/core/issues/stores/draft-store", () => ({
 
 vi.mock("@multica/core/inbox/queries", () => ({
   inboxListOptions: () => ({ queryKey: ["inbox", "workspace-1", "list"] }),
-  archivedInboxListOptions: () => ({ queryKey: ["inbox", "workspace-1", "archived"] }),
+  archivedInboxPagesOptions: () => ({ queryKey: ["inbox", "workspace-1", "archived", "pages"] }),
+  archivedInboxLookupOptions: () => ({ queryKey: ["inbox", "workspace-1", "archived", "lookup"] }),
   deduplicateInboxItems: (items: InboxItem[]) => items.filter((i) => !i.archived),
   deduplicateArchivedInboxItems: (items: InboxItem[]) => items.filter((i) => i.archived),
   useInboxUnreadCount: () => 2,
@@ -69,9 +84,13 @@ const archiveMutate = vi.fn();
 const unarchiveMutate = vi.fn();
 const retrySourceContextMutateAsync = vi.fn();
 const showIssueLimitUpgradePrompt = vi.hoisted(() => vi.fn());
+const showAutopilotQuotaRecoveryPrompt = vi.hoisted(() => vi.fn());
 
 vi.mock("../../modals/use-issue-limit-upgrade-prompt", () => ({
-  useIssueLimitUpgradePrompt: () => showIssueLimitUpgradePrompt,
+  useIssueLimitUpgradePrompt: (reason?: string) =>
+    reason === "autopilot_quota"
+      ? showAutopilotQuotaRecoveryPrompt
+      : showIssueLimitUpgradePrompt,
 }));
 
 vi.mock("@multica/core/inbox/mutations", () => {
@@ -135,8 +154,27 @@ vi.mock("@multica/ui/components/ui/resizable", () => ({
   ResizablePanelGroup: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
   ),
-  ResizablePanel: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
+  ResizablePanel: ({
+    children,
+    id,
+    defaultSize,
+    minSize,
+    maxSize,
+  }: {
+    children: React.ReactNode;
+    id: string;
+    defaultSize?: number;
+    minSize?: number | string;
+    maxSize?: number | string;
+  }) => (
+    <div
+      data-testid={`panel-${id}`}
+      data-default-size={defaultSize}
+      data-min-size={minSize}
+      data-max-size={maxSize}
+    >
+      {children}
+    </div>
   ),
   ResizableHandle: () => null,
 }));
@@ -190,6 +228,21 @@ vi.mock("./inbox-context-menu", () => ({
   },
 }));
 vi.mock("./inbox-detail-label", () => ({ useTypeLabels: () => ({}) }));
+vi.mock("./autopilot-quota-notice", () => ({
+  AutopilotQuotaNotice: ({
+    onOpenRecovery,
+  }: {
+    onOpenRecovery: () => void;
+  }) => (
+    <button
+      type="button"
+      data-testid="autopilot-quota-recovery"
+      onClick={onOpenRecovery}
+    >
+      Recover
+    </button>
+  ),
+}));
 vi.mock("../../i18n", () => ({ useT: () => ({ t: () => "Inbox" }) }));
 
 function item(overrides: Partial<InboxItem> = {}): InboxItem {
@@ -218,6 +271,11 @@ function item(overrides: Partial<InboxItem> = {}): InboxItem {
 function reset() {
   listData.active = [];
   listData.archived = [];
+  listData.lookup = undefined;
+  lookupState.isLoading = false;
+  lookupState.isError = false;
+  lookupState.refetch.mockClear();
+  queryCalls.length = 0;
   searchParams = new URLSearchParams();
   replace.mockClear();
   markReadMutate.mockClear();
@@ -227,6 +285,7 @@ function reset() {
   retrySourceContextMutateAsync.mockReset();
   retrySourceContextMutateAsync.mockResolvedValue({});
   showIssueLimitUpgradePrompt.mockClear();
+  showAutopilotQuotaRecoveryPrompt.mockClear();
   modalState.modal = null;
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.error).mockClear();
@@ -237,6 +296,18 @@ function reset() {
 }
 
 describe("InboxPage", () => {
+  it("keeps the list subordinate to the detail pane on desktop", () => {
+    reset();
+    layout.width = DESKTOP;
+
+    render(<InboxPage />);
+
+    const listPanel = screen.getByTestId("panel-list");
+    expect(listPanel).toHaveAttribute("data-default-size", "260");
+    expect(listPanel).toHaveAttribute("data-min-size", "240");
+    expect(listPanel).toHaveAttribute("data-max-size", "400");
+  });
+
   it("keeps the title unread count static", () => {
     reset();
     const { container } = render(<InboxPage />);
@@ -351,6 +422,79 @@ describe("InboxPage", () => {
     expect(screen.getByTestId("row")).toHaveTextContent("legacy-todo");
   });
 
+  it("only enables the current inbox view's list", () => {
+    reset();
+    const main = render(<InboxPage />);
+    expect(queryCalls.find((q) => q.queryKey.includes("list"))?.enabled).toBe(true);
+    expect(queryCalls.find((q) => q.queryKey.includes("pages"))?.enabled).toBe(false);
+    main.unmount();
+    reset();
+    searchParams = new URLSearchParams("view=archived");
+    render(<InboxPage />);
+    expect(queryCalls.find((q) => q.queryKey.includes("list"))?.enabled).toBe(false);
+    expect(queryCalls.find((q) => q.queryKey.includes("pages"))?.enabled).toBe(true);
+  });
+
+  it("opens a deep-linked archive group outside the loaded pages with its comment anchor", () => {
+    reset();
+    searchParams = new URLSearchParams("view=archived&issue=old-issue");
+    listData.archived = [item({ id: "recent", archived: true })];
+    listData.lookup = [item({ id: "older", issue_id: "old-issue", archived: true, details: { comment_id: "old-comment" } })];
+    render(<InboxPage />);
+    expect(replace).not.toHaveBeenCalled();
+    expect(issueDetailProps.at(-1)).toMatchObject({ issueId: "old-issue", highlightCommentId: "old-comment" });
+    expect(queryCalls.find((q) => q.queryKey.includes("lookup"))?.enabled).toBe(true);
+  });
+
+  describe.each([PHONE, DESKTOP])("archive deep links at width %s", (width) => {
+    function setupLookup() {
+      reset();
+      layout.width = width;
+      searchParams = new URLSearchParams("view=archived&issue=old-issue");
+      listData.archived = [item({ id: "recent", issue_id: "recent-issue", archived: true })];
+      listData.lookup = [];
+    }
+
+    it("keeps loaded rows visible while resolving the selection, then opens its detail", () => {
+      setupLookup();
+      lookupState.isLoading = true;
+      const { rerender } = render(<InboxPage />);
+      expect(screen.getByTestId("row")).toHaveTextContent("recent");
+      expect(replace).not.toHaveBeenCalled();
+      expect(issueDetailProps).toHaveLength(0);
+
+      lookupState.isLoading = false;
+      listData.lookup = [item({ id: "older", issue_id: "old-issue", archived: true })];
+      rerender(<InboxPage />);
+      expect(issueDetailProps.at(-1)).toMatchObject({ issueId: "old-issue" });
+      expect(replace).not.toHaveBeenCalled();
+    });
+
+    it("keeps the list usable on lookup failure and retries only the lookup", () => {
+      setupLookup();
+      lookupState.isError = true;
+      render(<InboxPage />);
+      expect(screen.getByTestId("row")).toHaveTextContent("recent");
+      expect(replace).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("alert").querySelector("button")!);
+      expect(lookupState.refetch).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByTestId("row"));
+      expect(issueDetailProps.at(-1)).toMatchObject({ issueId: "recent-issue" });
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("only falls back to the issue after the lookup confirms the group is absent", () => {
+      setupLookup();
+      lookupState.isLoading = true;
+      const { rerender } = render(<InboxPage />);
+      expect(replace).not.toHaveBeenCalled();
+      lookupState.isLoading = false;
+      rerender(<InboxPage />);
+      expect(replace).toHaveBeenCalledWith("/acme/issues/old-issue");
+    });
+  });
+
   it("renders the archived list when the URL asks for it", () => {
     // ?view=archived is what makes a refresh, a back/forward step, or a mobile
     // detail-back land in the archive instead of the main inbox.
@@ -378,16 +522,13 @@ describe("InboxPage", () => {
     expect(archivedView.querySelector('[aria-haspopup="menu"]')).toBeNull();
   });
 
-  it("falls back to the main inbox when the archive drains", () => {
-    // Restoring the last archived item must not strand the user on an empty
-    // archive — same fallback chat's archived view has.
+  it("keeps the archive open when it is empty", () => {
     reset();
     searchParams = new URLSearchParams("view=archived");
     listData.archived = [];
-
     render(<InboxPage />);
-
-    expect(replace).toHaveBeenCalledWith("/acme/inbox");
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByTestId("list").dataset.view).toBe("archived");
   });
 
   it("replays the comment highlight when the already-open row is clicked again", () => {
@@ -483,6 +624,24 @@ describe("InboxPage", () => {
     expect(toast.success).toHaveBeenCalledTimes(1);
   });
 
+  it("opens quota-specific recovery from an autopilot quota notice", () => {
+    reset();
+    listData.active = [
+      item({
+        id: "autopilot-quota",
+        issue_id: null,
+        type: "autopilot_quota_exceeded",
+      }),
+    ];
+
+    render(<InboxPage />);
+    fireEvent.click(screen.getByTestId("row"));
+    fireEvent.click(screen.getByTestId("autopilot-quota-recovery"));
+
+    expect(showAutopilotQuotaRecoveryPrompt).toHaveBeenCalledTimes(1);
+    expect(showIssueLimitUpgradePrompt).not.toHaveBeenCalled();
+  });
+
   it("shows issue-limit recovery when a source-context retry is rejected", async () => {
     reset();
     retrySourceContextMutateAsync.mockRejectedValue(
@@ -512,6 +671,7 @@ describe("InboxPage", () => {
 
     await act(async () => undefined);
     expect(showIssueLimitUpgradePrompt).toHaveBeenCalledTimes(1);
+    expect(showAutopilotQuotaRecoveryPrompt).not.toHaveBeenCalled();
     expect(toast.error).not.toHaveBeenCalled();
   });
 

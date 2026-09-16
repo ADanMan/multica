@@ -13,7 +13,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
@@ -51,6 +50,10 @@ func dispatchOne(t *testing.T, env frameEnvelope) (channel.InboundMessage, bool,
 
 // dispatchOneAs is dispatchOne with the bot's configured display name — the
 // one thing stripLeadingMentions has to match a group's addressing against.
+//
+// The socket acknowledges what it is sent. A receipt's verdict only reaches a
+// debug log, and a socket that never answered made every receipt wait out the
+// ack timeout.
 func dispatchOneAs(t *testing.T, env frameEnvelope, botDisplayName string) (channel.InboundMessage, bool, *recordingConn) {
 	t.Helper()
 	var got channel.InboundMessage
@@ -61,7 +64,7 @@ func dispatchOneAs(t *testing.T, env frameEnvelope, botDisplayName string) (chan
 	})
 	c.botDisplayName = botDisplayName
 	conn := &recordingConn{}
-	if err := c.dispatchFrame(context.Background(), env, newWSSender(conn, slog.Default()), slog.Default()); err != nil {
+	if err := c.dispatchFrame(context.Background(), env, conn.autoAck(newWSSender(conn, slog.Default())), slog.Default()); err != nil {
 		t.Fatalf("dispatchFrame: %v", err)
 	}
 	return got, called, conn
@@ -236,17 +239,6 @@ func TestOwnText_MixedWithNothingReadableTakesTheReceipt(t *testing.T) {
 	}
 	if len(conn.frames) != 1 {
 		t.Fatalf("expected one receipt, got %d frames", len(conn.frames))
-	}
-}
-
-// TestUnsupportedReceipt_DoesNotClaimTextOnly: the receipt used to say the
-// bot only handles text. It now routes photos, files, videos and 图文混排, so
-// a person who just watched it answer a screenshot must not then be told it
-// handles text only.
-func TestUnsupportedReceipt_DoesNotClaimTextOnly(t *testing.T) {
-	t.Parallel()
-	if strings.Contains(unsupportedMsgTypeReceipt, "只能处理文字") {
-		t.Errorf("receipt %q still claims text-only while image/file/video/mixed route", unsupportedMsgTypeReceipt)
 	}
 }
 

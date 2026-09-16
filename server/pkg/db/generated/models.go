@@ -172,6 +172,10 @@ type AgentTaskQueue struct {
 	BranchName                pgtype.Text `json:"branch_name"`
 	DurableWorkDir            pgtype.Text `json:"durable_work_dir"`
 	ChannelContextRevision    pgtype.Int8 `json:"channel_context_revision"`
+	CommentThreadID           pgtype.UUID `json:"comment_thread_id"`
+	CancelledByType           pgtype.Text `json:"cancelled_by_type"`
+	CancelledByID             pgtype.UUID `json:"cancelled_by_id"`
+	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
 }
 
 type AgentToLabel struct {
@@ -226,14 +230,15 @@ type AutopilotCollaborator struct {
 }
 
 type AutopilotQuotaPeriod struct {
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	PeriodStart   pgtype.Timestamptz `json:"period_start"`
-	PeriodEnd     pgtype.Timestamptz `json:"period_end"`
-	UsedCount     int64              `json:"used_count"`
-	ReservedCount int64              `json:"reserved_count"`
-	BlockedCounts []byte             `json:"blocked_counts"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	PeriodStart         pgtype.Timestamptz `json:"period_start"`
+	PeriodEnd           pgtype.Timestamptz `json:"period_end"`
+	UsedCount           int64              `json:"used_count"`
+	ReservedCount       int64              `json:"reserved_count"`
+	BlockedCounts       []byte             `json:"blocked_counts"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	RejectionNotifiedAt pgtype.Timestamptz `json:"rejection_notified_at"`
 }
 
 type AutopilotQuotaReservation struct {
@@ -305,10 +310,14 @@ type AutopilotTrigger struct {
 	Provider       string             `json:"provider"`
 	SigningSecret  pgtype.Text        `json:"signing_secret"`
 	EventFilters   []byte             `json:"event_filters"`
-	// Actor type of the trigger's current responsible publisher: member | agent. Set to the creator at creation and re-stamped to the editor on any substantive edit governing this trigger. Consumed only for attribution (source=trigger_owner) — never authorization. NULL on pre-migration triggers (MUL-4302).
+	// Actor type of the trigger's current responsible publisher: member | agent. Set to the creator at creation and re-stamped to the editor on any substantive edit governing this trigger. CONFIG audit only — since MUL-6951 it decides nothing about the runs this trigger fires. NULL on triggers predating MUL-4302.
 	PublishedByType pgtype.Text `json:"published_by_type"`
-	// The member/agent currently responsible for this trigger's effective config (creator, then last substantive editor). For a member this is the accountable human of runs the trigger fires (source=trigger_owner). No FK, app-layer integrity. NULL on pre-migration triggers, which degrade to rule_owner (MUL-4302).
+	// The member/agent currently responsible for this trigger's effective config (creator, then last substantive editor). CONFIG audit only: since MUL-6951 the runs this trigger fires act as, and are accountable to, created_by_id instead, so an edit recorded here never moves a run's authority. No FK, app-layer integrity (MUL-4302).
 	PublishedByID pgtype.UUID `json:"published_by_id"`
+	// Actor type of created_by_id: member | agent. Only 'member' yields a run principal. NULL only for a legacy trigger that neither backfill (migrations 449, 467) could fill.
+	CreatedByType pgtype.Text `json:"created_by_type"`
+	// The member a schedule/webhook run fires AS: dispatch admission, the task's originator/accountable, and every delegated run all resolve to this one human (MUL-6951). For a trigger created since MUL-6951 it is the creator, written at creation. For a legacy trigger it is a best-effort principal inferred once by backfill and frozen (the last publisher, migration 449, else the autopilot's creator, migration 467), not proof of who created it. Ordinary edits never rewrite it, so editing the trigger cannot re-authorize its runs as the editor. NULL means no principal and the dispatch fails closed. No FK; workspace membership is re-validated on every dispatch.
+	CreatedByID pgtype.UUID `json:"created_by_id"`
 }
 
 type ChannelBindingToken struct {
@@ -331,6 +340,9 @@ type ChannelChatContextGeneration struct {
 	PendingFresh           bool               `json:"pending_fresh"`
 	InitiatorUserID        pgtype.UUID        `json:"initiator_user_id"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	LastMessageID          pgtype.Text        `json:"last_message_id"`
+	LastThreadID           pgtype.Text        `json:"last_thread_id"`
+	LastSenderID           pgtype.Text        `json:"last_sender_id"`
 }
 
 type ChannelChatSessionBinding struct {
@@ -439,6 +451,7 @@ type ChannelTaskDelivery struct {
 	RouteRevision    int64              `json:"route_revision"`
 	Config           []byte             `json:"config"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ChannelSenderID  pgtype.Text        `json:"channel_sender_id"`
 }
 
 type ChannelUserBinding struct {
@@ -531,23 +544,25 @@ type ClientUsageDaily struct {
 }
 
 type Comment struct {
-	ID             pgtype.UUID        `json:"id"`
-	IssueID        pgtype.UUID        `json:"issue_id"`
-	AuthorType     string             `json:"author_type"`
-	AuthorID       pgtype.UUID        `json:"author_id"`
-	Content        string             `json:"content"`
-	Type           string             `json:"type"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	ParentID       pgtype.UUID        `json:"parent_id"`
-	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
-	ResolvedAt     pgtype.Timestamptz `json:"resolved_at"`
-	ResolvedByType pgtype.Text        `json:"resolved_by_type"`
-	ResolvedByID   pgtype.UUID        `json:"resolved_by_id"`
-	SourceTaskID   pgtype.UUID        `json:"source_task_id"`
-	QuickActionID  pgtype.UUID        `json:"quick_action_id"`
-	ViaPluginID    pgtype.UUID        `json:"via_plugin_id"`
-	Revision       int64              `json:"revision"`
+	ID                pgtype.UUID        `json:"id"`
+	IssueID           pgtype.UUID        `json:"issue_id"`
+	AuthorType        string             `json:"author_type"`
+	AuthorID          pgtype.UUID        `json:"author_id"`
+	Content           string             `json:"content"`
+	Type              string             `json:"type"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	ParentID          pgtype.UUID        `json:"parent_id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ResolvedAt        pgtype.Timestamptz `json:"resolved_at"`
+	ResolvedByType    pgtype.Text        `json:"resolved_by_type"`
+	ResolvedByID      pgtype.UUID        `json:"resolved_by_id"`
+	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
+	QuickActionID     pgtype.UUID        `json:"quick_action_id"`
+	ViaPluginID       pgtype.UUID        `json:"via_plugin_id"`
+	Revision          int64              `json:"revision"`
+	RecoverySettledAt pgtype.Timestamptz `json:"recovery_settled_at"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 }
 
 type CommentReaction struct {
@@ -747,6 +762,17 @@ type InboxItem struct {
 	Details       []byte             `json:"details"`
 }
 
+type InstanceTelemetryState struct {
+	Singleton         bool               `json:"singleton"`
+	InstanceID        pgtype.UUID        `json:"instance_id"`
+	LastSuccessfulDay pgtype.Date        `json:"last_successful_day"`
+	PendingDay        pgtype.Date        `json:"pending_day"`
+	PendingBody       []byte             `json:"pending_body"`
+	NextAttemptAt     pgtype.Timestamptz `json:"next_attempt_at"`
+	AttemptCount      int32              `json:"attempt_count"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Issue struct {
 	ID                 pgtype.UUID        `json:"id"`
 	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
@@ -776,6 +802,7 @@ type Issue struct {
 	Properties         []byte             `json:"properties"`
 	Revision           int64              `json:"revision"`
 	LastActivityAt     pgtype.Timestamptz `json:"last_activity_at"`
+	TriageState        pgtype.Text        `json:"triage_state"`
 }
 
 type IssueDependency struct {
@@ -817,7 +844,6 @@ type IssuePullRequest struct {
 	LinkedByID    pgtype.UUID        `json:"linked_by_id"`
 	LinkedAt      pgtype.Timestamptz `json:"linked_at"`
 	CloseIntent   bool               `json:"close_intent"`
-	ReferenceOnly bool               `json:"reference_only"`
 }
 
 type IssueReaction struct {
@@ -873,6 +899,7 @@ type IssueStatus struct {
 	ArchivedAt  pgtype.Timestamptz `json:"archived_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	Icon        string             `json:"icon"`
 }
 
 type IssueSubscriber struct {
@@ -894,7 +921,6 @@ type IssueVcsPullRequest struct {
 	IssueID       pgtype.UUID        `json:"issue_id"`
 	PullRequestID pgtype.UUID        `json:"pull_request_id"`
 	CloseIntent   bool               `json:"close_intent"`
-	ReferenceOnly bool               `json:"reference_only"`
 	LinkedByType  pgtype.Text        `json:"linked_by_type"`
 	LinkedByID    pgtype.UUID        `json:"linked_by_id"`
 	LinkedAt      pgtype.Timestamptz `json:"linked_at"`
@@ -1004,6 +1030,28 @@ type LarkUserBinding struct {
 	LarkOpenID     string             `json:"lark_open_id"`
 	UnionID        pgtype.Text        `json:"union_id"`
 	BoundAt        pgtype.Timestamptz `json:"bound_at"`
+}
+
+type MaintenanceJob struct {
+	ID             pgtype.UUID        `json:"id"`
+	JobType        string             `json:"job_type"`
+	JobVersion     int32              `json:"job_version"`
+	ScopeKey       string             `json:"scope_key"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	RequestHash    string             `json:"request_hash"`
+	Status         string             `json:"status"`
+	Revision       int64              `json:"revision"`
+	DryRun         bool               `json:"dry_run"`
+	Options        []byte             `json:"options"`
+	Parameters     []byte             `json:"parameters"`
+	Checkpoint     []byte             `json:"checkpoint"`
+	Progress       []byte             `json:"progress"`
+	Result         []byte             `json:"result"`
+	LastError      string             `json:"last_error"`
+	NextAllowedAt  pgtype.Timestamptz `json:"next_allowed_at"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	CompletedAt    pgtype.Timestamptz `json:"completed_at"`
 }
 
 type Member struct {
@@ -1304,15 +1352,16 @@ type SysCronExecution struct {
 }
 
 type TaskMessage struct {
-	ID        pgtype.UUID        `json:"id"`
-	TaskID    pgtype.UUID        `json:"task_id"`
-	Seq       int32              `json:"seq"`
-	Type      string             `json:"type"`
-	Tool      pgtype.Text        `json:"tool"`
-	Content   pgtype.Text        `json:"content"`
-	Input     []byte             `json:"input"`
-	Output    pgtype.Text        `json:"output"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID              pgtype.UUID        `json:"id"`
+	TaskID          pgtype.UUID        `json:"task_id"`
+	Seq             int32              `json:"seq"`
+	Type            string             `json:"type"`
+	Tool            pgtype.Text        `json:"tool"`
+	Content         pgtype.Text        `json:"content"`
+	Input           []byte             `json:"input"`
+	Output          pgtype.Text        `json:"output"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	OutputTruncated pgtype.Bool        `json:"output_truncated"`
 }
 
 type TaskToken struct {

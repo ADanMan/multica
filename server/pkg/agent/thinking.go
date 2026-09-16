@@ -282,7 +282,12 @@ var codexEffortLabel = map[string]string{
 	"ultra":   "Ultra",
 }
 
-const minCodexDebugModelsVersion = "0.122.0"
+const (
+	minCodexDebugModelsVersion = "0.122.0"
+	// Codex 0.133.0 is the first stable release containing the request-only
+	// `default` sentinel added by openai/codex#23537.
+	minCodexExplicitStandardServiceTierVersion = "0.133.0"
+)
 
 // codexDebugModelsResponse mirrors the JSON shape emitted by
 // `codex debug models --bundled` (Codex 0.122.0+). Only the fields we
@@ -320,31 +325,53 @@ func discoverCodexModels(ctx context.Context, cmd Command) []Model {
 		cmd.Path = "codex"
 	}
 	version, err := DetectVersion(ctx, cmd)
-	if err != nil || !codexSupportsDebugModels(version) {
+	if err != nil {
 		return codexStaticModels()
+	}
+	supportsExplicitStandard := codexSupportsExplicitStandardServiceTier(version)
+	if !codexSupportsDebugModels(version) {
+		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
 	}
 
 	raw, err := runCodexDebugModels(ctx, cmd)
 	if err != nil {
-		return codexStaticModels()
+		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
 	}
 	models, err := parseCodexModelCatalog(raw)
 	if err != nil || len(models) == 0 {
-		return codexStaticModels()
+		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
 	}
-	return models
+	return annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)
 }
 
 func codexSupportsDebugModels(version string) bool {
+	return codexVersionAtLeast(version, minCodexDebugModelsVersion)
+}
+
+func codexSupportsExplicitStandardServiceTier(version string) bool {
+	return codexVersionAtLeast(version, minCodexExplicitStandardServiceTierVersion)
+}
+
+func codexVersionAtLeast(version, minimumVersion string) bool {
 	parsed, err := parseSemver(version)
 	if err != nil {
 		return false
 	}
-	minimum, err := parseSemver(minCodexDebugModelsVersion)
+	minimum, err := parseSemver(minimumVersion)
 	if err != nil {
 		return false
 	}
 	return !parsed.lessThan(minimum)
+}
+
+func annotateCodexExplicitStandardServiceTier(models []Model, supported bool) []Model {
+	if !supported {
+		return models
+	}
+	for i := range models {
+		models[i].SupportsExplicitStandardServiceTier = true
+	}
+	return models
 }
 
 // codexDebugModelsArgs is the argv we pass to discover the local Codex
@@ -395,6 +422,8 @@ func parseCodexModelCatalog(raw []byte) ([]Model, error) {
 
 func normalizeCodexModelLabel(id, label string) string {
 	switch id {
+	case "gpt-6-astra":
+		return "GPT-6 Astra"
 	case "gpt-5.6-sol":
 		return "GPT-5.6 Sol"
 	case "gpt-5.6-terra":
@@ -619,6 +648,8 @@ func catalogLoader(ctx context.Context, providerType string, cmd Command) func()
 //     "unknown model → reject" (the misjudgement flagged in an earlier
 //     review). opencode has no single default, so it accepts a level any
 //     advertised model supports.
+//   - omp: fails closed for the same reason by a different route — see
+//     ThinkingRequiresExplicitModel.
 //
 // The lookup goes through ListModels so it sees the *current* CLI
 // catalog (including dynamic discovery for codex), not just a static
@@ -644,11 +675,12 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 	if value == "" {
 		return true, nil
 	}
-	// Codex empty-model fail-closed (see doc comment). Checked before the
-	// catalog load so the outcome is deterministic even when discovery would
-	// error — an errored lookup makes the daemon pass the level through, which
-	// is exactly what we must NOT do for an unresolved codex model.
-	if model == "" && providerType == "codex" {
+	// Empty-model fail-closed, checked BEFORE the catalog load so the outcome is
+	// deterministic even when discovery would error. That ordering is the whole
+	// point: on a lookup error the daemon passes the level through to the CLI
+	// (see its thinking_level guard), which is exactly what must not happen for
+	// a provider whose effective model we cannot know.
+	if model == "" && ThinkingRequiresExplicitModel(providerType) {
 		return false, nil
 	}
 	catalog, err := loadCatalog()
@@ -669,6 +701,9 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 			}
 		}
 		if target == "" {
+			// opencode has no single default model, so it accepts a level any
+			// advertised model supports. Providers that instead require a pinned
+			// model never reach here — they were already rejected above.
 			if providerType == "opencode" {
 				return anyModelSupportsThinkingValue(models, value), nil
 			}
@@ -676,7 +711,13 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 		}
 	}
 	for _, m := range models {
-		if m.ID != target {
+		// Normalise the catalog side too, not just the requested model. Claude
+		// discovery reports what the CLI would really run, and that includes
+		// the context-window tag (`claude-opus-5[1m]`), while target has
+		// already had it stripped. Comparing raw IDs would miss every tagged
+		// entry and fail the level closed, silently dropping the user's
+		// --effort (MUL-6961).
+		if modelIDForCapabilityLookup(providerType, m.ID) != target {
 			continue
 		}
 		if m.Thinking == nil {
@@ -692,10 +733,50 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 	return false, nil
 }
 
+// ThinkingRequiresExplicitModel reports whether a provider refuses to carry an
+// effort unless a model is pinned, because its empty-model resolution happens
+// somewhere Multica cannot observe:
+//
+//   - codex: the effective model comes from the local config.toml and can be any
+//     installed model, so borrowing the catalog's Default entry would green-light
+//     levels the configured model may not support (MUL-4347).
+//   - omp: its `models --json` catalog marks no default at all and sorts by
+//     provider/id, so no entry here is the one that would run. At task time omp
+//     resolves its own default role model and clamps the requested level to what
+//     THAT model supports, so a level validated against any other entry is not
+//     the level that runs (MUL-7412).
+//
+// Both are checked before any catalog read, so discovery failing cannot turn
+// into "pass the level through".
+func ThinkingRequiresExplicitModel(providerType string) bool {
+	switch providerType {
+	case "codex", "omp":
+		return true
+	}
+	return false
+}
+
+// ThinkingLevelRejectedWithoutModel reports whether the API should refuse to
+// STORE an effort that has no pinned model, instead of storing it and leaving
+// the daemon to drop it at launch.
+//
+// Deliberately narrower than ThinkingRequiresExplicitModel. codex shares the
+// execution constraint but predates this check: agents out there already hold an
+// effort alongside an empty model, and 400ing that combination would block
+// unrelated edits to them, so codex stays grandfathered and the daemon keeps
+// dropping the level. omp has no such history — persisting an effort at all was
+// impossible before MUL-7412 — so it is strict from the start and the invalid
+// combination never reaches storage.
+func ThinkingLevelRejectedWithoutModel(providerType string) bool {
+	return providerType == "omp"
+}
+
 // ValidateServiceTier reports whether value is advertised by the current
 // Codex catalog for the explicit model. An empty value is always valid and
-// means "inherit runtime configuration". An empty Codex model fails closed:
-// its effective model comes from config.toml and may not support the tier.
+// means "inherit runtime configuration". Codex's "default" sentinel is valid
+// only when the daemon's installed CLI reports support for explicit standard
+// routing. An empty Codex model otherwise fails closed because its effective
+// model comes from config.toml and may not support the requested tier.
 func ValidateServiceTier(ctx context.Context, providerType string, cmd Command, model, value string) (bool, error) {
 	return ValidateServiceTierWith(catalogLoader(ctx, providerType, cmd), providerType, model, value)
 }
@@ -706,12 +787,23 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 	if value == "" {
 		return true, nil
 	}
-	if providerType != "codex" || model == "" {
+	if providerType != "codex" {
+		return false, nil
+	}
+	if value != codexStandardServiceTier && model == "" {
 		return false, nil
 	}
 	catalog, err := loadCatalog()
 	if err != nil {
 		return false, err
+	}
+	if value == codexStandardServiceTier {
+		for _, candidate := range catalog.Models {
+			if candidate.SupportsExplicitStandardServiceTier {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	for _, m := range catalog.Models {
 		if m.ID != model {
@@ -776,6 +868,20 @@ var providerThinkingEnums = map[string]map[string]bool{
 	// Pi owns a fixed CLI vocabulary; RPC discovery narrows this universe to
 	// the exact subset supported by each model before execution.
 	"pi": {
+		"off":     true,
+		"minimal": true,
+		"low":     true,
+		"medium":  true,
+		"high":    true,
+		"xhigh":   true,
+		"max":     true,
+	},
+	// omp (Oh-My-Pi) dispatches to the pi backend (see BuiltinRuntimes), so it
+	// inherits pi's fixed CLI vocabulary; discoverOmpModels narrows it to each
+	// model's advertised efforts before execution. `auto` is deliberately absent
+	// even though omp's --thinking accepts it — see ompThinkingFromCatalogEntry
+	// (MUL-7412).
+	"omp": {
 		"off":     true,
 		"minimal": true,
 		"low":     true,

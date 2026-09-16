@@ -96,6 +96,7 @@ var corsExposedHeaders = []string{
 	"X-Request-ID",
 	handler.HeaderCommentsTruncated,
 	handler.HeaderTimelineTruncated,
+	handler.HeaderActiveRunsTruncated,
 }
 
 func registerPluginActionRoutes(r chi.Router, h *handler.Handler) {
@@ -207,7 +208,7 @@ func normalizeServerVersion(v string) string {
 // path Redis client, not the realtime relay's blocking read client. A nil rdb
 // keeps the default in-memory stores which are fine for single-node dev and
 // tests.
-func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb *redis.Client) chi.Router {
+func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb redis.UniversalClient) chi.Router {
 	r, _ := NewRouterWithOptions(pool, hub, bus, analyticsClient, rdb, RouterOptions{})
 	return r
 }
@@ -216,10 +217,25 @@ type RouterOptions struct {
 	HTTPMetrics         *obsmetrics.HTTPMetrics
 	BusinessMetrics     *obsmetrics.BusinessMetrics
 	ChannelLeaseMetrics *obsmetrics.ChannelLeaseMetrics
-	SeatCapacityMetrics *obsmetrics.SeatCapacityMetrics
 	// ChannelLeaseRedis is a dedicated non-blocking Redis client/pool. It is
 	// required only when CHANNEL_WS_LEASE_BACKEND=redis.
-	ChannelLeaseRedis *redis.Client
+	ChannelLeaseRedis redis.UniversalClient
+	// WecomRelay is the realtime relay, seen through the two halves the WeCom
+	// adapter needs: publish a reply to the other replicas, and register as
+	// the consumer that delivers the ones they publish. Nil on a deployment
+	// with no Redis — where it is also unnecessary, because one replica both
+	// publishes the completion and holds the socket.
+	// WecomSenders is the process-wide installation→socket registry, minted in
+	// main so the relay's deliverer can be registered before the shard readers
+	// start. Nil is tolerated (tests, embedders): one is minted here instead.
+	WecomSenders *wecom.SendersRegistry
+
+	// WecomRelayOutbound is the cross-replica router, already registered with
+	// the relay and running. Nil on a deployment with no Redis, where it is
+	// also unnecessary: one replica publishes the completion and holds the
+	// socket both.
+	WecomRelayOutbound *wecom.RelayOutbound
+
 	// WecomMetrics is the WeCom adapter's health sink. Nil discards every
 	// counter, which is what a deployment with /metrics turned off gets.
 	WecomMetrics *obsmetrics.WecomMetrics
@@ -263,7 +279,7 @@ func buildChannelSupervisor(
 		leases = postgresLeases
 	case "redis":
 		if opts.ChannelLeaseRedis == nil {
-			slog.Error("channel engine: Redis lease backend selected but CHANNEL_WS_LEASE_REDIS_URL/REDIS_URL is missing or invalid; supervisor disabled")
+			slog.Error("channel engine: Redis lease backend selected but REDIS_URL is missing or invalid; supervisor disabled")
 			return nil
 		}
 		namespace := strings.TrimSpace(os.Getenv("CHANNEL_WS_LEASE_NAMESPACE"))
@@ -294,6 +310,19 @@ func buildChannelSupervisor(
 	return engine.NewSupervisor(installations, leases, registry, inbound, cfg)
 }
 
+// channelLeasePollInterval is how often a Supervisor scans for installations
+// it should be holding, and therefore how long a WebSocket lease takes to
+// finish moving to another replica.
+//
+// Read through one function because two places are sized by it: the supervisor
+// itself, and the WeCom cross-replica dispatcher's re-offer chain — a frame
+// that arrives mid-move has to stay offerable until the move completes, and
+// pinning that to a constant of its own would let the two drift apart on any
+// deployment that tunes the knob.
+func channelLeasePollInterval() (time.Duration, error) {
+	return strictPositiveDurationEnv("CHANNEL_WS_LEASE_POLL_INTERVAL", 30*time.Second)
+}
+
 func channelSupervisorConfigFromEnv(leaseMetrics *obsmetrics.ChannelLeaseMetrics) (engine.Config, error) {
 	ttl, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_TTL", 180*time.Second)
 	if err != nil {
@@ -303,7 +332,7 @@ func channelSupervisorConfigFromEnv(leaseMetrics *obsmetrics.ChannelLeaseMetrics
 	if err != nil {
 		return engine.Config{}, err
 	}
-	poll, err := strictPositiveDurationEnv("CHANNEL_WS_LEASE_POLL_INTERVAL", 30*time.Second)
+	poll, err := channelLeasePollInterval()
 	if err != nil {
 		return engine.Config{}, err
 	}
@@ -365,7 +394,7 @@ func seatCapacityExecutor(cloudURL string) seatcapacity.Executor {
 // context, calling Wait on shutdown) use the returned handler;
 // callers that only need the HTTP handler (tests, the simple
 // NewRouter shim) discard the second value.
-func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb *redis.Client, opts RouterOptions) (chi.Router, *handler.Handler) {
+func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analyticsClient analytics.Client, rdb redis.UniversalClient, opts RouterOptions) (chi.Router, *handler.Handler) {
 	queries := db.New(pool)
 	emailSvc := service.NewEmailService()
 	daemonHub := opts.DaemonHub
@@ -441,9 +470,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	capacityLocker := seatcapacity.NewWorkspaceLocker(pool)
 	h.SeatCapacityLocker = capacityLocker
 	if seatcapacity.CanRunWorker(h.SeatCapacity) {
-		h.SeatCapacityWorker = seatcapacity.NewWorker(queries, h.SeatCapacity, capacityLocker, seatcapacity.WorkerConfig{
-			Metrics: opts.SeatCapacityMetrics,
-		})
+		h.SeatCapacityWorker = seatcapacity.NewWorker(queries, h.SeatCapacity, capacityLocker, seatcapacity.WorkerConfig{})
 	}
 	if opts.BusinessMetrics != nil {
 		// Wire the BusinessMetrics receiver into the cloud runtime client
@@ -463,6 +490,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		}
 		if notifier, ok := opts.DaemonWakeup.(handler.DaemonPendingWorkNotifier); ok {
 			h.DaemonPendingWork = notifier
+		}
+		if notifier, ok := opts.DaemonWakeup.(handler.RuntimeGoneNotifier); ok {
+			h.DaemonRuntimeGone = notifier
 		}
 	}
 	if rdb != nil {
@@ -694,6 +724,23 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// connection badge refreshes on every workspace client, not just
 					// the tab that polls the install status to success.
 					regSvc.SetEventBus(bus)
+					// In-flight bind sessions must be readable by every
+					// replica: the dialog polls the status endpoint every
+					// ~5s and any replica can receive that poll. With the
+					// state in one process's memory, a poll routed
+					// elsewhere 404'd and the dialog reported "session
+					// lost" ~5s after the QR rendered (MUL-7340).
+					//
+					// Without Redis the service keeps its in-process
+					// store. That is correct for local development and a
+					// single replica, and wrong for a multi-replica deploy
+					// — which is why this says so out loud instead of
+					// failing quietly at the first status poll.
+					if rdb != nil {
+						regSvc.SetInstallSessionStore(lark.NewRedisInstallSessionStore(rdb))
+					} else {
+						slog.Warn("lark device-flow install: no Redis; bind sessions are per-process and will not survive a multi-replica deployment")
+					}
 					h.LarkRegistration = regSvc
 					slog.Info("lark device-flow install enabled")
 				}
@@ -828,7 +875,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				AppURL:  appURLFromEnv(),
 				Logger:  slog.Default(),
 			})
-			ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default())
+			ack := dingtalk.NewAckNotifier(dingtalkClient, box.Open, slog.Default(), queries)
 			var media engine.MediaResolver
 			if store != nil {
 				media = dingtalk.NewMediaResolver(
@@ -841,7 +888,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			}
 			botNames := dingtalk.NewBotNameResolver(dingtalkClient, box.Open)
 			channelRouter.Register(dingtalk.TypeDingTalk, dingtalk.NewDingTalkResolverSet(queries, pool, replier, ack, media, botNames))
-			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, slog.Default()).Register(bus)
+			dingtalk.NewOutbound(queries, box.Open, dingtalkClient, ack, slog.Default()).Register(bus)
 			dingtalk.RegisterDingTalk(channelRegistry, dingtalk.ChannelDeps{
 				Decrypt:  box.Open,
 				Client:   dingtalkClient,
@@ -898,7 +945,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// ChannelDeps write side and the Replier read side both
 				// receive it, and each Channel.Connect self-registers on
 				// entry and clears on exit.
-				wecomSenders := wecom.NewSendersRegistry()
+				wecomSenders := opts.WecomSenders
+				if wecomSenders == nil {
+					wecomSenders = wecom.NewSendersRegistry()
+				}
 
 				wecomReplier := wecom.NewOutboundReplier(wecom.OutboundReplierConfig{
 					Binding: wecomBinding,
@@ -967,7 +1017,29 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithAttachments(store))
 					h.DeclareChannelFileDelivery(string(wecom.TypeWecom))
 				}
-				wecom.NewOutbound(queries, wecomSenders, slog.Default(), wecomOutboundOpts...).Register(bus)
+				// The outbound subscriber reports to the same sink the
+				// connection path uses, so an operator reads "replies are
+				// being dropped, and for which reason" off the same dashboard
+				// as "the bot cannot connect".
+				wecomOutboundOpts = append(wecomOutboundOpts,
+					wecom.WithOutboundMetrics(wecomMetricsOrNil(opts.WecomMetrics)))
+				// Cross-replica routing. Built here rather than in main
+				// because the senders registry it guards is created here, and
+				// registered back onto the relay so every node's read loop
+				// reaches it. See wecom/relay_outbound.go.
+				if opts.WecomRelayOutbound != nil {
+					opts.WecomRelayOutbound.SetMetrics(wecomMetricsOrNil(opts.WecomMetrics))
+					wecomOutboundOpts = append(wecomOutboundOpts, wecom.WithRelay(opts.WecomRelayOutbound))
+					slog.Info("wecom integration: cross-replica outbound routing enabled")
+				}
+				wecomOutbound := wecom.NewOutbound(queries, wecomSenders, slog.Default(), wecomOutboundOpts...)
+				wecomOutbound.Register(bus)
+				// The dispatcher has been consuming since before this router
+				// existed; this is where it learns who performs a delivery.
+				// Anything it read in the meantime is waiting in its queue.
+				if opts.WecomRelayOutbound != nil {
+					opts.WecomRelayOutbound.Attach(wecomOutbound)
+				}
 
 				// Ranges the media fetcher may dial despite looking reserved.
 				// Empty by default, which leaves the SSRF guard exactly as
@@ -1005,7 +1077,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// limiting), not "more than one replica". See wecom/outbound.go
 				// and SELF_HOSTING.md. Remove once outbound routes to the lease
 				// holder.
-				slog.Warn("wecom integration: WeCom agent replies and inbox pushes are delivered only by the replica holding each bot's WebSocket lease. If you run more than one backend replica, responses produced on a replica that does not hold the lease will be dropped — run the WeCom-enabled backend as a single replica until cross-replica outbound routing is implemented.")
+				if opts.WecomRelayOutbound != nil {
+					slog.Info("wecom integration: cross-replica outbound routing enabled — agent replies and inbox pushes produced on a replica that does not hold the bot's WebSocket lease are forwarded to the lease holder over the realtime relay. A reply produced while NO replica holds a live connection (every one mid-reconnect) is still lost; see wecom/relay_outbound.go.")
+				} else {
+					slog.Warn("wecom integration: WeCom agent replies and inbox pushes are delivered only by the replica holding each bot's WebSocket lease. If you run more than one backend replica, responses produced on a replica that does not hold the lease will be dropped — run the WeCom-enabled backend as a single replica, or run a sharded/dual realtime relay (REDIS_URL), which enables cross-replica outbound routing.")
+				}
 			}
 		}
 	} else {
@@ -2006,6 +2082,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.With(handler.RequireHumanActor).Post("/sub-issues", h.CreateCommentSubIssue)
 				r.Put("/", h.UpdateComment)
 				r.Delete("/", h.DeleteComment)
+				// Same handler under a path servers from before #8296 do not
+				// route. Clients that promise "replies are kept" call this one,
+				// so a request that reaches an older server — mid-rollout, after
+				// a rollback, or self-hosted — fails instead of deleting the
+				// replies with the comment.
+				r.Delete("/keep-replies", h.DeleteComment)
 				r.Post("/resolve", h.ResolveComment)
 				r.Delete("/resolve", h.UnresolveComment)
 				r.Post("/reactions", h.AddReaction)
@@ -2217,6 +2299,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// Separate from "/" so the main list keeps its contract and
 				// never carries the unbounded archive.
 				r.Get("/archived", h.ListArchivedInbox)
+				r.Get("/archived/page", h.ListArchivedInboxPage)
+				r.Get("/archived/facets", h.GetArchivedInboxFacets)
 				r.Get("/unread-count", h.CountUnreadInbox)
 				// Cross-workspace unread summary: account-level, keyed on the
 				// user. Backs the workspace-switcher dot for OTHER workspaces.
@@ -2422,6 +2506,15 @@ func composioCallbackBaseURL(publicURL string) string {
 		return publicURL
 	}
 	return appURLFromEnv()
+}
+
+// WecomRelay is what the WeCom adapter needs from the realtime relay:
+// publish under ScopeWecomOutbound, and register the consumer that acts on
+// frames the other replicas publish. *realtime.ShardedStreamRelay and
+// *realtime.RedisRelay both satisfy it.
+type WecomRelay interface {
+	PublishWithID(scopeType, scopeID, exclude string, frame []byte, id string) error
+	SetWecomOutboundDeliverer(d realtime.WecomOutboundDeliverer)
 }
 
 // wecomMetricsOrNil keeps a typed nil out of the adapter's interface field.

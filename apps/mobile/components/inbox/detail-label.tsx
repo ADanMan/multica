@@ -54,6 +54,8 @@ const TYPE_LABEL: Record<InboxItemType, string> = {
   quick_create_done: "Quick-create done",
   quick_create_failed: "Quick-create failed",
   quick_create_unconfirmed: "Quick-create needs a check",
+  autopilot_paused: "Autopilot paused",
+  autopilot_quota_exceeded: "Autopilot run limit reached",
 };
 
 // due_date is a calendar day — format timezone-safely (no offset day shift).
@@ -75,7 +77,7 @@ export function InboxDetailLabel({
   const { getName } = useActorLookup();
   // `details.to` is a status KEY and may be a custom one, so its name, colour
   // and glyph all resolve through the workspace catalog. (MUL-6243)
-  const { categoryOf, colorOf, labelOf } = useIssueStatuses();
+  const { categoryOf, colorOf, labelOf, iconOf } = useIssueStatuses();
   const details = item.details ?? {};
 
   // Cases with inline icons → Row layout.
@@ -87,7 +89,7 @@ export function InboxDetailLabel({
         <StatusIcon
           status={status}
           category={categoryOf(status)}
-          color={colorOf(status)}
+          icon={iconOf(status)} color={colorOf(status)}
           size={12}
         />
         <Text className="text-xs text-muted-foreground" numberOfLines={1}>
@@ -150,6 +152,8 @@ export function InboxDetailLabel({
         const detail = singleLine(details.error) || singleLine(item.body);
         return detail || TYPE_LABEL[item.type];
       }
+      case "autopilot_quota_exceeded":
+        return "Run blocked because the limit was reached";
       default:
         return TYPE_LABEL[item.type] ?? item.type;
     }

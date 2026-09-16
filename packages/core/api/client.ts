@@ -1,3 +1,5 @@
+import type { InboxFilters } from "../inbox/filter-store";
+import type { ArchivedInboxPage, ArchivedInboxFacets } from "../types/inbox";
 import { configStore } from "../config";
 import type {
   Issue,
@@ -239,6 +241,7 @@ import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
 import {
   AgentTaskListSchema,
+  AgentActivityBucketListSchema,
   AttachmentResponseSchema,
   CancelTaskResponseSchema,
   ChatDraftRestoresResponseSchema,
@@ -322,6 +325,7 @@ import {
   SquadListSchema,
   SquadMemberStatusListResponseSchema,
   SubscribersListSchema,
+  TaskMessageListSchema,
   TimelineEntriesSchema,
   UserSchema,
   WebhookDeliveryResponseSchema,
@@ -376,6 +380,8 @@ import {
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
   InboxItemListSchema,
+  ArchivedInboxPageSchema,
+  ArchivedInboxFacetsSchema,
   EMPTY_INBOX_ITEMS,
   NotificationPreferenceResponseSchema,
   EMPTY_NOTIFICATION_PREFERENCE_RESPONSE,
@@ -414,6 +420,8 @@ import {
   MALFORMED_RUNTIME_MODEL_LIST_REQUEST,
   SkillSchema,
   EMPTY_SKILL,
+  SkillSummaryListSchema,
+  EMPTY_SKILL_SUMMARY_LIST,
   SkillImportResultSchema,
   EMPTY_SKILL_IMPORT_RESULT,
   IssueViewSchema,
@@ -1360,8 +1368,17 @@ export class ApiClient {
     });
   }
 
-  async deleteComment(commentId: string): Promise<void> {
-    await this.fetch(`/api/comments/${commentId}`, { method: "DELETE" });
+  /**
+   * `keepReplies` calls the route only servers that keep a deleted comment's
+   * replies expose (#8296): if the request reaches an older server it fails
+   * instead of deleting the replies too. Pass it only when the server declared
+   * `comment_delete_keep_replies_supported`.
+   */
+  async deleteComment(commentId: string, opts: { keepReplies?: boolean } = {}): Promise<void> {
+    const path = opts.keepReplies === true
+      ? `/api/comments/${commentId}/keep-replies`
+      : `/api/comments/${commentId}`;
+    await this.fetch(path, { method: "DELETE" });
   }
 
   async resolveComment(commentId: string): Promise<Comment> {
@@ -2267,10 +2284,17 @@ export class ApiClient {
   // than cast: an unparseable body degrades to an explicit "failed" record that
   // shows the discovery error and keeps manual model entry usable, instead of a
   // fabricated empty catalog or an endless spinner (MUL-5444).
-  async initiateListModels(runtimeId: string): Promise<RuntimeModelListRequest> {
-    const raw = await this.fetch<unknown>(`/api/runtimes/${runtimeId}/models`, {
-      method: "POST",
-    });
+  async initiateListModels(
+    runtimeId: string,
+    options: { force?: boolean } = {},
+  ): Promise<RuntimeModelListRequest> {
+    const query = options.force === true ? "?force=true" : "";
+    const raw = await this.fetch<unknown>(
+      `/api/runtimes/${runtimeId}/models${query}`,
+      {
+        method: "POST",
+      },
+    );
     return parseWithFallback<RuntimeModelListRequest>(
       raw,
       RuntimeModelListRequestSchema,
@@ -2331,7 +2355,10 @@ export class ApiClient {
   }
 
   async listAgentTasks(agentId: string): Promise<AgentTask[]> {
-    return this.fetch(`/api/agents/${agentId}/tasks`);
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/tasks`);
+    return parseWithFallback<AgentTask[]>(raw, AgentTaskListSchema, [], {
+      endpoint: "GET /api/agents/:id/tasks",
+    });
   }
 
   // Workspace-scoped agent task snapshot: every active task
@@ -2373,7 +2400,10 @@ export class ApiClient {
   // sparkline (uses trailing 7 buckets) and the agent detail "Last 30
   // days" panel (uses all 30).
   async getWorkspaceAgentActivity30d(): Promise<AgentActivityBucket[]> {
-    return this.fetch(`/api/agent-activity-30d`);
+    const raw = await this.fetch<unknown>(`/api/agent-activity-30d`);
+    return parseWithFallback<AgentActivityBucket[]>(raw, AgentActivityBucketListSchema, [], {
+      endpoint: "GET /api/agent-activity-30d",
+    });
   }
 
   // Per-agent 30-day total run count for the Agents-list RUNS column.
@@ -2386,7 +2416,10 @@ export class ApiClient {
   }
 
   async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {
-    return this.fetch(`/api/tasks/${taskId}/messages`);
+    const raw = await this.fetch<unknown>(`/api/tasks/${taskId}/messages`);
+    return parseWithFallback<TaskMessagePayload[]>(raw, TaskMessageListSchema, [], {
+      endpoint: "GET /api/tasks/:id/messages",
+    });
   }
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
@@ -2401,9 +2434,14 @@ export class ApiClient {
   }
 
   async cancelTask(issueId: string, taskId: string): Promise<AgentTask> {
-    return this.fetch(`/api/issues/${issueId}/tasks/${taskId}/cancel`, {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/tasks/${taskId}/cancel`, {
       method: "POST",
     });
+    const task = parseWithFallback<AgentTask | null>(raw, AgentTaskSchema, null, {
+      endpoint: "POST /api/issues/:id/tasks/:taskId/cancel",
+    });
+    if (!task) throw new Error("Invalid task cancellation response");
+    return task;
   }
 
   async rerunIssue(issueId: string, taskId?: string): Promise<AgentTask> {
@@ -2454,10 +2492,49 @@ export class ApiClient {
     });
   }
 
+  private archivedInboxParams(filters: InboxFilters): URLSearchParams {
+    const params = new URLSearchParams();
+    if (filters.statuses.length) params.set("statuses", [...filters.statuses].sort().join(","));
+    if (filters.priorities.length) params.set("priorities", [...filters.priorities].sort().join(","));
+    if (filters.actors.length) params.set("actors", [...filters.actors].sort().join(","));
+    if (filters.unreadOnly) params.set("unread_only", "true");
+    return params;
+  }
+
+  async listArchivedInboxPage(filters: InboxFilters, options: {
+    cursor?: string | null; groupId?: string; signal?: AbortSignal;
+  } = {}): Promise<ArchivedInboxPage> {
+    const params = this.archivedInboxParams(filters);
+    params.set("limit", "50");
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.groupId) params.set("group_id", options.groupId);
+    const raw = await this.fetch<unknown>(`/api/inbox/archived/page?${params}`, { signal: options.signal });
+    const page = parseWithFallback<ArchivedInboxPage | null>(raw, ArchivedInboxPageSchema, null, {
+      endpoint: "GET /api/inbox/archived/page",
+    });
+    if (!page) throw new Error("Invalid archived inbox page response");
+    return page;
+  }
+
+  async getArchivedInboxFacets(filters: InboxFilters, signal?: AbortSignal): Promise<ArchivedInboxFacets> {
+    const raw = await this.fetch<unknown>(`/api/inbox/archived/facets?${this.archivedInboxParams(filters)}`, { signal });
+    const facets = parseWithFallback<ArchivedInboxFacets | null>(raw, ArchivedInboxFacetsSchema, null, {
+      endpoint: "GET /api/inbox/archived/facets",
+    });
+    if (!facets) throw new Error("Invalid archived inbox facets response");
+    return facets;
+  }
+
   async unarchiveInbox(id: string): Promise<InboxItem> {
     return this.fetch(`/api/inbox/${id}/unarchive`, { method: "POST" });
   }
 
+  // Raw unread ROW count — not the number any badge shows. The inbox renders
+  // one row per issue, so a single issue with three unread notifications
+  // counts once there and three times here. `getInboxUnreadSummary` is the
+  // deduplicated, per-workspace count the UI is built on (see
+  // `useInboxUnreadCount`); reach for this one only when raw rows are what
+  // you actually mean.
   async getUnreadInboxCount(): Promise<{ count: number }> {
     return this.fetch("/api/inbox/unread-count");
   }
@@ -3005,7 +3082,10 @@ export class ApiClient {
 
   // Skills
   async listSkills(): Promise<SkillSummary[]> {
-    return this.fetch("/api/skills");
+    const raw = await this.fetch<unknown>("/api/skills");
+    return parseWithFallback(raw, SkillSummaryListSchema, EMPTY_SKILL_SUMMARY_LIST, {
+      endpoint: "GET /api/skills",
+    });
   }
 
   async getSkill(id: string): Promise<Skill> {
@@ -3676,7 +3756,7 @@ export class ApiClient {
   }
 
   /**
-   * Rewrites one category's custom-status order in a single server-side
+   * Rewrites one category's status order in a single server-side
    * statement. Not expressible as a sequence of `updateIssueStatus` calls: a
    * row rejected mid-sequence would leave the earlier rows already reordered
    * while the caller sees a failure. (MUL-6243)
@@ -3684,10 +3764,11 @@ export class ApiClient {
   async reorderIssueStatuses(
     category: IssueStatusCategory,
     ids: string[],
+    includeSystem = false,
   ): Promise<ListIssueStatusesResponse> {
     const raw = await this.fetch<unknown>(`/api/issue-statuses/reorder`, {
       method: "PATCH",
-      body: JSON.stringify({ category, ids }),
+      body: JSON.stringify({ category, ids, include_system: includeSystem }),
     });
     return parseWithFallback(raw, ListIssueStatusesResponseSchema, EMPTY_LIST_ISSUE_STATUSES_RESPONSE, {
       endpoint: "PATCH /api/issue-statuses/reorder",
