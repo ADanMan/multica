@@ -43,6 +43,18 @@ func TestClient_IdentityHeaders_PostJSON(t *testing.T) {
 			// is cancelled with an upgrade prompt (MUL-5707). Pin it here so
 			// dropping it from the list can never be a silent change.
 			protocol.DaemonCapabilityLocalWorktreeV1,
+			// Same shape, opposite default: this daemon's brief names the
+			// merged multica-platform skill, and advertising that is what
+			// stops the server shipping it a redirect stub under the old name
+			// (MUL-6986). Dropping it would silently hand every task on this
+			// machine a skill it does not need; the failure is extra payload
+			// and a stale signpost, neither of which any other test would
+			// notice.
+			protocol.DaemonCapabilityPlatformSkillV1,
+			// Gates whether an automatic retry is handed its parent's workdir
+			// (MUL-7034). Dropping it silently sends those retries back to a
+			// fresh directory, losing the continuity nothing else would flag.
+			protocol.DaemonCapabilityCheckoutKeepsWorkV1,
 		} {
 			if !capabilities[want] {
 				t.Errorf("X-Client-Capabilities missing %q: %v", want, capabilities)
@@ -410,20 +422,22 @@ func TestPostJSONWithRetry_PermanentBailsImmediately(t *testing.T) {
 }
 
 func TestPostJSONWithRetry_CtxCancelStopsRetries(t *testing.T) {
+	t.Parallel()
+
 	// Use the real sleeper here so we can observe a cancel preempting it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusBadGateway)
+		w.(http.Flusher).Flush()
+		// Cancel only once the first attempt has been answered: it lands while
+		// the client finishes that response or in the 1s retry sleep after it,
+		// never before the first attempt, and no second attempt can start.
+		cancel()
 	}))
 	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		// Cancel quickly so the first sleep is aborted long before its 1s.
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
 
 	c := NewClient(srv.URL)
 	schedule := []time.Duration{time.Second, time.Second, time.Second}
