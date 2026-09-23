@@ -1,7 +1,7 @@
 import type { Issue, IssueMetadata, IssueStatus, IssueStatusCategory, IssuePriority, IssueAssigneeType } from "./issue";
-import type { PropertyFilterValue } from "./property";
+import type { IssuePropertyValues, PropertyFilterValue } from "./property";
 import type { MemberRole } from "./workspace";
-import type { Project } from "./project";
+import type { Project, ProjectStatus } from "./project";
 
 // Issue API
 export interface CreateIssueRequest {
@@ -21,6 +21,9 @@ export interface CreateIssueRequest {
   /** Issue-scoped label IDs to attach in the same transaction as the create.
    *  Unknown or non-issue ids are rejected by the server with 400. */
   label_ids?: string[];
+  /** ID-keyed custom-property values validated and persisted atomically with
+   * the issue. */
+  properties?: IssuePropertyValues;
 }
 
 export interface CreateCommentSubIssueManualRequest {
@@ -309,6 +312,10 @@ export interface IssueTableFilters {
   creators?: IssueActorRef[];
   project_ids?: string[];
   include_no_project?: boolean;
+  /** Lifecycle status of the parent project. A separate dimension from
+   *  `project_ids` (AND across the two); an issue with no project never
+   *  matches. */
+  project_statuses?: ProjectStatus[];
   label_ids?: string[];
   /** Same shape as `ListIssuesParams.properties`: bare strings are exact
    *  equality / "No value", operator objects narrow scalar matches. */

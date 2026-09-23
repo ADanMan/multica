@@ -11,6 +11,9 @@ export const localeLabels: Record<Locale, string> = {
   "zh-Hans": "\u4e2d\u6587",
   ko: "\ud55c\uad6d\uc5b4",
   ja: "\u65e5\u672c\u8a9e",
+  // The landing dictionary has no French variant yet, so `locales` above still
+  // offers four languages; this label only satisfies the Record type.
+  fr: "FR",
 };
 
 export function toLandingDictionaryLocale(
@@ -103,8 +106,8 @@ export type LandingDict = {
     title: string;
     nameLine: {
       prefix: string;
-      mul: string;
-      tiplexed: string;
+      mult: string;
+      iplexed: string;
       i: string;
       nformationAnd: string;
       c: string;
@@ -180,6 +183,9 @@ export type LandingDict = {
       title: string;
       sub: string;
       installLabel: string;
+      platformGroup: string;
+      platformMacosLinux: string;
+      platformWindows: string;
       startLabel: string;
       sshNote: string;
       copyLabel: string;
@@ -198,8 +204,6 @@ export type LandingDict = {
     pageDescription: string;
     eyebrow: string;
     title: string;
-    subtitle: string;
-    notice: { badge: string; body: string };
     fields: {
       firstName: string;
       lastName: string;
@@ -210,7 +214,6 @@ export type LandingDict = {
       countryRegion: string;
       useCase: string;
       goals: string;
-      goalsHint: string;
       selectPlaceholder: string;
       submit: string;
       submitting: string;
