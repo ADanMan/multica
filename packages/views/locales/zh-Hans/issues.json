@@ -455,6 +455,7 @@
     "unpin_tooltip": "从侧边栏取消固定",
     "thread_nav_label": "快速跳转到讨论",
     "thread_nav_resolved_label": "{{title}}（已解决）",
+    "thread_nav_reply_label": "{{author}}：{{title}}",
     "sidebar_tooltip": "切换右侧边栏",
     "find": {
       "placeholder": "在任务中查找...",

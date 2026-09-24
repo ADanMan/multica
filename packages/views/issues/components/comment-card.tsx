@@ -1189,6 +1189,7 @@ function CommentCardImpl({
         <button
           type="button"
           onClick={onCollapseResolved}
+          data-thread-sticky-bar
           className="sticky top-0 z-20 flex w-full items-center gap-2.5 border-b border-border/50 bg-muted px-4 max-md:px-3 py-2.5 text-left text-body text-muted-foreground transition-colors cursor-pointer hover:bg-accent hover:text-accent-foreground"
           aria-label={t(($) => $.comment.resolve.collapse)}
         >
@@ -1500,6 +1501,7 @@ function CommentCardImpl({
                 <button
                   type="button"
                   onClick={() => onResolvedExpandChange(entry.id, false)}
+                  data-thread-sticky-bar
                   className="sticky top-0 z-20 flex w-full items-center gap-2.5 border-t border-border/50 bg-muted px-4 max-md:px-3 py-2.5 text-left text-body text-muted-foreground transition-colors cursor-pointer hover:bg-accent hover:text-accent-foreground"
                   aria-label={t(($) => $.comment.resolve.collapse)}
                 >

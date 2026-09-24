@@ -8,6 +8,7 @@ import { issueStatusKeys } from "@multica/core/issue-statuses";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { toast } from "sonner";
 import { useResolvedExpandStore } from "@multica/core/issues/stores/resolved-expand-store";
+import { useCommentCollapseStore } from "@multica/core/issues/stores";
 import {
   DEFAULT_SUB_ISSUE_ROW_PROPERTIES,
   useSubIssueDisplayStore,
@@ -380,14 +381,28 @@ vi.mock("@multica/core/issues/stores", async () => ({
     },
   ),
   selectRecentIssues: () => () => [],
-  useCommentCollapseStore: (selector?: any) => {
-    const state = {
-      collapsedByIssue: {},
-      isCollapsed: () => false,
-      toggle: () => {},
-    };
-    return selector ? selector(state) : state;
-  },
+  // Reactive in-memory stand-in: a quick-jump to a reply reopens a thread the
+  // reader collapsed, so the card has to re-render when `toggle` runs.
+  useCommentCollapseStore: (await vi.importActual<typeof import("zustand")>("zustand")).create<{
+    collapsedByIssue: Record<string, string[]>;
+    isCollapsed: (issueId: string, commentId: string) => boolean;
+    toggle: (issueId: string, commentId: string) => void;
+  }>()((set, get) => ({
+    collapsedByIssue: {},
+    isCollapsed: (issueId, commentId) => get().collapsedByIssue[issueId]?.includes(commentId) ?? false,
+    toggle: (issueId, commentId) =>
+      set((s) => {
+        const current = s.collapsedByIssue[issueId] ?? [];
+        return {
+          collapsedByIssue: {
+            ...s.collapsedByIssue,
+            [issueId]: current.includes(commentId)
+              ? current.filter((c) => c !== commentId)
+              : [...current, commentId],
+          },
+        };
+      }),
+  })),
   useCommentDraftStore: Object.assign(
     (selector?: any) => {
       const state = {
@@ -493,6 +508,7 @@ beforeEach(() => {
   // The resolved-expand store is module-global (not per-mount like the old
   // useState); reset so one test's expansions can't leak into the next.
   useResolvedExpandStore.setState({ expandedByIssue: {} });
+  useCommentCollapseStore.setState({ collapsedByIssue: {} });
 });
 
 // Mock modals
@@ -2349,6 +2365,79 @@ describe("IssueDetail (shared)", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: "I can help with this" })).toBeInTheDocument();
+  });
+
+  describe("quick-jump rail replies", () => {
+    const highlightTint = "bg-[color-mix(in_srgb,var(--card)_95%,var(--brand)_5%)]";
+
+    it("unfolds a resolved thread and lands on the reply picked from the rail", async () => {
+      mockApiObj.listTimeline.mockResolvedValue([
+        ...mockTimeline,
+        {
+          type: "comment",
+          id: "comment-3",
+          actor_type: "member",
+          actor_id: "user-1",
+          content: "Resolved root",
+          parent_id: null,
+          created_at: "2026-01-18T00:00:00Z",
+          updated_at: "2026-01-18T00:00:00Z",
+          comment_type: "comment",
+          resolved_at: "2026-01-19T00:00:00Z",
+        } as TimelineEntry,
+        {
+          type: "comment",
+          id: "reply-1",
+          actor_type: "member",
+          actor_id: "user-1",
+          content: "Reply inside resolved thread",
+          parent_id: "comment-3",
+          created_at: "2026-01-18T01:00:00Z",
+          updated_at: "2026-01-18T01:00:00Z",
+          comment_type: "comment",
+        } as TimelineEntry,
+      ]);
+
+      renderIssueDetail();
+
+      const nav = await screen.findByRole("navigation", { name: "Jump to comment thread" });
+      expect(document.getElementById("comment-reply-1")).toBeNull();
+      fireEvent.click(within(nav).getByRole("button", { name: /: Reply inside resolved thread$/ }));
+
+      await waitFor(() => {
+        expect(document.getElementById("comment-reply-1")?.className).toContain(highlightTint);
+      });
+      expect(useResolvedExpandStore.getState().expandedByIssue["issue-1"]?.has("comment-3")).toBe(true);
+    });
+
+    it("reopens a thread the reader collapsed before landing on its reply", async () => {
+      useCommentCollapseStore.setState({ collapsedByIssue: { "issue-1": ["comment-1"] } });
+      mockApiObj.listTimeline.mockResolvedValue([
+        ...mockTimeline,
+        {
+          type: "comment",
+          id: "reply-2",
+          actor_type: "member",
+          actor_id: "user-1",
+          content: "Pushed a fix",
+          parent_id: "comment-1",
+          created_at: "2026-01-16T01:00:00Z",
+          updated_at: "2026-01-16T01:00:00Z",
+          comment_type: "comment",
+        } as TimelineEntry,
+      ]);
+
+      renderIssueDetail();
+
+      const nav = await screen.findByRole("navigation", { name: "Jump to comment thread" });
+      expect(document.getElementById("comment-reply-2")).toBeNull();
+      fireEvent.click(within(nav).getByRole("button", { name: /: Pushed a fix$/ }));
+
+      await waitFor(() => {
+        expect(document.getElementById("comment-reply-2")?.className).toContain(highlightTint);
+      });
+      expect(useCommentCollapseStore.getState().isCollapsed("issue-1", "comment-1")).toBe(false);
+    });
   });
 
   it("sends empty description when editor is cleared", async () => {

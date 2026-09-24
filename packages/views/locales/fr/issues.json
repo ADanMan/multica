@@ -462,6 +462,7 @@
     "unpin_tooltip": "Détacher de la barre latérale",
     "thread_nav_label": "Aller au fil de commentaires",
     "thread_nav_resolved_label": "{{title}} (résolu)",
+    "thread_nav_reply_label": "{{author}} : {{title}}",
     "sidebar_tooltip": "Afficher ou masquer la barre latérale droite",
     "find": {
       "placeholder": "Rechercher dans la tâche...",
