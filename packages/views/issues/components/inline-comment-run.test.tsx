@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -580,6 +581,36 @@ describe("InlineCommentRun", () => {
     vi.mocked(api.listTaskMessages).mockResolvedValue(messages);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("states how a failed run ended once and keeps the raw error on hover", async () => {
+    setup(task({ status: "failed", failure_reason: "cancelled", error: "task cancelled by server",
+      completed_at: "2026-09-07T00:12:56Z" }));
+    const label = screen.getByText("Cancelled by the system");
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("task cancelled by server")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeInTheDocument();
+    await userEvent.hover(label);
+    expect(await screen.findByText("task cancelled by server")).toBeInTheDocument();
+  });
+
+  it("keeps the raw error in view when recovery needs a configuration change", () => {
+    setup(task({ status: "failed", failure_reason: "agent_error.provider_auth_or_access",
+      error: "Invalid API key · Please run /login", completed_at: "2026-09-07T00:00:06Z" }));
+    expect(screen.getByText("Provider auth failed")).toBeInTheDocument();
+    expect(screen.getByText("Invalid API key · Please run /login")).toBeInTheDocument();
+  });
+
+  it("offers retry beside a reply only when that reply is the run's failure notice", () => {
+    const client = new QueryClient();
+    const failed = task({ status: "failed", failure_reason: "timeout", error: "run timed out" });
+    const view = (replacesFailureNotice: boolean) => <QueryClientProvider client={client}>
+      <InlineCommentRun run={{ task: failed, commentId: "comment", hasReply: true }} replacesFailureNotice={replacesFailureNotice} />
+    </QueryClientProvider>;
+    const { rerender } = renderWithI18n(view(false));
+    expect(screen.queryByRole("button", { name: "Retry run" })).not.toBeInTheDocument();
+    rerender(view(true));
+    expect(screen.getByRole("button", { name: "Retry run" })).toBeInTheDocument();
   });
 
   it("shows who cancelled the run and keeps legacy rows readable", () => {

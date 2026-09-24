@@ -13,10 +13,11 @@ import {
   DEFAULT_SUB_ISSUE_ROW_PROPERTIES,
   useSubIssueDisplayStore,
 } from "@multica/core/issues/stores/sub-issue-display-store";
+import enAgents from "../../locales/en/agents.json";
 import enCommon from "../../locales/en/common.json";
 import enIssues from "../../locales/en/issues.json";
 
-const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
+const TEST_RESOURCES = { en: { agents: enAgents, common: enCommon, issues: enIssues } };
 
 const mockViewport = vi.hoisted(() => ({ isMobile: false }));
 
@@ -1552,6 +1553,65 @@ describe("IssueDetail (shared)", () => {
     expect(userReply.nextElementSibling).toBe(agentBlock);
     expect(within(agentBlock as HTMLElement).getByRole("button", { name: "Retry run" })).toBeInTheDocument();
     expect(container.querySelectorAll(`[data-run-id="${task.id}"]`)).toHaveLength(1);
+  });
+
+  describe("a run's failure notice (MUL-7692)", () => {
+    const failedRun = (overrides: Partial<AgentTask> = {}): AgentTask => ({
+      id: "4a2e8d1c-7f9b-4e2a-9c1d-123456789abc", agent_id: "agent-1", runtime_id: "runtime-1", issue_id: "issue-1",
+      status: "failed", failure_reason: "cancelled", error: "task cancelled by server", priority: 0,
+      created_at: "2026-01-18T00:00:00Z", dispatched_at: "2026-01-18T00:00:01Z", started_at: "2026-01-18T00:00:02Z",
+      completed_at: "2026-01-18T00:12:58Z", result: null, ...overrides,
+    });
+    const notice = (task: AgentTask, parent_id: string | null): TimelineEntry => ({
+      type: "comment", id: "failure-notice", actor_type: "agent", actor_id: "agent-1", content: "task cancelled by server",
+      parent_id, created_at: "2026-01-18T00:12:58Z", updated_at: "2026-01-18T00:12:58Z", comment_type: "system",
+      source_task_id: task.id,
+    });
+    const expectStatedOnce = (slot: HTMLElement) => {
+      expect(within(slot).getByText("Cancelled by the system")).toBeInTheDocument();
+      expect(within(slot).queryByText("task cancelled by server")).not.toBeInTheDocument();
+      expect(within(slot).queryByText("Failed")).not.toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: "Retry run" })).toHaveLength(1);
+    };
+
+    it("renders the run block in the notice's thread slot and retries that run", async () => {
+      const root = mockTimeline[0]!;
+      const trigger = { ...root, id: "user-reply", parent_id: root.id, content: "Please try this task" };
+      const task = failedRun({ trigger_comment_id: trigger.id, delivered_comment_ids: [trigger.id] });
+      mockApiObj.listTimeline.mockResolvedValue([root, trigger, notice(task, trigger.id)]);
+      mockApiObj.listTasksByIssue.mockResolvedValue([task]);
+      const { container } = renderIssueDetail();
+
+      await waitFor(() => expect(container.querySelector("#comment-failure-notice [data-run-id]")).not.toBeNull());
+      const slot = container.querySelector("#comment-failure-notice") as HTMLElement;
+      expect(slot.getAttribute("data-run-comment-id")).toBe(task.id);
+      expectStatedOnce(slot);
+      fireEvent.click(within(slot).getByRole("button", { name: "Retry run" }));
+      await waitFor(() => expect(mockApiObj.rerunIssue).toHaveBeenCalledWith("issue-1", task.id));
+    });
+
+    it("renders a top-level notice as the run block", async () => {
+      const task = failedRun();
+      mockApiObj.listTimeline.mockResolvedValue([...mockTimeline, notice(task, null)]);
+      mockApiObj.listTasksByIssue.mockResolvedValue([task]);
+      const { container } = renderIssueDetail();
+
+      await waitFor(() => expect(container.querySelector(`[data-run-comment-id="${task.id}"]`)).not.toBeNull());
+      expectStatedOnce(container.querySelector("#comment-failure-notice") as HTMLElement);
+    });
+
+    it("keeps a replied-to notice as its thread, without the raw body", async () => {
+      const task = failedRun();
+      const reply: TimelineEntry = { ...mockTimeline[0]!, id: "reply-to-notice", parent_id: "failure-notice",
+        content: "Retrying after the deploy", created_at: "2026-01-18T00:20:00Z", updated_at: "2026-01-18T00:20:00Z" };
+      mockApiObj.listTimeline.mockResolvedValue([...mockTimeline, notice(task, null), reply]);
+      mockApiObj.listTasksByIssue.mockResolvedValue([task]);
+      const { container } = renderIssueDetail();
+
+      await screen.findByText("Retrying after the deploy");
+      await waitFor(() => expect(container.querySelector(`#comment-failure-notice [data-run-id="${task.id}"]`)).not.toBeNull());
+      expectStatedOnce(container.querySelector("#comment-failure-notice") as HTMLElement);
+    });
   });
 
   // Details is creator + immutable timestamps, so it ranks below the

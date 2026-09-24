@@ -51,7 +51,7 @@ import { CommentsFoldBar } from "./resolved-thread-bar";
 import { deriveThreadResolution } from "./thread-utils";
 import { RevisionConflictCompare } from "./revision-conflict-compare";
 import { InlineCommentRun, PlacedInlineCommentRun, useInlineCommentRunState, type InlineCommentRunState } from "./inline-comment-run";
-import { EMPTY_COMMENT_RUNS, orderThreadWithRuns, type CommentRun, type ThreadRunSlot } from "./comment-runs";
+import { EMPTY_COMMENT_RUNS, isRunFailureNotice, orderThreadWithRuns, type CommentRun, type ThreadRunSlot } from "./comment-runs";
 import { descriptionPreview } from "./description-preview";
 import { useCommentAnnotations } from "./use-comment-annotations";
 import { useRunCommentMotion } from "./use-run-comment-motion";
@@ -993,13 +993,21 @@ export function AgentRunComment({ run, standalone = false, commentProps, enterin
   // it still carries `hasReply`, so it never prints the deleted body as its
   // output. A deleted thread ROOT keeps rendering — it heads its own thread.
   const replyHidden = !standalone && !!replyEntry && isDeletedComment(replyEntry);
-  const reply = replyHidden ? undefined : replyEntry;
+  // The platform's failure notice only restates how the run ended, so the
+  // run's own block takes its slot and says it once (MUL-7692). A standalone
+  // notice that people replied to still heads its thread as a card.
+  const notice = replyEntry && !replyHidden && isRunFailureNotice(replyEntry, run.task)
+    && !(standalone && commentProps?.replies.some((entry) => !isDeletedComment(entry)))
+    ? replyEntry : undefined;
+  const reply = replyHidden || notice ? undefined : replyEntry;
+  // The notice keeps its deep-link target and highlight in the run's slot.
+  const slotEntry = reply ?? notice;
   const motionRef = useRunCommentMotion(entering, reply?.id, run.task.status);
   return (
     <div ref={motionRef} data-run-slot-id={run.task.id}
       data-run-comment-id={!reply ? run.task.id : undefined}
-      id={!standalone && reply ? `comment-${reply.id}` : undefined}
-      className={cn(standalone ? !reply && "rounded-xl border bg-card" : "border-t border-border/50", !reply && "py-1.5", reply && commentProps?.highlightedCommentId === reply.id && highlightedCommentBackgroundClass)}>
+      id={!standalone && slotEntry ? `comment-${slotEntry.id}` : undefined}
+      className={cn(standalone ? !reply && "rounded-xl border bg-card" : "border-t border-border/50", !reply && "py-1.5", slotEntry && commentProps?.highlightedCommentId === slotEntry.id && highlightedCommentBackgroundClass)}>
       {commentProps && reply ? standalone ? (
         <CommentCard {...commentProps} runs={commentProps.runs ?? [run]} runViewState={viewState} />
       ) : (
@@ -1010,7 +1018,7 @@ export function AgentRunComment({ run, standalone = false, commentProps, enterin
           runHeader={<PlacedInlineCommentRun run={run} viewState={viewState} presentation="header" />}
           runMetadata={<PlacedInlineCommentRun run={run} viewState={viewState} />} />
       ) : <div className="px-4 max-md:px-3">
-        <InlineCommentRun run={run} viewState={viewState} showIdentity replyTo={replyTo} />
+        <InlineCommentRun run={run} viewState={viewState} showIdentity replyTo={replyTo} replacesFailureNotice={!!notice} />
       </div>}
     </div>
   );
@@ -1088,9 +1096,13 @@ function CommentCardImpl({
   // over. Every tombstone has at least one live descendant (the server prunes
   // one that loses its last reply), so no content hides behind this.
   const visibleReplies = allNestedReplies.filter((reply) => !isDeletedComment(reply));
+  // A failure notice heading a thread keeps the thread's header; its run line
+  // below says how the run ended, so the raw body and its button are dropped.
+  const noticeRun = runs.find((run) => run.hasReply && run.commentId === entry.id && isRunFailureNotice(entry, run.task));
   const renderRuns = (commentId: string, presentation: "inline" | "header" = "inline") => runs.filter((run) => run.commentId === commentId && run.hasReply
     && (!run.anchorCommentId || run.anchorCommentId === commentId || replyFolded))
-    .map((run) => <PlacedInlineCommentRun key={run.task.id} run={run} presentation={presentation} viewState={run.commentId === entry.id ? runViewState : undefined} />);
+    .map((run) => <PlacedInlineCommentRun key={run.task.id} run={run} presentation={presentation}
+      viewState={run.commentId === entry.id ? runViewState : undefined} replacesFailureNotice={run === noticeRun} />);
 
   // A run slot renders the run's latest comment, or its activity until it
   // posts one.
@@ -1443,7 +1455,7 @@ function CommentCardImpl({
                 </div>
                 {edit.isDragOver && <FileDropOverlay />}
               </div>
-            ) : (
+            ) : !noticeRun && (
               <>
                 <div tabIndex={currentUserId ? 0 : undefined} role="group"
             aria-label={t(($) => $.reply.annotations.source_label, { name: entry.actor_name || getActorName(entry.actor_type, entry.actor_id) })}

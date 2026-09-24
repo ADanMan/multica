@@ -23,6 +23,18 @@ export function isActiveCommentRun(task: AgentTask): boolean {
   return ["queued", "dispatched", "waiting_local_directory", "running"].includes(task.status);
 }
 
+/**
+ * The comment the platform posts for a run that ended in failure: the raw
+ * error, authored as the agent. It restates how the run ended, so the run
+ * block renders in its place instead of a second, differently worded copy
+ * (MUL-7692).
+ */
+export function isRunFailureNotice(entry: TimelineEntry, task: AgentTask): boolean {
+  return entry.actor_type === "agent" && entry.comment_type === "system"
+    && entry.source_task_id === task.id
+    && (task.status === "failed" || task.status === "cancelled");
+}
+
 /** Published replies own their log entry even while the agent finishes its run. */
 export function showCommentRunInHeader(run: CommentRun): boolean {
   return run.hasReply && (isActiveCommentRun(run.task) || run.task.status === "completed");
@@ -280,10 +292,21 @@ export function orderThreadWithRuns(
   const working = new Set(threadRuns.filter((run) => !run.hasReply && isActiveCommentRun(run.task)));
   const rows = orderTimelineWithRuns(replies, threadRuns.filter((run) => !working.has(run)), entryById);
   // `runs` arrive in enqueue order: each working run goes after the row that
-  // shows its input (none for the root) and after earlier runs on that input.
+  // shows its input (none for the root), after earlier runs on that input,
+  // and after anything that happened before it was enqueued. A retry answers
+  // the same input as the attempt it retries but starts after that attempt
+  // ended, so it reads below it (MUL-7692).
   for (const run of working) {
+    const enqueuedAt = Date.parse(run.task.created_at);
     let index = rows.findIndex((item) => ("task" in item ? publishedReply(item, entryById)?.id : item.id) === run.anchorCommentId) + 1;
-    while (working.has(rows[index] as CommentRun) && (rows[index] as CommentRun).anchorCommentId === run.anchorCommentId) index += 1;
+    while (index < rows.length) {
+      const row = rows[index]!;
+      const earlierRun = working.has(row as CommentRun) && (row as CommentRun).anchorCommentId === run.anchorCommentId;
+      const earlierRow = !working.has(row as CommentRun)
+        && ("task" in row ? runSortTime(row, entryById) : Date.parse(row.created_at)) <= enqueuedAt;
+      if (!earlierRun && !earlierRow) break;
+      index += 1;
+    }
     rows.splice(index, 0, run);
   }
   // The comment directly above a run, past the run's own earlier comments. A
