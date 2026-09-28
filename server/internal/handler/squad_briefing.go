@@ -29,8 +29,7 @@ import (
 // it changes here. Do not restate it on another surface, and do not say so
 // inside the text: this const is sent to the model on every leader turn, so
 // a note addressed to maintainers is tokens the leader pays for and cannot
-// act on. multica-squads/references/squad-source-map.md records the same
-// ownership for anyone reading from the skill side.
+// act on.
 const squadOperatingProtocolHeader = `## Squad Operating Protocol
 
 **If you are reading this section, you have been activated as a squad LEADER
@@ -106,8 +105,8 @@ Your responsibilities, in order:
 // job is the owning/guest permission boundary, drawn at the Agent Identity
 // layer (Instruction Precedence puts it above the workflow). The owning
 // leader needs the standing wrap-up instruction below — the @mention-dispatch
-// shape (no child issues, so no child-done system comment) never produces a
-// comment that asks for in_review, so without it the parent would sit in
+// shape (no child issues, so no sub-issue wakeup) never produces a
+// trigger that asks for in_review, so without it the parent would sit in
 // in_progress forever; the guest leader gets the prohibition instead
 // (squadParentStatusNotOwned). Both compositions are pinned by
 // handler/squad_parent_status_contract_test.go.

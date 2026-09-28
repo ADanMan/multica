@@ -321,6 +321,8 @@ func (f *fakeIssues) PublishAttachmentsChanged(context.Context, db.Issue, pgtype
 }
 
 type fakeTasks struct {
+	denyInvoke          bool
+	invokeErr           error
 	mu                  sync.Mutex
 	called              bool
 	callCount           int
@@ -350,6 +352,16 @@ func (f *fakeTasks) PromoteDeferredChannelIssueTask(_ context.Context, taskID pg
 	defer f.mu.Unlock()
 	f.issueTaskPromotions = append(f.issueTaskPromotions, taskID)
 	return nil
+}
+
+// MemberMayInvokeAgent answers the invoke gate. Defaults to allowing, which is
+// what every test written before the gate existed assumes; a test that drives
+// the refusal sets denyInvoke or invokeErr.
+func (f *fakeTasks) MemberMayInvokeAgent(context.Context, pgtype.UUID, pgtype.UUID) (bool, error) {
+	if f.invokeErr != nil {
+		return false, f.invokeErr
+	}
+	return !f.denyInvoke, nil
 }
 
 func (f *fakeTasks) EnqueueChannelChatTask(_ context.Context, _ db.ChatSession, initiator pgtype.UUID, forceFresh bool, contextRevision int64, bindingID pgtype.UUID, routeRevision int64) (db.AgentTaskQueue, error) {
@@ -424,8 +436,10 @@ type fakeReader struct {
 }
 
 type fakeChannelChatLifecycle struct {
-	mu      sync.Mutex
-	started []ChannelChatStartedEvent
+	mu                   sync.Mutex
+	started              []ChannelChatStartedEvent
+	generatedSourceTexts []string
+	initializedTitles    []string
 }
 
 func (f *fakeChannelChatLifecycle) ChannelChatStarted(event ChannelChatStartedEvent) {
@@ -433,9 +447,15 @@ func (f *fakeChannelChatLifecycle) ChannelChatStarted(event ChannelChatStartedEv
 	defer f.mu.Unlock()
 	f.started = append(f.started, event)
 }
-func (*fakeChannelChatLifecycle) ChannelChatTitleInitialized(pgtype.UUID, pgtype.UUID, pgtype.UUID, string) {
+func (f *fakeChannelChatLifecycle) ChannelChatTitleInitialized(_ pgtype.UUID, _ pgtype.UUID, _ pgtype.UUID, title string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.initializedTitles = append(f.initializedTitles, title)
 }
-func (*fakeChannelChatLifecycle) GenerateChannelChatTitle(pgtype.UUID, pgtype.UUID, pgtype.UUID, string, string) {
+func (f *fakeChannelChatLifecycle) GenerateChannelChatTitle(_ pgtype.UUID, _ pgtype.UUID, _ pgtype.UUID, _ string, source string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generatedSourceTexts = append(f.generatedSourceTexts, source)
 }
 
 func (f *fakeReader) GetChatSession(_ context.Context, _ pgtype.UUID) (db.ChatSession, error) {
@@ -509,7 +529,7 @@ func newHarness(t *testing.T) *harness {
 		media:     &fakeMedia{},
 		issues:    &fakeIssues{},
 		tasks:     &fakeTasks{},
-		reader:    &fakeReader{ws: db.Workspace{IssuePrefix: "MUL"}},
+		reader:    &fakeReader{ws: db.Workspace{IssuePrefix: "MUL", Slug: "demo-web"}},
 		lifecycle: &fakeChannelChatLifecycle{},
 	}
 	h.router = NewRouter(h.issues, h.tasks, h.reader, RouterConfig{Logger: discardLogger(), Lifecycle: h.lifecycle})
@@ -594,6 +614,62 @@ func TestRouter_GroupNotAddressed_Drops(t *testing.T) {
 	}
 	if h.media.calls() != 0 {
 		t.Fatal("unaddressed group message must not resolve media")
+	}
+}
+
+// A refused sender is refused BEFORE anything is stored. That ordering is the
+// whole point: the web chat applies this verdict before it opens a session, and
+// a channel that applied it later would still have written the member's message
+// into somebody else's agent's context.
+func TestRouter_SenderWhoMayNotInvoke_IsRefusedBeforeAnythingIsStored(t *testing.T) {
+	h := newHarness(t)
+	h.tasks.denyInvoke = true
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r, _ := h.audit.last(); r != DropReasonInvokeDenied {
+		t.Fatalf("audit = %q, want invocation_not_allowed", r)
+	}
+	if h.dedup.marks() != 1 {
+		t.Fatalf("a refusal is final for this message, so it marks: got %d", h.dedup.marks())
+	}
+	if h.media.calls() != 0 {
+		t.Fatal("a refused turn must not resolve media — that is work done for a run that will not happen")
+	}
+	h.binder.mu.Lock()
+	ensures := h.binder.ensureCalls
+	h.binder.mu.Unlock()
+	if ensures != 0 {
+		t.Fatalf("ensured %d sessions for a refused sender; the refusal has to land before the Chat exists", ensures)
+	}
+	if !waitFor(time.Second, func() bool {
+		for _, r := range h.replier.calls() {
+			if r.Outcome == OutcomeInvokeDenied {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("the sender was never told; silence reads as a broken bot")
+	}
+}
+
+// A lookup that did not answer is not a denial. It releases, so the platform's
+// redelivery is still this message's chance — marking here would turn one
+// database blip into permanent silence for a member who may run the agent.
+func TestRouter_InvokeCheckError_Releases(t *testing.T) {
+	h := newHarness(t)
+	h.tasks.invokeErr = errors.New("database is down")
+
+	if err := h.router.Handle(context.Background(), p2pMessage(t)); err == nil {
+		t.Fatal("a failed permission lookup must surface as an error")
+	}
+	if h.dedup.marks() != 0 {
+		t.Fatalf("marked %d times; an unanswered lookup must not consume the claim", h.dedup.marks())
+	}
+	if h.dedup.releases() != 1 {
+		t.Fatalf("releases = %d, want 1", h.dedup.releases())
 	}
 }
 
@@ -1066,7 +1142,7 @@ func TestRouter_IssueCommand_Creates(t *testing.T) {
 	}
 	if !waitFor(time.Second, func() bool {
 		for _, r := range h.replier.calls() {
-			if r.IssueIdentifier == "MUL-42" && r.IssueTitle == "Fix login" {
+			if r.IssueIdentifier == "MUL-42" && r.IssueWorkspaceSlug == "demo-web" && r.IssueTitle == "Fix login" {
 				return true
 			}
 		}
@@ -1134,7 +1210,7 @@ func TestRouter_IssueCommand_ActiveDuplicateIsTerminalProductOutcome(t *testing.
 	}
 	if !waitFor(time.Second, func() bool {
 		for _, result := range h.replier.calls() {
-			if result.IssueDuplicate && result.IssueID == duplicate.ID && result.IssueIdentifier == "MUL-44" && result.IssueTitle == duplicate.Title {
+			if result.IssueDuplicate && result.IssueID == duplicate.ID && result.IssueIdentifier == "MUL-44" && result.IssueWorkspaceSlug == "demo-web" && result.IssueTitle == duplicate.Title {
 				return true
 			}
 		}

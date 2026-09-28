@@ -24,8 +24,11 @@ type Backend interface {
 
 // ExecOptions configures a single execution.
 type ExecOptions struct {
-	Cwd   string
-	Model string
+	// EnableTaskSupplement installs provider hooks only for runs whose daemon/server
+	// capability handshake enabled additional messages.
+	EnableTaskSupplement bool
+	Cwd                  string
+	Model                string
 	// SystemPrompt carries the Multica runtime brief for the few providers
 	// that cannot pick it up from disk. The daemon leaves it empty for every
 	// other provider (see daemon.providerNeedsInlineSystemPrompt), because the
@@ -56,9 +59,15 @@ type ExecOptions struct {
 	// tool continues to use the separate tool watchdog budget.
 	IdleWatchdogTimeout time.Duration
 	// HandshakeTimeout bounds startup RPCs for providers with a long-lived
-	// protocol transport. It is currently consumed by Codex app-server;
+	// protocol transport, including Codex app-server and Claude SDK hooks;
 	// zero uses the provider default rather than disabling the bound.
 	HandshakeTimeout time.Duration
+	// TurnInterruptTimeout bounds how long the Codex backend waits for the
+	// app-server to acknowledge turn/interrupt and emit turn/completed after a
+	// task is cancelled. Zero uses the provider default. A positive override is
+	// useful on slower hosts without coupling cancellation cleanup to the much
+	// longer execution or handshake budgets.
+	TurnInterruptTimeout time.Duration
 	// ThreadHandshakeTimeout optionally gives Codex's heavier thread/start and
 	// thread/resume RPCs a wider budget than initialize and turn/start. Zero
 	// preserves the legacy behavior for callers that explicitly set
@@ -141,6 +150,45 @@ func runContext(ctx context.Context, timeout time.Duration) (context.Context, co
 
 // Session represents a running agent execution.
 type Session struct {
+	// Supplement delivers an additional human instruction to the currently
+	// active provider turn. Nil means the backend cannot safely do so.
+	// Adapters bound their own transport calls; a hook-based adapter may wait
+	// for the next provider boundary until ctx or the execution is cancelled.
+	Supplement func(context.Context, string) error
+	// SupplementReady reports whether Supplement currently targets a live,
+	// provider-confirmed turn. The daemon must not claim durable input before
+	// this becomes true: claiming during provider initialization would convert
+	// a transient startup window into a user-visible delivery failure. Nil is
+	// fail-closed and means no run-scoped input may be claimed.
+	SupplementReady func() bool
+	// ToolActivity optionally reports backend-owned tool accounting and its last
+	// transition time, independent of the best-effort transcript. Nil uses the
+	// daemon's message-based accounting. The timestamp gives completed tools a
+	// fresh idle budget even when their transcript message has not drained yet.
+	ToolActivity func() (int32, time.Time)
+	// InterruptBackgroundTools stops owned background tools at the daemon's
+	// tool watchdog boundary without cancelling the agent. True means at least
+	// one tool completed/was stopped and released from accounting; the watchdog
+	// gives the agent a fresh budget to report its authoritative result.
+	// Implementations must be concurrency-safe and return false after cleanup.
+	//
+	// This is reached only at the tool budget, so a zero tool budget never calls
+	// it: work that is genuinely in flight is what that setting declines to
+	// force-stop. The daemon's AgentToolWatchdog documentation states the
+	// operator-facing consequence.
+	InterruptBackgroundTools func() bool
+	// TerminalObserved reports whether the backend has already read its
+	// authoritative terminal result. Once true the run's outcome is decided and
+	// no liveness policy may reclassify it, however long the backend then takes
+	// to finish cleaning up. Backends must publish this before any cleanup that
+	// can block or fail, otherwise a completed run can still be re-tagged as a
+	// hang. Nil means the backend offers no such boundary.
+	//
+	// It must also be published before the backend sends on Result. The daemon
+	// reads it only after a result is in hand, so that ordering is what makes
+	// the read reliable instead of a race: delivering the result establishes
+	// the happens-before, and no flag read has to win a timing window.
+	TerminalObserved func() bool
 	// Messages streams events as the agent works. The channel is closed
 	// when the agent finishes (before Result is sent).
 	Messages <-chan Message
@@ -175,6 +223,10 @@ type Message struct {
 }
 
 // TokenUsage tracks token consumption for a single model.
+// Its four token counts are mutually exclusive: InputTokens excludes cache
+// reads and writes, and OutputTokens includes reasoning/thinking.
+// Breakdowns already included in a total must not be added to that total again.
+// Zero counters alone do not establish that the provider reported complete usage.
 type TokenUsage struct {
 	InputTokens      int64
 	OutputTokens     int64
@@ -256,7 +308,7 @@ type Result struct {
 // Config configures a Backend instance.
 type Config struct {
 	ExecutablePath string            // path to CLI binary (claude, codebuddy, codex, copilot, opencode, codearts, openclaw, hermes, pi, cursor, kimi, reasonix, dsh, kiro-cli, agy, qodercli, qoderclicn, traecli, grok, qwen, qwenpaw, mcode, dim, zeroclaw)
-	CLIVersion     string            // detected version paired with ExecutablePath; observation only, never used to choose behavior
+	CLIVersion     string            // detected version paired with ExecutablePath; vendor-specific usage semantics also require BuiltinRuntime
 	Env            map[string]string // extra environment variables
 	Logger         *slog.Logger
 	TaskID         string

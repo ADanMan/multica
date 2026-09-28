@@ -7,6 +7,7 @@ import {
   aggregateByDate,
   aggregateByWeek,
   aggregateCostByModel,
+  cacheHitRatePercent,
   collectUnmappedModels,
   computeCostInWindow,
   estimateCost,
@@ -32,6 +33,21 @@ const zeroUsage = {
   cache_read_tokens: 0,
   cache_write_tokens: 0,
 };
+
+describe("cacheHitRatePercent", () => {
+  it("includes cache writes in the input-side denominator", () => {
+    expect(cacheHitRatePercent(0, 72, 28)).toBe(72);
+  });
+
+  it("does not round an incomplete hit rate up to 100%", () => {
+    expect(cacheHitRatePercent(45, 9_955, 0)).toBe(99);
+    expect(cacheHitRatePercent(0, 10_000, 0)).toBe(100);
+  });
+
+  it("returns null when there are no input-side tokens", () => {
+    expect(cacheHitRatePercent(0, 0, 0)).toBeNull();
+  });
+});
 
 describe("isSelfHealingRuntime", () => {
   function makeRuntime(overrides: Partial<AgentRuntime>): AgentRuntime {
@@ -249,6 +265,30 @@ describe("estimateCost", () => {
     }
   });
 
+  it("prices Opus 5.5 at its own 4/20 tier with 0.05x cache reads, not Opus 5's", () => {
+    // Opus 5.5 is cheaper than Opus 5 ($4 / $20, $5 cache write) and prices
+    // cache reads at 0.05x input ($0.20) instead of the usual 0.1x. Copilot
+    // reports it dotted, so every spelling must reach the 5.5 row.
+    for (const model of [
+      "claude-opus-5-5",
+      "claude-opus-5-5[1m]",
+      "claude-opus-5.5",
+      "anthropic/claude-opus-5-5",
+    ]) {
+      expect(
+        estimateCost({
+          ...zeroUsage,
+          model,
+          input_tokens: 1_000_000,
+          output_tokens: 1_000_000,
+          cache_read_tokens: 1_000_000,
+          cache_write_tokens: 1_000_000,
+        }),
+      ).toBeCloseTo(4 + 20 + 0.2 + 5, 5);
+      expect(isModelPriced(model)).toBe(true);
+    }
+  });
+
   it("prices each dotted Codex catalog SKU at its own tier, not gpt-5", () => {
     // Every dotted minor version is priced independently. The resolver does
     // exact-match-after-date-strip (no startsWith fallback), so each row
@@ -284,6 +324,7 @@ describe("estimateCost", () => {
     // can't hide behind an input-only assertion. `total` is 1M of each of the
     // four categories priced at its own rate.
     const cases = [
+      { model: "gpt-6-astra", input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50, total: 73.5 },
       { model: "gpt-5.6-sol", input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 30, total: 41.75 },
       { model: "gpt-5.6-terra", input: 2.5, cacheRead: 0.25, cacheWrite: 3.125, output: 15, total: 20.875 },
       { model: "gpt-5.6-luna", input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 6, total: 8.35 },
@@ -340,6 +381,8 @@ describe("estimateCost", () => {
     // literal-dot alias in server/internal/metrics/pricing.go (MUL-4347).
     expect(isModelPriced("gpt-5-6-luna")).toBe(false);
     expect(isModelPriced("gpt-5-6-sol")).toBe(false);
+    expect(isModelPriced("gpt-6-astra")).toBe(true);
+    expect(isModelPriced("gpt-6-astra-pro")).toBe(false);
     expect(
       estimateCost({
         ...zeroUsage,
