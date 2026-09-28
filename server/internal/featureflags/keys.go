@@ -28,9 +28,13 @@ const (
 	// targeting has no production wiring — which is enough because a
 	// workspace with no triager configured and no Triage issues sees nothing
 	// either way. Turning it off stops new intake and triage runs but leaves
-	// existing Triage issues workable; the reserved `triage` status itself is
-	// not gated.
+	// existing Triage issues workable.
 	TriageV1 = "triage_v1"
+	// LocalSearchIndex gates the sync endpoints behind Web/Desktop local search
+	// (MUL-7754). On by default. Turning it off (FF_LOCAL_SEARCH_INDEX=off)
+	// makes those endpoints answer 404, so clients stop syncing and search
+	// through the server again without a client release.
+	LocalSearchIndex = "local_search_index"
 	// agentBuilderCompat is no longer a release flag. Keep publishing the key
 	// as enabled so installed desktop clients that still gate the AI creation
 	// entry on this config decision receive the permanently enabled behavior.
@@ -68,6 +72,10 @@ func PluginsV1Enabled(ctx context.Context, flags *featureflag.Service) bool {
 
 func TriageV1Enabled(ctx context.Context, flags *featureflag.Service) bool {
 	return flags.IsEnabled(ctx, TriageV1, false)
+}
+
+func LocalSearchIndexEnabled(ctx context.Context, flags *featureflag.Service) bool {
+	return flags.IsEnabled(ctx, LocalSearchIndex, true)
 }
 
 func EvaluateFrontendPublicFlags(ctx context.Context, flags *featureflag.Service) map[string]bool {
