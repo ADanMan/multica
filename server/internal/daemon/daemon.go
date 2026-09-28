@@ -7988,10 +7988,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	var hermesSessionStore string
 	if provider == "hermes" {
 		// Resolve from the argv hermes will actually parse — launch prefix,
-		// `acp`, then the filtered custom args — which agent.HermesLaunchArgv
+		// the filtered custom args, then `acp` — which agent.HermesLaunchArgv
 		// assembles the same way the backend does. A custom runtime profile's
 		// fixed_args are the launch prefix now, so they are scanned before
-		// custom_args, and the backend's own `acp` token sits between them and
+		// custom_args, and the backend's own `acp` token closes the argv and
 		// participates in the scan. Approximating that argv reads a different
 		// profile than the process does, and the overlay ends up seeded from
 		// the wrong home (GH #7046).
@@ -8562,8 +8562,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// The overlay is authoritative once built, so nothing on the command line
 	// may re-point HERMES_HOME out of it. Both argv regions are stripped
 	// together, against the same assembled argv the resolver read: a selection
-	// can straddle them (a prefix ending in a bare `-p` captures the backend's
-	// `acp`), which per-region stripping cannot see.
+	// can straddle them (a prefix ending in a bare `-p` captures the first
+	// custom arg), which per-region stripping cannot see.
 	var hermesOverlayCustomArgs []string
 	hermesOverlayActive := provider == "hermes" && env != nil && env.HermesHome != ""
 	if hermesOverlayActive {
