@@ -9,7 +9,9 @@
     "agents_section": "Агенты ({{count}})",
     "detail_link": "Подробнее →",
     "more_agents_one": "и ещё {{count}} агент",
-    "more_agents_other": "и ещё {{count}} агентов"
+    "more_agents_few": "и ещё {{count}} агента",
+    "more_agents_many": "и ещё {{count}} агентов",
+    "more_agents_other": "и ещё {{count}} агента"
   },
   "detail": {
     "workspace_fallback": "Рабочее пространство",

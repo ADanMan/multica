@@ -74,7 +74,9 @@
   "members_tab": {
     "section_title": "Участники",
     "section_count_one": "{{count}} участник в этой команде",
-    "section_count_other": "{{count}} участников в этой команде",
+    "section_count_few": "{{count}} участника в этой команде",
+    "section_count_many": "{{count}} участников в этой команде",
+    "section_count_other": "{{count}} участника в этой команде",
     "add_member_button": "Добавить участника",
     "create_agent_button": "Создать агента",
     "leader_chip": "Лидер",
@@ -118,9 +120,13 @@
     "detail_link": "Подробнее →",
     "archived": "Архивирована",
     "member_count_one": "{{count}} участник",
-    "member_count_other": "{{count}} участников",
+    "member_count_few": "{{count}} участника",
+    "member_count_many": "{{count}} участников",
+    "member_count_other": "{{count}} участника",
     "members_section": "Участники",
     "more_members_one": "+{{count}} ещё",
+    "more_members_few": "+{{count}} ещё",
+    "more_members_many": "+{{count}} ещё",
     "more_members_other": "+{{count}} ещё"
   },
   "instructions_tab": {
@@ -142,7 +148,9 @@
     "result_count_title": "Найдено команд / всего команд",
     "filter_label": "Фильтр",
     "filter_active_count_one": "{{count}} фильтр",
-    "filter_active_count_other": "{{count}} фильтров",
+    "filter_active_count_few": "{{count}} фильтра",
+    "filter_active_count_many": "{{count}} фильтров",
+    "filter_active_count_other": "{{count}} фильтра",
     "clear_filters": "Сбросить фильтры"
   }
 }

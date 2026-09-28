@@ -7,7 +7,9 @@
   "fab": {
     "running": "Multica работает...",
     "unread_one": "{{count}} непрочитанный чат",
-    "unread_other": "{{count}} непрочитанных чатов",
+    "unread_few": "{{count}} непрочитанных чата",
+    "unread_many": "{{count}} непрочитанных чатов",
+    "unread_other": "{{count}} непрочитанных чата",
     "default": "Спросить Multica"
   },
   "input": {
@@ -35,7 +37,9 @@
   },
   "queue": {
     "title_one": "{{count}} сообщение в очереди",
-    "title_other": "{{count}} сообщений в очереди",
+    "title_few": "{{count}} сообщения в очереди",
+    "title_many": "{{count}} сообщений в очереди",
+    "title_other": "{{count}} сообщения в очереди",
     "clear": "Очистить всё",
     "steer": "Скорректировать",
     "steer_unavailable": "Коррекция станет доступна после начала текущего ответа",
@@ -73,11 +77,15 @@
       "environment_prepare_failed": "Машина, на которой работает агент, не смогла подготовить этот запуск, поэтому он так и не начался. Ошибка ниже описывает, что там пошло не так — часто это нехватка места на диске, права доступа, занятая папка или локальная конфигурация, которую не удалось прочитать. Проблема не в агенте и не в провайдере модели."
     },
     "tools_one": "{{count}} инструмент",
-    "tools_other": "{{count}} инструментов",
+    "tools_few": "{{count}} инструмента",
+    "tools_many": "{{count}} инструментов",
+    "tools_other": "{{count}} инструмента",
     "tool_result_named": "Результат {{tool}}: ",
     "tool_result_unnamed": "результат: ",
     "process_steps_one": "{{count}} шаг",
-    "process_steps_other": "{{count}} шагов",
+    "process_steps_few": "{{count}} шага",
+    "process_steps_many": "{{count}} шагов",
+    "process_steps_other": "{{count}} шага",
     "copy_action": "Копировать",
     "copied_toast": "Скопировано",
     "copy_failed_toast": "Не удалось скопировать",
