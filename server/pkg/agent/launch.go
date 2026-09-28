@@ -1,11 +1,46 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
+
+const redactedAgentCommandArg = "<redacted>"
+
+const maxLoggedAgentCommandFlagLen = 64
+
+// agentCommandLogArgs describes the adapter-assembled argv handed to the
+// launch boundary. trustedPositionals contains indexes into invocationArgs for
+// literal subcommands owned by the adapter; every other positional remains
+// redacted. Keeping index-and-literal assertions instead of a global string
+// allowlist makes trust follow the argument's source, so an identical token
+// supplied through custom_args is still treated as sensitive.
+type agentCommandLogArgs struct {
+	invocationArgs     []string
+	trustedPositionals []trustedAgentCommandPositional
+}
+
+type trustedAgentCommandPositional struct {
+	index int
+	value string
+}
+
+func trustAgentCommandPositional(index int, value string) trustedAgentCommandPositional {
+	return trustedAgentCommandPositional{index: index, value: value}
+}
+
+func newAgentCommandLogArgs(invocationArgs []string, trustedPositionals ...trustedAgentCommandPositional) agentCommandLogArgs {
+	return agentCommandLogArgs{
+		invocationArgs:     invocationArgs,
+		trustedPositionals: append([]trustedAgentCommandPositional(nil), trustedPositionals...),
+	}
+}
 
 // Command is the identity of a runtime CLI: the executable Multica spawns plus
 // the argv prefix that belongs to the command itself rather than to any single
@@ -76,8 +111,146 @@ func (c Command) Argv(args ...string) []string {
 // reintroduce GH #7046. TestOnlyLaunchGoSpawnsRuntimeProcesses enforces it.
 func (c Command) exec(ctx context.Context, args ...string) *exec.Cmd {
 	warnLaunchPrefixOverlap(c.Prefix, args, c.logger)
-	return exec.CommandContext(ctx, c.Path, c.Argv(args...)...)
+	return newRuntimeCmd(exec.CommandContext(ctx, c.Path, c.Argv(args...)...))
 }
+
+// newRuntimeCmd applies the process-lifecycle defaults every runtime process in
+// this package gets. It runs at construction because both of them have to be in
+// place before the process exists.
+//
+// Both used to be opt-in, and opt-in is why GH #7522 happened. Of the 27 places
+// this package starts a process, 8 asked for a process group; the rest left
+// their CLI in the daemon's group, where a group-wide signal cannot reach it.
+// os/exec's default Cancel is the same leak by another route: it kills the
+// leader alone, so a cancelled task's tool subprocesses — MCP servers, shells,
+// whatever the agent spawned — survive it. On Linux that was #5918. On Windows,
+// where the leader is often a cmd.exe shim and the real CLI is already a
+// grandchild, a cancelled agent kept working for 40 minutes.
+//
+// A backend that wants a graceful shutdown instead of an immediate kill assigns
+// its own cmd.Cancel after construction and wins; claude, dsh and deveco do,
+// because they drive SIGTERM → grace → SIGKILL themselves.
+func newRuntimeCmd(cmd *exec.Cmd) *exec.Cmd {
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		signalProcessGroup(cmd, syscall.SIGKILL)
+		return nil
+	}
+	return cmd
+}
+
+// runOwned is Run() over an owned process tree: start, wait, drop ownership.
+//
+// os/exec's Run/Output/CombinedOutput call Start themselves, so a probe written
+// with them never reaches startOwnedProcessTree and owns nothing on Windows —
+// where the direct child of a `--version` probe is typically the shim, not the
+// CLI. That is the same escape GH #7522 was reported for, in a path nobody was
+// looking at: detectCLIVersion's own comment already describes a broken CLI
+// leaving grandchildren behind. These three helpers are how a synchronous probe
+// gets the same ownership a task launch has.
+func runOwned(cmd *exec.Cmd, logger *slog.Logger) error {
+	// Without a bound this waits for its own cleanup and never returns. A
+	// descendant that inherited the output pipes holds them open after the
+	// leader exits; cmd.Wait blocks until the copy goroutines see EOF; and the
+	// thing that would close those pipes is the release below, which runs
+	// after Wait. WaitDelay is defined for exactly this case — "a child
+	// process that exits but leaves its I/O pipes unclosed" — and cancellation
+	// is no help, because a probe like checkOpenclawVersion runs on the
+	// caller's context before any task timeout exists.
+	//
+	// A caller that set its own bound keeps it; detectCLIVersion has had one
+	// since MUL-3812 for this exact shape.
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = probeWaitDelay
+	}
+	if err := startOwnedProcessTree(cmd, logger); err != nil {
+		return err
+	}
+	err := cmd.Wait()
+	// The probe is over the moment its leader is: nothing it spawned should
+	// outlive the answer. Signalling before the release covers Unix, where
+	// releasing a process group is a no-op; on Windows closing the Job Object
+	// would take the tree down on its own.
+	signalProcessGroup(cmd, syscall.SIGKILL)
+	releaseProcessGroup(cmd)
+	return err
+}
+
+// probeWaitDelay bounds how long a finished probe waits on output pipes its
+// descendants left open. detectCLIVersion sets the same bound on its own
+// command. The timer only starts once the child has exited or the context is
+// done, so a healthy probe never pays it.
+// Package tests shorten it while preserving the delayed-descendant ordering;
+// production never reassigns it.
+var probeWaitDelay = 2 * time.Second
+
+// outputOwned is cmd.Output() over an owned process tree. It matches the
+// stdlib's contract — stdout returned, a failed run's stderr attached to the
+// *exec.ExitError — except that the stderr sample is the last
+// probeStderrSampleBytes rather than the stdlib's head-and-tail, which is where
+// a CLI's actual failure line ends up.
+func outputOwned(cmd *exec.Cmd, logger *slog.Logger) ([]byte, error) {
+	if cmd.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	// A caller that set its own Stderr wants it; only fill in the sample when
+	// nothing else is watching, exactly as Output() does.
+	var stderr *tailBuffer
+	if cmd.Stderr == nil {
+		stderr = &tailBuffer{max: probeStderrSampleBytes}
+		cmd.Stderr = stderr
+	}
+
+	err := runOwned(cmd, logger)
+	var exitErr *exec.ExitError
+	if stderr != nil && errors.As(err, &exitErr) {
+		exitErr.Stderr = stderr.Bytes()
+	}
+	return stdout.Bytes(), err
+}
+
+// combinedOutputOwned is cmd.CombinedOutput() over an owned process tree.
+// Stdout and Stderr are the same writer value, which is what makes os/exec give
+// them one pipe and therefore one interleaving, as the stdlib does.
+func combinedOutputOwned(cmd *exec.Cmd, logger *slog.Logger) ([]byte, error) {
+	if cmd.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	if cmd.Stderr != nil {
+		return nil, errors.New("exec: Stderr already set")
+	}
+	var combined bytes.Buffer
+	cmd.Stdout = &combined
+	cmd.Stderr = &combined
+	err := runOwned(cmd, logger)
+	return combined.Bytes(), err
+}
+
+// probeStderrSampleBytes bounds the stderr kept for a failed probe's error.
+// os/exec bounds the same sample at 32 KiB; a CLI stuck in a log loop should
+// not be able to grow the daemon's heap through a `--version` call.
+const probeStderrSampleBytes = 32 << 10
+
+// tailBuffer keeps the last max bytes written to it and discards the rest. It
+// always reports a full write, so a child is never blocked or shortened by the
+// bound.
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) Bytes() []byte { return t.buf }
 
 // invocationChooser is the shape of the per-tool platform launch rewrites
 // (chooseCursorInvocation, chooseCopilotInvocation, choosePiInvocation). On
@@ -96,7 +269,7 @@ type invocationChooser func(execName, lookedUp string, args []string, logger *sl
 func (c Command) execVia(ctx context.Context, choose invocationChooser, lookedUp string, args []string, logger *slog.Logger) (*exec.Cmd, string, []string) {
 	warnLaunchPrefixOverlap(c.Prefix, args, logger)
 	argv0, cmdArgs := choose(c.Path, lookedUp, c.Argv(args...), logger)
-	return exec.CommandContext(ctx, argv0, cmdArgs...), argv0, cmdArgs
+	return newRuntimeCmd(exec.CommandContext(ctx, argv0, cmdArgs...)), argv0, cmdArgs
 }
 
 // withFilteredPrefix returns a copy of the command whose prefix has been
@@ -142,6 +315,127 @@ func (c Config) commandAt(path string) Command {
 	return Command{Path: path, Prefix: c.LaunchPrefix, logger: c.Logger}
 }
 
+// logAgentCommand is the only boundary allowed to record runtime process
+// arguments. It works from the final exec.Cmd so launch prefixes and
+// platform-specific rewrites are represented, but never records argument
+// values: flag names and adapter-owned literal subcommands remain useful for
+// diagnostics, inline values are removed, and every other positional/value
+// token is replaced with a marker.
+func (c Config) logAgentCommand(cmd *exec.Cmd, source agentCommandLogArgs) {
+	c.logAgentCommandFields(cmd, source, 0, false)
+}
+
+// logAgentCommandWithPrompt adds only a typed prompt byte count to the safe
+// command log. Keeping it separate from logAgentCommand avoids an open-ended
+// optional field channel that could accidentally carry prompt content.
+func (c Config) logAgentCommandWithPrompt(cmd *exec.Cmd, source agentCommandLogArgs, promptBytes int) {
+	c.logAgentCommandFields(cmd, source, promptBytes, true)
+}
+
+func (c Config) logAgentCommandFields(cmd *exec.Cmd, source agentCommandLogArgs, promptBytes int, includePromptBytes bool) {
+	if cmd == nil {
+		return
+	}
+	logger := c.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	args := []string{}
+	if len(cmd.Args) > 1 {
+		args = cmd.Args[1:]
+	}
+	trustedPositionals := c.trustedAgentCommandPositionals(args, source)
+	fields := []any{
+		"provider", c.provider,
+		"exec", cmd.Path,
+		"args", redactAgentCommandArgs(args, trustedPositionals),
+		"arg_count", len(args),
+	}
+	if includePromptBytes {
+		fields = append(fields, "prompt_bytes", promptBytes)
+	}
+	logger.Info("agent command", fields...)
+}
+
+// trustedAgentCommandPositionals maps source indexes onto the final exec.Cmd
+// argv. Platform launch rewrites may prepend a PowerShell host and wrapper
+// arguments, so the original launch prefix plus adapter argv must match the
+// final suffix before any positional is trusted. A mismatch fails closed.
+func (c Config) trustedAgentCommandPositionals(finalArgs []string, source agentCommandLogArgs) map[int]struct{} {
+	originalLen := len(c.LaunchPrefix) + len(source.invocationArgs)
+	start := len(finalArgs) - originalLen
+	if start < 0 {
+		return nil
+	}
+	for i, arg := range c.LaunchPrefix {
+		if finalArgs[start+i] != arg {
+			return nil
+		}
+	}
+	invocationStart := start + len(c.LaunchPrefix)
+	for i, arg := range source.invocationArgs {
+		if finalArgs[invocationStart+i] != arg {
+			return nil
+		}
+	}
+
+	trusted := make(map[int]struct{}, len(source.trustedPositionals))
+	for _, positional := range source.trustedPositionals {
+		if positional.index < 0 || positional.index >= len(source.invocationArgs) ||
+			source.invocationArgs[positional.index] != positional.value {
+			continue
+		}
+		trusted[invocationStart+positional.index] = struct{}{}
+	}
+	return trusted
+}
+
+// redactAgentCommandArgs preserves only syntactically plausible flag names and
+// source-proven adapter subcommands while removing every value. Single-dash
+// flags must be one ASCII letter; this keeps a token such as
+// "-sTk9xQZ-secretvalue" from being mistaken for a flag. Long flags are
+// length-bounded and lose inline values. All other tokens become <redacted>.
+func redactAgentCommandArgs(args []string, trustedPositionals map[int]struct{}) []string {
+	redacted := make([]string, len(args))
+	for i, arg := range args {
+		if _, ok := trustedPositionals[i]; ok {
+			redacted[i] = arg
+			continue
+		}
+		if flag, ok := safeAgentCommandFlagName(arg); ok {
+			redacted[i] = flag
+			continue
+		}
+		redacted[i] = redactedAgentCommandArg
+	}
+	return redacted
+}
+
+func safeAgentCommandFlagName(arg string) (string, bool) {
+	flag := arg
+	if equals := strings.IndexByte(flag, '='); equals > 0 {
+		flag = flag[:equals]
+	}
+	if len(flag) == 2 && flag[0] == '-' && isASCIIAlpha(flag[1]) {
+		return flag, true
+	}
+	if len(flag) < 3 || len(flag) > maxLoggedAgentCommandFlagLen || !strings.HasPrefix(flag, "--") || !isASCIIAlpha(flag[2]) {
+		return "", false
+	}
+	for i := 3; i < len(flag); i++ {
+		ch := flag[i]
+		if !isASCIIAlpha(ch) && (ch < '0' || ch > '9') && ch != '.' && ch != '_' && ch != '-' {
+			return "", false
+		}
+	}
+	return flag, true
+}
+
+func isASCIIAlpha(ch byte) bool {
+	return ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+
 // launchPrefixBlockedArgs maps a protocol family to the flags a launch prefix
 // may not set. It exists so New can filter the prefix once, at the single
 // point that knows the family, instead of asking each backend to remember.
@@ -152,6 +446,7 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
 	"antigravity": antigravityBlockedArgs,
 	"claude":      claudeBlockedArgs,
 	"codebuddy":   codebuddyBlockedArgs,
+	"codearts":    codeartsBlockedArgs,
 	"codex":       codexBlockedArgs,
 	"copilot":     copilotBlockedArgs,
 	"cursor":      cursorBlockedArgs,
@@ -169,6 +464,8 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
 	"qwenpaw":     qwenpawBlockedArgs,
 	"reasonix":    reasonixBlockedArgs,
 	"traecli":     traecliBlockedArgs,
+	"dim":         dimBlockedArgs,
+	"zeroclaw":    zeroclawBlockedArgs,
 }
 
 // FilterLaunchPrefix is the exported form for callers outside this package —
@@ -176,6 +473,9 @@ var launchPrefixBlockedArgs = map[string]map[string]blockedArgMode{
 // Without it a `--version` probe and a task launch would disagree about what
 // the runtime's prefix is.
 func FilterLaunchPrefix(agentType string, prefix []string, logger *slog.Logger) []string {
+	if family, ok := RuntimeProtocolFamily(agentType); ok {
+		agentType = family
+	}
 	return filterLaunchPrefix(prefix, agentType, logger)
 }
 

@@ -1,10 +1,16 @@
 import { act, type ReactNode } from "react";
+import { buildIssueStatusCatalog } from "@multica/core/issue-statuses/queries";
+
+vi.mock("@multica/core/issue-statuses/hooks", () => ({
+  useIssueStatuses: () => buildIssueStatusCatalog([]),
+}));
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { WORKSPACE_PAGES } from "@multica/core/paths";
 import { SearchCommand } from "./search-command";
+vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
 import { useSearchStore } from "./search-store";
 import enCommon from "../locales/en/common.json";
 import enAuth from "../locales/en/auth.json";
@@ -13,6 +19,8 @@ import enSearch from "../locales/en/search.json";
 // The palette labels its Pages group from the sidebar's own nav strings, so
 // the layout namespace is part of its contract, not incidental setup.
 import enLayout from "../locales/en/layout.json";
+import enProjects from "../locales/en/projects.json";
+import zhHansProjects from "../locales/zh-Hans/projects.json";
 
 const TEST_RESOURCES = {
   en: {
@@ -21,6 +29,23 @@ const TEST_RESOURCES = {
     settings: enSettings,
     search: enSearch,
     layout: enLayout,
+    projects: enProjects,
+  },
+};
+
+// Deliberately NOT a full zh-Hans bundle: only `projects` is translated, and
+// every other namespace stays on its English bundle under the zh-Hans key.
+// The one thing under test is whether a project row names its status through
+// the projects namespace, and keeping the chrome in English lets these tests
+// go on addressing the palette by its English placeholder and group headings.
+const ZH_TEST_RESOURCES = {
+  "zh-Hans": {
+    common: enCommon,
+    auth: enAuth,
+    settings: enSettings,
+    search: enSearch,
+    layout: enLayout,
+    projects: zhHansProjects,
   },
 };
 
@@ -33,6 +58,17 @@ function I18nWrapper({ children }: { children: ReactNode }) {
 }
 
 const renderSearch = () => render(<SearchCommand />, { wrapper: I18nWrapper });
+
+function ChineseI18nWrapper({ children }: { children: ReactNode }) {
+  return (
+    <I18nProvider locale="zh-Hans" resources={ZH_TEST_RESOURCES}>
+      {children}
+    </I18nProvider>
+  );
+}
+
+const renderSearchInChinese = () =>
+  render(<SearchCommand />, { wrapper: ChineseI18nWrapper });
 
 const {
   mockPush,
@@ -220,7 +256,7 @@ function resolveIssue(key: readonly unknown[]) {
   // issueDetailOptions key shape: ["issues", wsId, "detail", id]
   if (key[0] === "issues" && key[2] === "detail") {
     const id = key[3];
-    return mockAllIssues.current.find((i) => i.id === id);
+    return mockAllIssues.current.find((i) => i.id === id || i.identifier === id);
   }
   return undefined;
 }
@@ -670,6 +706,31 @@ describe("SearchCommand", () => {
     expect(useSearchStore.getState().open).toBe(false);
   });
 
+  it("folds comments under the issue UUID when the URL carries the identifier", async () => {
+    const user = userEvent.setup();
+    mockPathname.current = "/ws-test/issues/MUL-42";
+    mockAllIssues.current = [
+      { id: "issue-1", identifier: "MUL-42", title: "Demo", status: "todo" },
+    ];
+    mockTimeline.current = [
+      { type: "comment", id: "root-1", actor_type: "member", actor_id: "u1", created_at: "2026-01-01T01:00:00Z", parent_id: null },
+    ];
+    renderSearch();
+
+    const input = screen.getByPlaceholderText("Type a command or search...");
+    await user.type(input, "fold");
+
+    const foldItem = await screen.findByText(
+      (_, el) => el?.textContent === "Fold All Comments" && el?.tagName === "SPAN",
+    );
+    await user.click(foldItem);
+
+    await waitFor(() => {
+      expect(mockCommentCollapseAll).toHaveBeenCalledWith("issue-1", ["root-1"]);
+    });
+    expect(mockResolvedCollapseAll).toHaveBeenCalledWith("issue-1");
+  });
+
   it("unfolds all comments and expands resolved threads", async () => {
     const user = userEvent.setup();
     mockPathname.current = "/ws-test/issues/issue-1";
@@ -1031,6 +1092,31 @@ describe("SearchCommand", () => {
       Array.from(
         document.querySelectorAll<HTMLElement>("[cmdk-group-heading]"),
       ).map((el) => el.textContent ?? "");
+
+    it("renders project status in the selected UI language", async () => {
+      const user = userEvent.setup();
+      mockSearchProjects.mockResolvedValue({
+        projects: [
+          fixtureProject({
+            id: "proj-localized",
+            title: "localized project",
+            status: "in_progress",
+          }),
+        ],
+        total: 1,
+      });
+
+      renderSearchInChinese();
+      await user.type(
+        screen.getByPlaceholderText("Type a command or search..."),
+        "localized",
+      );
+
+      await waitFor(() => expect(screen.getByText("进行中")).toBeInTheDocument(), {
+        timeout: 2000,
+      });
+      expect(screen.queryByText("In Progress")).toBeNull();
+    });
 
     it("keeps a cancelled project below a live issue instead of first", async () => {
       const user = userEvent.setup();

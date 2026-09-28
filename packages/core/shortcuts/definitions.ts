@@ -9,9 +9,9 @@ export type ShortcutActionId =
   | "openSearch"
   | "createIssue"
   | "toggleSidebar"
+  | "toggleRightSidebar"
   | "toggleChat"
   | "findInIssue"
-  | "openThreadNav"
   | "archiveInboxItem"
   | "send"
   | "goBack"
@@ -80,6 +80,12 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionDefinition[] = [
   { id: "openSearch", category: "general", defaultShortcut: primary("K"), allowInEditable: true },
   { id: "createIssue", category: "general", defaultShortcut: createShortcutChord("C"), allowInEditable: false },
   { id: "toggleSidebar", category: "general", defaultShortcut: primary("B"), allowInEditable: false },
+  {
+    id: "toggleRightSidebar",
+    category: "general",
+    defaultShortcut: primary("/"),
+    allowInEditable: false,
+  },
   // Mod+J follows the "toggle a docked panel" convention, and is one of the few
   // letters this module's own policy leaves free on every platform and runtime:
   // it is neither app-owned (PRIMARY_RESERVED_KEYS) nor browser-owned
@@ -88,21 +94,6 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionDefinition[] = [
   // to keep working while the caret sits in the chat composer itself.
   { id: "toggleChat", category: "general", defaultShortcut: primary("J"), allowInEditable: true },
   { id: "findInIssue", category: "general", defaultShortcut: primary("F"), allowInEditable: true },
-  // Mod+Shift+O mirrors "go to symbol in file" in code editors: jump to a
-  // section of the document you already have open, as opposed to Mod+F, which
-  // searches its text. `allowInEditable` because reaching another thread while
-  // drafting a comment is the common case, not the exception.
-  //
-  // Known gap: Chrome on Windows/Linux binds Ctrl+Shift+O to its bookmark
-  // manager, so on those web builds the default never reaches the page. It is
-  // recordable rather than reserved because the desktop app does receive it,
-  // and Settings → Keyboard shortcuts lets affected users rebind.
-  {
-    id: "openThreadNav",
-    category: "general",
-    defaultShortcut: createShortcutChord("O", { primary: true, shift: true }),
-    allowInEditable: true,
-  },
   {
     id: "archiveInboxItem",
     category: "general",
@@ -306,6 +297,11 @@ const PRIMARY_RESERVED_KEYS = new Set([
   "A", "C", "V", "X", "Y", "Z",
   // Zoom accelerators: fixed app shortcuts on desktop, browser zoom on web.
   "Equals", "Plus", "Minus", "Underscore", "0",
+  // Browser-style direct tab selection: browsers own these on web and the
+  // desktop main process owns them for product tabs. Keeping them reserved
+  // also sanitizes any conflicting shortcut override persisted by an older
+  // app version.
+  "1", "2", "3", "4", "5", "6", "7", "8", "9",
 ]);
 
 // Accelerators owned by the browser UI around a tab: print, address bar,

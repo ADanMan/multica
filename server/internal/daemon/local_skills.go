@@ -1,13 +1,17 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/skill"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
@@ -102,8 +106,10 @@ const (
 //   - Pi: https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md
 //   - Cursor: official forum guidance referencing the built-in /create-skill flow
 //     (https://forum.cursor.com/t/cursor-doesnt-know-new-skills-arens-saved/158507)
-//   - Hermes: ~/.hermes/skills is Hermes Agent's primary skill directory
-//     (https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)
+//   - Hermes: <HERMES_HOME>/skills is Hermes Agent's primary skill directory
+//     (https://hermes-agent.nousresearch.com/docs/user-guide/features/skills);
+//     the home is resolved as for a task without agent-level overrides
+//     (see hermesLocalSkillsRoot)
 //   - Kimi: ~/.kimi/skills mirrors Kimi CLI's project-level .kimi/skills layout
 //   - Kiro: project and user-level .kiro/skills directories discovered by Kiro CLI
 //   - Qoder: ~/.qoder/skills mirrors Qoder CLI's project-level .qoder/skills layout
@@ -156,6 +162,8 @@ func localSkillRootsForProvider(provider string) ([]localSkillRoot, bool, error)
 			providerRoot = filepath.Join(home, ".copilot", "skills")
 		case "opencode":
 			providerRoot = filepath.Join(home, ".config", "opencode", "skills")
+		case "codearts":
+			providerRoot = filepath.Join(home, ".codeartsdoer", "skills")
 		case "deveco":
 			providerRoot = filepath.Join(home, ".config", "deveco", "skills")
 		case "openclaw":
@@ -165,7 +173,7 @@ func localSkillRootsForProvider(provider string) ([]localSkillRoot, bool, error)
 		case "cursor":
 			providerRoot = filepath.Join(home, ".cursor", "skills")
 		case "hermes":
-			providerRoot = filepath.Join(home, ".hermes", "skills")
+			providerRoot = hermesLocalSkillsRoot()
 		case "kimi":
 			providerRoot = filepath.Join(home, ".kimi", "skills")
 		case "reasonix":
@@ -241,10 +249,13 @@ func localSkillRootsForProvider(provider string) ([]localSkillRoot, bool, error)
 		}
 	}
 
-	roots := []localSkillRoot{
-		{path: providerRoot, kind: localSkillRootProvider},
-		{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal},
+	roots := make([]localSkillRoot, 0, 2)
+	// An empty providerRoot means the runtime has no home it would run under;
+	// skip it rather than resolve skill keys against the daemon's cwd.
+	if providerRoot != "" {
+		roots = append(roots, localSkillRoot{path: providerRoot, kind: localSkillRootProvider})
 	}
+	roots = append(roots, localSkillRoot{path: filepath.Join(home, ".agents", "skills"), kind: localSkillRootUniversal})
 	if provider == "claude" {
 		for _, plugin := range listEnabledClaudePlugins(home) {
 			manifest, _ := readClaudePluginManifest(plugin.InstallPath)
@@ -263,6 +274,22 @@ func localSkillRootsForProvider(provider string) ([]localSkillRoot, bool, error)
 		}
 	}
 	return roots, true, nil
+}
+
+// hermesLocalSkillsRoot returns the skills dir of the Hermes home a task runs
+// against when its agent sets no HERMES_HOME or profile of its own. It goes
+// through execenv.ResolveHermesProfile — the resolver the task path uses — so
+// discovery follows the daemon's HERMES_HOME, the platform default
+// (%LOCALAPPDATA%\hermes on native Windows, ~/.hermes elsewhere) and the sticky
+// active_profile instead of a hardcoded ~/.hermes, which hid every skill Hermes
+// actually loads on Windows (GH #8310). A selection Hermes would refuse to start
+// under returns "": there is no home whose skills it would load.
+func hermesLocalSkillsRoot() string {
+	res := execenv.ResolveHermesProfile("", "", false, false)
+	if res.Err != nil {
+		return ""
+	}
+	return filepath.Join(res.SourceHome, "skills")
 }
 
 func isIgnoredLocalSkillEntry(name string) bool {
@@ -372,6 +399,57 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 		if err != nil || info.Size() > maxLocalSkillFileSize {
 			return nil
 		}
+		// A binary supporting file cannot survive SkillFileData.Content: the
+		// bytes go out as a Go string and encoding/json rewrites every invalid
+		// UTF-8 byte to U+FFFD, so writeSkillFiles later recreates a file that
+		// differs from the original and will not open.
+		//
+		// IsLikelyBinaryFilePath is the cheap first pass on the extension — the
+		// same heuristic the archive/URL importer uses — checked before any
+		// read so a known-binary file never pays the I/O. On its own it misses
+		// a binary file with an unlisted or missing extension (a .safetensors,
+		// a .parquet, a stray no-extension blob) and a text file in a
+		// non-UTF-8 encoding, both of which corrupt exactly the same way.
+		if skill.IsLikelyBinaryFilePath(rel) {
+			slog.Info("local skill: skipping binary file",
+				"skill_dir", skillDir,
+				"path", filepath.ToSlash(rel),
+				"size", info.Size(),
+				"reason", "binary_extension",
+			)
+			return nil
+		}
+		// The read below is the actual guarantee: skip whenever the bytes
+		// themselves are not safely round-trippable, regardless of what the
+		// extension suggested. This runs on both the includeContent=false
+		// (discovery) and includeContent=true (sync) passes so they agree on
+		// which files make up the bundle — skipping the read on the false pass
+		// would let a discovery listing promise a file that sync then silently
+		// drops.
+		//
+		// Valid UTF-8 alone is not enough: a NUL byte is legal UTF-8 but the
+		// server-side import path strips every 0x00 via sanitizeNullBytes
+		// (server/internal/handler/skill_create.go), so a file that is valid
+		// UTF-8 but contains NUL — UTF-16LE text made of ASCII characters is a
+		// realistic example — still comes back different from what went in.
+		// Require both: valid UTF-8 AND NUL-free.
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
+			reason := "invalid_utf8"
+			if utf8.Valid(content) {
+				reason = "embedded_nul"
+			}
+			slog.Info("local skill: skipping binary file",
+				"skill_dir", skillDir,
+				"path", filepath.ToSlash(rel),
+				"size", info.Size(),
+				"reason", reason,
+			)
+			return nil
+		}
 		if len(files) >= maxLocalSkillFileCount {
 			return fmt.Errorf("local skill exceeds %d files", maxLocalSkillFileCount)
 		}
@@ -382,10 +460,6 @@ func collectLocalSkillFiles(skillDir string, includeContent bool) ([]SkillFileDa
 
 		file := SkillFileData{Path: filepath.ToSlash(rel)}
 		if includeContent {
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return nil
-			}
 			file.Content = string(content)
 		}
 		files = append(files, file)

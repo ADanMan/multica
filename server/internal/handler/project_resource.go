@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	agentpkg "github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -103,6 +105,9 @@ func validateGithubRepoRef(ref json.RawMessage) (json.RawMessage, error) {
 	}
 	payload.DefaultBranchHint = strings.TrimSpace(payload.DefaultBranchHint)
 	payload.Ref = strings.TrimSpace(payload.Ref)
+	if err := validateGitRef(payload.Ref); err != nil {
+		return nil, fmt.Errorf("github_repo: %w", err)
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -400,6 +405,60 @@ func isAbsoluteLocalPath(s string) bool {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// gitRefMaxLength caps the stored checkout ref. Git's own limit is the
+// filesystem's, but a loose ref has to fit in a file name, so 255 is the
+// conservative ceiling every platform honors — far past any real branch name.
+// The cap exists to stop a pasted document from reaching the database, not to
+// police naming.
+const gitRefMaxLength = 255
+
+// validateGitRef rejects input git itself could never resolve, and nothing
+// more. It mirrors the subset of `git check-ref-format` that applies to a ref a
+// user types, so every branch, tag and commit SHA we advertise stays
+// acceptable — the check is about SHAPE only.
+//
+// Whether the ref exists on the remote is a different question, answered at
+// checkout time by the daemon. It must not gate saving project config: the
+// daemon may be offline, the repository may be private, and the server cannot
+// inspect the repository at all. An empty ref is valid and means "use the
+// repository's default branch".
+//
+// Keep in sync with validateGitRef in packages/core/github/repo-ref.ts, which
+// gives the same verdict in the UI before the request is sent.
+func validateGitRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if len(ref) > gitRefMaxLength {
+		return fmt.Errorf("ref must be at most %d characters", gitRefMaxLength)
+	}
+	// ASCII control characters, DEL, space, and the characters git reserves
+	// for its own revision syntax.
+	for _, r := range ref {
+		if r <= ' ' || r == '\x7f' || strings.ContainsRune("~^:?*[\\", r) {
+			return errors.New("ref must not contain spaces, control characters, or any of ~ ^ : ? * [ \\")
+		}
+	}
+	// Path-shape rules. "@{" is reflog syntax, a lone "@" is shorthand for
+	// HEAD, ".." would read as a range, and ".lock" is what git names its own
+	// lock files.
+	if strings.Contains(ref, "..") ||
+		strings.Contains(ref, "@{") ||
+		ref == "@" ||
+		strings.HasPrefix(ref, "/") ||
+		strings.HasSuffix(ref, "/") ||
+		strings.Contains(ref, "//") ||
+		strings.HasSuffix(ref, ".") {
+		return errors.New("ref is not a valid branch, tag, or commit")
+	}
+	for _, segment := range strings.Split(ref, "/") {
+		if strings.HasPrefix(segment, ".") || strings.HasSuffix(segment, ".lock") {
+			return errors.New("ref is not a valid branch, tag, or commit")
+		}
+	}
+	return nil
 }
 
 // isValidGitRepoURL accepts the three forms a user can paste from GitHub's
@@ -864,15 +923,139 @@ func parseUUIDLoose(s string) (pgtype.UUID, error) {
 	return u, nil
 }
 
-// listProjectResourcesForProject is a small helper used by the daemon claim
-// handler to attach project resources to outgoing tasks.
-func (h *Handler) listProjectResourcesForProject(ctx context.Context, projectID pgtype.UUID) []db.ProjectResource {
-	if !projectID.Valid {
-		return nil
+// claimProjectContext is the project-scoped context a daemon claim exposes to
+// the agent: the project identity the prompt names, the resource manifest
+// execenv materializes into .multica/project/resources.json, and the repo list
+// `multica repo checkout` reads.
+type claimProjectContext struct {
+	ProjectID   string
+	Title       string
+	Description string
+	Resources   []ProjectResourceData
+	Repos       []RepoData
+}
+
+// applyTo copies the resolved context onto a claim response. Callers assign the
+// whole context or none of it, so a claim can never carry a project's title
+// without its resources.
+func (c claimProjectContext) applyTo(resp *AgentTaskResponse) {
+	resp.ProjectID = c.ProjectID
+	resp.ProjectTitle = c.Title
+	resp.ProjectDescription = c.Description
+	if len(c.Resources) > 0 {
+		resp.ProjectResources = c.Resources
 	}
-	rows, err := h.Queries.ListProjectResources(ctx, projectID)
+	resp.Repos = c.Repos
+}
+
+// resolveClaimProjectContext loads the project context for one daemon claim.
+//
+// Every claim path (issue, chat, autopilot, quick-create) resolves the same
+// thing from a soft project reference, so the tenant and failure rules live
+// here once rather than in a copy per path:
+//
+//   - Both reads are workspace-scoped. project_resource carries its own
+//     workspace_id, so a corrupt project reference cannot lift another tenant's
+//     repository URLs or local paths into a claim.
+//   - A read FAILURE is not "no project". It returns an error so the caller can
+//     preserve the task for redelivery; collapsing it into the workspace-repo
+//     fallback is what lets a transient DB error silently run an agent against
+//     the wrong repository (the same rule the chat-input load follows,
+//     MUL-4351).
+//   - A project that resolves to no row IS "no project": the reference is stale,
+//     deleted, or points outside this workspace, and the claim degrades to
+//     workspace context.
+//
+// Repo precedence: project-bound github_repo resources override workspace repos
+// when present. Mixing both would just confuse the agent — if a project
+// explicitly attached its repos, those are the authoritative set. With no
+// project, no github_repo resources, or a stale reference, the workspace repos
+// are the fallback.
+func (h *Handler) resolveClaimProjectContext(ctx context.Context, projectID, workspaceID pgtype.UUID) (claimProjectContext, error) {
+	var out claimProjectContext
+
+	if projectID.Valid {
+		project, err := h.Queries.GetProjectInWorkspace(ctx, db.GetProjectInWorkspaceParams{
+			ID:          projectID,
+			WorkspaceID: workspaceID,
+		})
+		switch {
+		case err == nil:
+			out.ProjectID = uuidToString(project.ID)
+			out.Title = project.Title
+			out.Description = project.Description.String
+
+			rows, resErr := h.Queries.ListProjectResourcesInWorkspace(ctx, db.ListProjectResourcesInWorkspaceParams{
+				ProjectID:   project.ID,
+				WorkspaceID: workspaceID,
+			})
+			if resErr != nil {
+				return claimProjectContext{}, fmt.Errorf("list project resources: %w", resErr)
+			}
+			out.Resources, out.Repos = projectResourcesForClaim(rows)
+		case errors.Is(err, pgx.ErrNoRows):
+			// Stale/deleted/foreign reference: degrade to workspace context.
+		default:
+			return claimProjectContext{}, fmt.Errorf("get project: %w", err)
+		}
+	}
+
+	if len(out.Repos) > 0 {
+		return out, nil
+	}
+
+	ws, err := h.Queries.GetWorkspace(ctx, workspaceID)
 	if err != nil {
-		return nil
+		return claimProjectContext{}, fmt.Errorf("get workspace: %w", err)
 	}
-	return rows
+	if ws.Repos != nil {
+		var repos []RepoData
+		if jsonErr := json.Unmarshal(ws.Repos, &repos); jsonErr != nil {
+			// Corrupt stored JSON is not transient: failing the claim would
+			// wedge every claim in this workspace until someone repairs the
+			// row. Degrade to no repos and leave a trail instead.
+			slog.Error("claim project context: workspace repos are not valid JSON; claiming without repos",
+				"workspace_id", uuidToString(workspaceID), "error", jsonErr)
+		} else if len(repos) > 0 {
+			out.Repos = repos
+		}
+	}
+	return out, nil
+}
+
+// projectResourcesForClaim maps resource rows onto the claim wire shape and
+// lifts github_repo resources into the repo list so `multica repo checkout` and
+// the meta-skill render them as the task's repos.
+func projectResourcesForClaim(rows []db.ProjectResource) ([]ProjectResourceData, []RepoData) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	resources := make([]ProjectResourceData, 0, len(rows))
+	var repos []RepoData
+	for _, row := range rows {
+		label := ""
+		if row.Label.Valid {
+			label = row.Label.String
+		}
+		ref := json.RawMessage(row.ResourceRef)
+		if len(ref) == 0 {
+			ref = json.RawMessage("{}")
+		}
+		resources = append(resources, ProjectResourceData{
+			ID:           uuidToString(row.ID),
+			ResourceType: row.ResourceType,
+			ResourceRef:  ref,
+			Label:        label,
+		})
+		if row.ResourceType == "github_repo" {
+			var payload struct {
+				URL string `json:"url"`
+				Ref string `json:"ref,omitempty"`
+			}
+			if json.Unmarshal(row.ResourceRef, &payload) == nil && payload.URL != "" {
+				repos = append(repos, RepoData{URL: payload.URL, Ref: strings.TrimSpace(payload.Ref)})
+			}
+		}
+	}
+	return resources, repos
 }

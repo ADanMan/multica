@@ -20,6 +20,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/multica-ai/multica/server/pkg/eventcontract"
+	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -44,13 +48,23 @@ const (
 )
 
 // Hook triggers. Declaring a trigger says who may invoke the hook, never what
-// the hook does. Only `event` is asynchronous, and it never blocks the host.
+// the hook does. `event` and `schedule` are asynchronous, and neither blocks a
+// user-facing host request.
 const (
-	TriggerUI     = "ui"
-	TriggerManual = "manual"
-	TriggerAgent  = "agent"
-	TriggerEvent  = "event"
+	TriggerUI       = "ui"
+	TriggerManual   = "manual"
+	TriggerAgent    = "agent"
+	TriggerEvent    = "event"
+	TriggerSchedule = "schedule"
 )
+
+// Scheduled hooks are a polling primitive, not a high-frequency timer. The
+// floor keeps one installation from turning its manifest into an unbounded
+// source of outbound traffic and leaves enough room for the HTTP timeout plus
+// durable retries before the next plan becomes due.
+const MinimumScheduleInterval = 5 * time.Minute
+
+var scheduleCronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 
 // Hook transports.
 const (
@@ -94,13 +108,13 @@ const (
 
 // Product events an `event`-triggered hook may subscribe to.
 const (
-	EventIssueCreated       = "issue.created"
-	EventIssueUpdated       = "issue.updated"
-	EventIssueStatusChanged = "issue.status_changed"
-	EventCommentCreated     = "comment.created"
-	EventTaskStarted        = "task.started"
-	EventTaskCompleted      = "task.completed"
-	EventTaskFailed         = "task.failed"
+	EventIssueCreated       = eventcontract.EventIssueCreated
+	EventIssueUpdated       = eventcontract.EventIssueUpdated
+	EventIssueStatusChanged = eventcontract.EventIssueStatusChanged
+	EventCommentCreated     = eventcontract.EventCommentCreated
+	EventTaskStarted        = eventcontract.EventTaskStarted
+	EventTaskCompleted      = eventcontract.EventTaskCompleted
+	EventTaskFailed         = eventcontract.EventTaskFailed
 )
 
 var fixedScopes = map[string]bool{
@@ -116,6 +130,27 @@ var fixedScopes = map[string]bool{
 	ScopeStorageWorkspace: true,
 }
 
+func hasScope(scopes []string, want string) bool {
+	for _, scope := range scopes {
+		if scope == want {
+			return true
+		}
+	}
+	return false
+}
+
+// eventReadScope maps each event onto the scope a plugin would have needed to
+// read the same content through the Action API.
+var eventReadScope = map[string]string{
+	EventIssueCreated:       ScopeIssuesRead,
+	EventIssueUpdated:       ScopeIssuesRead,
+	EventIssueStatusChanged: ScopeIssuesRead,
+	EventCommentCreated:     ScopeCommentsRead,
+	EventTaskStarted:        ScopeTasksRead,
+	EventTaskCompleted:      ScopeTasksRead,
+	EventTaskFailed:         ScopeTasksRead,
+}
+
 var knownEvents = map[string]bool{
 	EventIssueCreated:       true,
 	EventIssueUpdated:       true,
@@ -125,6 +160,11 @@ var knownEvents = map[string]bool{
 	EventTaskCompleted:      true,
 	EventTaskFailed:         true,
 }
+
+// IsKnownEvent reports whether an event may be subscribed to by a manifest.
+// Exported so the dispatcher cannot publish an event no plugin could ever
+// receive — the two lists have to agree, and only one of them is authoritative.
+func IsKnownEvent(event string) bool { return knownEvents[event] }
 
 var (
 	pluginKeySegmentPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
@@ -177,8 +217,17 @@ type Hook struct {
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 	Triggers    []string        `json:"triggers"`
 	Events      []string        `json:"events,omitempty"`
+	Schedule    *HookSchedule   `json:"schedule,omitempty"`
 	Transport   HookTransport   `json:"transport"`
 	TimeoutMs   int             `json:"timeout_ms,omitempty"`
+}
+
+// HookSchedule declares the one automatic cadence attached to a hook. Multiple
+// cadences are represented by multiple hook keys, which keeps the durable
+// execution identity unambiguous.
+type HookSchedule struct {
+	Cron     string `json:"cron"`
+	Timezone string `json:"timezone"`
 }
 
 type HookTransport struct {
@@ -204,6 +253,10 @@ type ConfigField struct {
 	Required    bool     `json:"required,omitempty"`
 	Options     []string `json:"options,omitempty"`
 	Placeholder string   `json:"placeholder,omitempty"`
+	// Multiline asks the host to render a textarea. Only meaningful for string
+	// fields; without it a value that is a list of lines is unreadable in the
+	// generated form, which is the one thing the host owns rendering for.
+	Multiline bool `json:"multiline,omitempty"`
 }
 
 // ConfigSchema keeps declaration order so the generated form is stable across
@@ -246,7 +299,8 @@ func (c ConfigSchema) MarshalJSON() ([]byte, error) {
 			Required    bool     `json:"required,omitempty"`
 			Options     []string `json:"options,omitempty"`
 			Placeholder string   `json:"placeholder,omitempty"`
-		}{field.Type, field.Label, field.Description, field.Required, field.Options, field.Placeholder})
+			Multiline   bool     `json:"multiline,omitempty"`
+		}{field.Type, field.Label, field.Description, field.Required, field.Options, field.Placeholder, field.Multiline})
 		if err != nil {
 			return nil, err
 		}
@@ -452,6 +506,9 @@ func (m Manifest) validateConfig() error {
 			if len(field.Options) > 0 {
 				return fmt.Errorf("%s.options is only valid for enum fields", label)
 			}
+			if field.Multiline && field.Type != ConfigString {
+				return fmt.Errorf("%s.multiline is only valid for string fields", label)
+			}
 		case ConfigEnum:
 			if len(field.Options) == 0 {
 				return fmt.Errorf("%s.options must not be empty for enum fields", label)
@@ -471,6 +528,9 @@ func (m Manifest) validateConfig() error {
 			}
 		default:
 			return fmt.Errorf("%s.type is unsupported: %q", label, field.Type)
+		}
+		if field.Multiline && field.Type != ConfigString {
+			return fmt.Errorf("%s.multiline is only valid for string fields", label)
 		}
 		if err := validateDisplayText(label+".label", field.Label, 160); err != nil {
 			return err
@@ -568,7 +628,7 @@ func (m Manifest) validateContributions() error {
 		triggerSeen := map[string]bool{}
 		for _, trigger := range hook.Triggers {
 			switch trigger {
-			case TriggerUI, TriggerManual, TriggerAgent, TriggerEvent:
+			case TriggerUI, TriggerManual, TriggerAgent, TriggerEvent, TriggerSchedule:
 			default:
 				return fmt.Errorf("%s.triggers contains unsupported trigger %q", field, trigger)
 			}
@@ -590,9 +650,31 @@ func (m Manifest) validateContributions() error {
 					return fmt.Errorf("%s.events contains duplicate event %q", field, event)
 				}
 				eventSeen[event] = true
+				// An event PUSHES the same content the Action API would have
+				// required a scope to pull: issue.* carries the description,
+				// comment.created carries the body. Without this, subscribing is
+				// a way to receive what reading was not granted — one dataset
+				// with two standards. Enforced at install, so the consent screen
+				// shows the read scope the subscription actually implies.
+				if required := eventReadScope[event]; required != "" && !hasScope(m.Scopes, required) {
+					return fmt.Errorf("%s.events subscribes to %q, which delivers content requiring the %s scope", field, event, required)
+				}
 			}
 		} else if len(hook.Events) > 0 {
 			return fmt.Errorf("%s.events requires the event trigger", field)
+		}
+		if triggerSeen[TriggerSchedule] {
+			if hook.Schedule == nil {
+				return fmt.Errorf("%s.schedule is required when the schedule trigger is declared", field)
+			}
+			if hook.Transport.Type != TransportHTTP {
+				return fmt.Errorf("%s.schedule only supports the http transport", field)
+			}
+			if err := validateHookSchedule(field+".schedule", *hook.Schedule); err != nil {
+				return err
+			}
+		} else if hook.Schedule != nil {
+			return fmt.Errorf("%s.schedule requires the schedule trigger", field)
 		}
 		if err := m.validateHookTransport(field, hook.Transport); err != nil {
 			return err
@@ -621,6 +703,50 @@ func (m Manifest) validateContributions() error {
 		if want := "skills/" + resource.Key + "/SKILL.md"; resource.Entry != want {
 			return fmt.Errorf("%s.entry must be %q", field, want)
 		}
+	}
+	return nil
+}
+
+func validateHookSchedule(field string, schedule HookSchedule) error {
+	expression := strings.TrimSpace(schedule.Cron)
+	if expression == "" {
+		return fmt.Errorf("%s.cron must not be empty", field)
+	}
+	// Timezone belongs in its own field. Besides keeping the public shape
+	// singular, rejecting an inline prefix avoids robfig/cron's malformed-prefix
+	// panic path and prevents two timezone declarations from disagreeing.
+	if strings.HasPrefix(expression, "TZ=") || strings.HasPrefix(expression, "CRON_TZ=") {
+		return fmt.Errorf("%s.cron must not contain an inline timezone", field)
+	}
+	parsed, err := scheduleCronParser.Parse(expression)
+	if err != nil {
+		return fmt.Errorf("%s.cron must be a standard five-field cron expression: %w", field, err)
+	}
+	if strings.TrimSpace(schedule.Timezone) == "" {
+		return fmt.Errorf("%s.timezone must not be empty", field)
+	}
+	location, err := time.LoadLocation(schedule.Timezone)
+	if err != nil {
+		return fmt.Errorf("%s.timezone is invalid: %w", field, err)
+	}
+
+	// A 400-day window covers every month plus a DST cycle. High-frequency
+	// expressions fail after their first two occurrences; compliant five-minute
+	// expressions stay below 116k iterations, bounded work at publish/preview
+	// time rather than on every scheduler tick. A monthly/yearly expression with
+	// zero or one occurrence in the window is valid by definition.
+	start := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC).In(location)
+	end := start.AddDate(0, 0, 400)
+	previous := parsed.Next(start)
+	for !previous.IsZero() && !previous.After(end) {
+		next := parsed.Next(previous)
+		if next.IsZero() || next.After(end) {
+			break
+		}
+		if next.Sub(previous) < MinimumScheduleInterval {
+			return fmt.Errorf("%s.cron must not run more often than every five minutes", field)
+		}
+		previous = next
 	}
 	return nil
 }

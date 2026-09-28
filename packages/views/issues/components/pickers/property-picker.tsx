@@ -33,7 +33,7 @@ const isEmptyItem = (el: HTMLButtonElement | undefined) =>
  * first interaction is pixel-identical.
  */
 export const PICKER_TRIGGER_CLASS =
-  "flex items-center gap-1.5 cursor-pointer rounded px-1 -mx-1 hover:bg-accent/30 transition-colors overflow-hidden";
+  "flex items-center gap-1.5 cursor-pointer rounded-xs px-1 -mx-1 hover:bg-accent/30 transition-colors overflow-hidden";
 
 // ---------------------------------------------------------------------------
 // PropertyPicker — generic Popover shell with optional search
@@ -228,19 +228,6 @@ export function PropertyPicker({
 // ---------------------------------------------------------------------------
 // PickerItem — single selectable row
 // ---------------------------------------------------------------------------
-
-/**
- * Non-interactive section heading inside a picker list. Rendered as a plain
- * element, not a button, so `ITEM_SELECTOR` skips it and arrow-key navigation
- * moves between real options only.
- */
-export function PickerGroupLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="px-2 pb-1 pt-2 text-caption font-medium text-muted-foreground first:pt-1">
-      {children}
-    </div>
-  );
-}
 
 export function PickerItem({
   selected,

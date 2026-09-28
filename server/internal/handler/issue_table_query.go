@@ -81,19 +81,24 @@ type issueTableDateFilterRequest struct {
 }
 
 type issueTableFiltersRequest struct {
-	Statuses          []string                     `json:"statuses,omitempty"`
-	Priorities        []string                     `json:"priorities,omitempty"`
-	Assignees         []issueTableActorRef         `json:"assignees,omitempty"`
-	IncludeNoAssignee bool                         `json:"include_no_assignee,omitempty"`
-	Creators          []issueTableActorRef         `json:"creators,omitempty"`
-	ProjectIDs        []string                     `json:"project_ids,omitempty"`
-	IncludeNoProject  bool                         `json:"include_no_project,omitempty"`
-	LabelIDs          []string                     `json:"label_ids,omitempty"`
-	Properties        map[string][]string          `json:"properties,omitempty"`
-	Date              *issueTableDateFilterRequest `json:"date,omitempty"`
-	WorkingOnly       bool                         `json:"working_only,omitempty"`
-	WorkingIssueIDs   []string                     `json:"working_issue_ids,omitempty"`
-	IncludeSubIssues  *bool                        `json:"include_sub_issues,omitempty"`
+	Statuses          []string             `json:"statuses,omitempty"`
+	Priorities        []string             `json:"priorities,omitempty"`
+	Assignees         []issueTableActorRef `json:"assignees,omitempty"`
+	IncludeNoAssignee bool                 `json:"include_no_assignee,omitempty"`
+	Creators          []issueTableActorRef `json:"creators,omitempty"`
+	ProjectIDs        []string             `json:"project_ids,omitempty"`
+	IncludeNoProject  bool                 `json:"include_no_project,omitempty"`
+	// ProjectStatuses filters on the parent project's lifecycle status
+	// (`validProjectStatuses`), independently of ProjectIDs.
+	ProjectStatuses []string `json:"project_statuses,omitempty"`
+	LabelIDs        []string `json:"label_ids,omitempty"`
+	// Members are raw JSON so operator objects ({op, value}) and plain
+	// strings both survive the round-trip into parsePropertiesFilterParam.
+	Properties       map[string][]json.RawMessage `json:"properties,omitempty"`
+	Date             *issueTableDateFilterRequest `json:"date,omitempty"`
+	WorkingOnly      bool                         `json:"working_only,omitempty"`
+	WorkingIssueIDs  []string                     `json:"working_issue_ids,omitempty"`
+	IncludeSubIssues *bool                        `json:"include_sub_issues,omitempty"`
 }
 
 type issueTableSortRequest struct {
@@ -109,6 +114,8 @@ type issueTableQuerySpec struct {
 }
 
 type issueTableGroupSpec struct {
+	// Empty preserves the seven-value protocol used by installed clients.
+	CategoryFormat  string   `json:"category_format,omitempty"`
 	Kind            string   `json:"kind"`
 	PropertyID      string   `json:"property_id,omitempty"`
 	IncludeEmpty    bool     `json:"include_empty,omitempty"`
@@ -254,12 +261,13 @@ func canonicalIssueTableFingerprint(workspaceID string, spec issueTableQuerySpec
 	normalized.Filters.Statuses = sortedUniqueStrings(normalized.Filters.Statuses)
 	normalized.Filters.Priorities = sortedUniqueStrings(normalized.Filters.Priorities)
 	normalized.Filters.ProjectIDs = sortedUniqueStrings(normalized.Filters.ProjectIDs)
+	normalized.Filters.ProjectStatuses = sortedUniqueStrings(normalized.Filters.ProjectStatuses)
 	normalized.Filters.LabelIDs = sortedUniqueStrings(normalized.Filters.LabelIDs)
 	normalized.Filters.Assignees = sortedUniqueActors(normalized.Filters.Assignees)
 	normalized.Filters.WorkingIssueIDs = sortedUniqueStrings(normalized.Filters.WorkingIssueIDs)
 	normalized.Filters.Creators = sortedUniqueActors(normalized.Filters.Creators)
 	for key, values := range normalized.Filters.Properties {
-		normalized.Filters.Properties[key] = sortedUniqueStrings(values)
+		normalized.Filters.Properties[key] = sortedUniqueRawJSON(values)
 	}
 	encoded, err := json.Marshal(struct {
 		WorkspaceID                string              `json:"workspace_id"`
@@ -299,6 +307,32 @@ func sortedUniqueStrings(values []string) []string {
 	sort.Strings(result)
 	if len(result) == 0 {
 		return nil
+	}
+	return result
+}
+
+// sortedUniqueRawJSON canonicalizes property filter members for the query
+// fingerprint: byte-exact dedup + ordering. Members are raw JSON (strings and
+// operator objects), and marshaling the map back into the fingerprint input
+// must reproduce the same bytes for the same query regardless of member order.
+func sortedUniqueRawJSON(values []json.RawMessage) []json.RawMessage {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		key := string(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, key)
+	}
+	sort.Strings(unique)
+	result := make([]json.RawMessage, len(unique))
+	for i, value := range unique {
+		result[i] = json.RawMessage(value)
 	}
 	return result
 }
@@ -569,6 +603,24 @@ func (h *Handler) compileIssueTableQuery(w http.ResponseWriter, r *http.Request,
 			ors = append(ors, "i.project_id IS NULL")
 		}
 		where = append(where, "("+strings.Join(ors, " OR ")+")")
+	}
+
+	if len(spec.Filters.ProjectStatuses) > 0 {
+		for _, status := range spec.Filters.ProjectStatuses {
+			if !validateProjectEnum(w, "filters.project_statuses", status, validProjectStatuses) {
+				return issueTableSQL{}, false
+			}
+		}
+		// A projectless issue has no row to match, so EXISTS is false and the
+		// issue drops out — "no project" is deliberately not a project status.
+		// `p.workspace_id = i.workspace_id` is not redundant: the schema has no
+		// foreign keys by design, so a stale or corrupt `issue.project_id` can
+		// name a project in another workspace. Without the bound, that
+		// tenant's project status would decide this row's membership.
+		where = append(where, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM project p WHERE p.id = i.project_id AND p.workspace_id = i.workspace_id AND p.status = ANY(%s::text[]))",
+			addArg(spec.Filters.ProjectStatuses),
+		))
 	}
 
 	labelIDs, ok := parseIssueTableUUIDList(w, spec.Filters.LabelIDs, "filters.label_ids")

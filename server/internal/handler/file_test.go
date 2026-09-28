@@ -36,8 +36,10 @@ func createHandlerTestChatSession(t *testing.T, agentID string) string {
 
 	var sessionID string
 	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, status)
-		VALUES ($1, $2, $3, $4, 'active')
+		INSERT INTO chat_session (
+			workspace_id, agent_id, creator_id, title, status, explicitly_created_at
+		)
+		VALUES ($1, $2, $3, $4, 'active', now())
 		RETURNING id
 	`, testWorkspaceID, agentID, testUserID, "Handler Test Chat Session").Scan(&sessionID); err != nil {
 		t.Fatalf("failed to create handler test chat session: %v", err)
@@ -57,6 +59,8 @@ type mockStorage struct {
 	files               map[string][]byte
 	presignCalls        []string
 	presignDispositions []string
+	getReaderCalls      int
+	uploadStreamCalls   int
 }
 
 func (m *mockStorage) Upload(_ context.Context, key string, data []byte, _ string, _ string) (string, error) {
@@ -67,6 +71,17 @@ func (m *mockStorage) Upload(_ context.Context, key string, data []byte, _ strin
 	}
 	m.files[key] = append([]byte(nil), data...)
 	return fmt.Sprintf("https://cdn.example.com/%s", key), nil
+}
+
+func (m *mockStorage) UploadStream(ctx context.Context, key string, reader io.Reader, _ int64, contentType string, filename string) (string, error) {
+	m.mu.Lock()
+	m.uploadStreamCalls++
+	m.mu.Unlock()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return "", err
+	}
+	return m.Upload(ctx, key, data, contentType, filename)
 }
 
 func (m *mockStorage) Delete(_ context.Context, key string) {
@@ -107,10 +122,16 @@ func (m *mockStorageNoCdn) CdnDomain() string { return "" }
 func (m *mockStorage) GetReader(_ context.Context, key string) (io.ReadCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.getReaderCalls++
 	if data, ok := m.files[key]; ok {
 		return io.NopCloser(bytes.NewReader(data)), nil
 	}
 	return nil, fmt.Errorf("mockStorage GetReader: key not found: %q", key)
+}
+func (m *mockStorage) streamCopyCalls() (getReader, uploadStream int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getReaderCalls, m.uploadStreamCalls
 }
 func (m *mockStorage) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	m.mu.Lock()
@@ -604,12 +625,29 @@ func newDownloadRouter() http.Handler {
 	return r
 }
 
+var (
+	sharedTestRSAKeyOnce sync.Once
+	sharedTestRSAKeyVal  *rsa.PrivateKey
+	sharedTestRSAKeyErr  error
+)
+
+// sharedTestRSAKey returns one RSA-2048 key for the whole test binary. Minting
+// a key costs tens to hundreds of milliseconds under -race, and no test needs
+// a unique one: each signs and verifies with the key it was handed.
+func sharedTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	sharedTestRSAKeyOnce.Do(func() {
+		sharedTestRSAKeyVal, sharedTestRSAKeyErr = rsa.GenerateKey(rand.Reader, 2048)
+	})
+	if sharedTestRSAKeyErr != nil {
+		t.Fatalf("generate RSA test key: %v", sharedTestRSAKeyErr)
+	}
+	return sharedTestRSAKeyVal
+}
+
 func testCloudFrontSigner(t *testing.T) *auth.CloudFrontSigner {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate CloudFront test key: %v", err)
-	}
+	key := sharedTestRSAKey(t)
 	pemBytes := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
@@ -1599,7 +1637,8 @@ func TestGetAttachmentContent_NotFound(t *testing.T) {
 
 // isTextPreviewable is the whitelist linkpin between the proxy and the
 // client-side dispatcher. Regress against the most common content types so
-// drifting one of the lists alone fails loud.
+// drifting one of the lists alone fails loud. The same table runs against the
+// client in packages/views/editor/utils/preview.test.ts — change both.
 func TestIsTextPreviewable(t *testing.T) {
 	t.Helper()
 	cases := []struct {
@@ -1613,6 +1652,12 @@ func TestIsTextPreviewable(t *testing.T) {
 		{"plain text", "text/plain", "log.txt", true},
 		{"json by mime", "application/json", "data.json", true},
 		{"yaml by ext", "application/octet-stream", "config.yml", true},
+		{"csv by ext", "application/octet-stream", "report.csv", true},
+		{"tsv by ext", "application/octet-stream", "export.tsv", true},
+		{"json lines by ext", "application/octet-stream", "events.jsonl", true},
+		{"ndjson by ext", "application/octet-stream", "events.ndjson", true},
+		{"ndjson by mime", "application/x-ndjson", "events", true},
+		{"log by ext", "application/octet-stream", "server.log", true},
 		{"go source", "text/plain", "main.go", true},
 		{"typescript", "application/octet-stream", "index.ts", true},
 		{"html", "text/html", "page.html", true},

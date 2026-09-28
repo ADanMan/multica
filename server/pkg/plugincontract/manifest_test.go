@@ -77,6 +77,61 @@ func TestParseManifestAcceptsReferenceDocument(t *testing.T) {
 	}
 }
 
+func TestParseManifestAcceptsScheduledHook(t *testing.T) {
+	raw := mutate(t, func(doc map[string]any) {
+		contributes := doc["contributes"].(map[string]any)
+		hook := contributes["hooks"].([]any)[0].(map[string]any)
+		hook["triggers"] = []any{"schedule", "manual"}
+		hook["schedule"] = map[string]any{"cron": "*/5 * * * *", "timezone": "Asia/Shanghai"}
+	})
+	manifest, _, err := ParseManifest(raw)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	hook := manifest.Contributes.Hooks[0]
+	if hook.Schedule == nil || hook.Schedule.Cron != "*/5 * * * *" || hook.Schedule.Timezone != "Asia/Shanghai" {
+		t.Fatalf("schedule = %+v", hook.Schedule)
+	}
+}
+
+func TestParseManifestValidatesScheduledHookContract(t *testing.T) {
+	tests := []struct {
+		name      string
+		triggers  []any
+		schedule  any
+		transport any
+		want      string
+	}{
+		{name: "missing schedule", triggers: []any{"schedule"}, want: "schedule is required"},
+		{name: "schedule without trigger", triggers: []any{"manual"}, schedule: map[string]any{"cron": "*/5 * * * *", "timezone": "UTC"}, want: "requires the schedule trigger"},
+		{name: "seconds field", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "0 */5 * * * *", "timezone": "UTC"}, want: "five-field"},
+		{name: "inline timezone", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "CRON_TZ=UTC */5 * * * *", "timezone": "UTC"}, want: "inline timezone"},
+		{name: "missing timezone", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "*/5 * * * *", "timezone": ""}, want: "timezone must not be empty"},
+		{name: "invalid timezone", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "*/5 * * * *", "timezone": "Mars/Olympus"}, want: "timezone is invalid"},
+		{name: "too frequent", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "*/4 * * * *", "timezone": "UTC"}, want: "every five minutes"},
+		{name: "mcp transport", triggers: []any{"schedule"}, schedule: map[string]any{"cron": "*/5 * * * *", "timezone": "UTC"}, transport: map[string]any{"type": "mcp", "url": "https://example.com/mcp"}, want: "only supports the http transport"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := mutate(t, func(doc map[string]any) {
+				contributes := doc["contributes"].(map[string]any)
+				hook := contributes["hooks"].([]any)[0].(map[string]any)
+				hook["triggers"] = tc.triggers
+				if tc.schedule != nil {
+					hook["schedule"] = tc.schedule
+				}
+				if tc.transport != nil {
+					hook["transport"] = tc.transport
+				}
+			})
+			_, _, err := ParseManifest(raw)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestConfigSchemaPreservesDeclarationOrder(t *testing.T) {
 	manifest, canonical, err := ParseManifest([]byte(validManifest))
 	if err != nil {
@@ -370,37 +425,96 @@ func TestNetDomainsOnlyReturnsNetScopes(t *testing.T) {
 	}
 }
 
+// The gate's job, stated without naming today's configuration.
+//
+// An earlier version listed the specific contributions HostCapabilities had not
+// shipped yet, so every staged flip turned this red with a message about the
+// flip rather than about the gate. What has to stay true is the mechanism:
+// everything the host cannot run is reported, everything it can run is not, and
+// all of it arrives at once.
 func TestCheckCapabilitiesReportsEveryUnavailableContribution(t *testing.T) {
 	manifest, _, err := ParseManifest([]byte(validManifest))
 	if err != nil {
 		t.Fatalf("ParseManifest: %v", err)
 	}
 
-	// The shipped host set is what gates a staged rollout: a manifest naming a
-	// capability this build cannot run must fail loudly, never install
-	// half-working.
-	err = manifest.CheckCapabilities(HostCapabilities())
+	// Against a host that supports nothing, every declared contribution in the
+	// fixture must be named — not the first one found.
+	err = manifest.CheckCapabilities(Capabilities{})
 	if err == nil {
-		t.Fatal("CheckCapabilities accepted contributions the host cannot run")
+		t.Fatal("a host with no capabilities accepted contributions it cannot run")
 	}
 	var unavailable *ErrCapabilityUnavailable
 	if !asCapabilityError(err, &unavailable) {
 		t.Fatalf("error type = %T, want *ErrCapabilityUnavailable", err)
 	}
-	for _, want := range []string{"surface issue_panel", "hook trigger ui", "hook transport http", "resource skill"} {
-		if !containsString(unavailable.Missing, want) {
-			t.Fatalf("missing = %v, want it to include %q", unavailable.Missing, want)
+	wantAll := []string{}
+	for _, surface := range manifest.Contributes.Surfaces {
+		wantAll = append(wantAll, "surface "+surface.Type)
+	}
+	for _, hook := range manifest.Contributes.Hooks {
+		for _, trigger := range hook.Triggers {
+			wantAll = append(wantAll, "hook trigger "+trigger)
 		}
+		wantAll = append(wantAll, "hook transport "+hook.Transport.Type)
+	}
+	for _, resource := range manifest.Contributes.Resources {
+		wantAll = append(wantAll, "resource "+resource.Type)
+	}
+	for _, want := range wantAll {
+		if !containsString(unavailable.Missing, want) {
+			t.Fatalf("missing = %v, want it to include %q — every gap must be reported at once, not one install at a time", unavailable.Missing, want)
+		}
+	}
+
+	// Against the real host set: whatever is shipped must NOT be reported, and
+	// whatever is not shipped must be. Derived from HostCapabilities rather than
+	// restated, so a flip changes one place and this keeps testing the gate.
+	host := HostCapabilities()
+	hostErr := manifest.CheckCapabilities(host)
+	reported := []string{}
+	if hostErr != nil {
+		var hostUnavailable *ErrCapabilityUnavailable
+		if !asCapabilityError(hostErr, &hostUnavailable) {
+			t.Fatalf("error type = %T, want *ErrCapabilityUnavailable", hostErr)
+		}
+		reported = hostUnavailable.Missing
+	}
+	for _, surface := range manifest.Contributes.Surfaces {
+		assertGateAgrees(t, reported, "surface "+surface.Type, host.SurfaceTypes[surface.Type])
+	}
+	for _, hook := range manifest.Contributes.Hooks {
+		for _, trigger := range hook.Triggers {
+			assertGateAgrees(t, reported, "hook trigger "+trigger, host.HookTriggers[trigger])
+		}
+		assertGateAgrees(t, reported, "hook transport "+hook.Transport.Type, host.HookTransport[hook.Transport.Type])
+	}
+	for _, resource := range manifest.Contributes.Resources {
+		assertGateAgrees(t, reported, "resource "+resource.Type, host.ResourceTypes[resource.Type])
 	}
 
 	full := Capabilities{
 		SurfaceTypes:  map[string]bool{SurfaceIssuePanel: true, SurfaceSidebarPanel: true, SurfaceModal: true},
-		HookTriggers:  map[string]bool{TriggerUI: true, TriggerManual: true, TriggerAgent: true, TriggerEvent: true},
+		HookTriggers:  map[string]bool{TriggerUI: true, TriggerManual: true, TriggerAgent: true, TriggerEvent: true, TriggerSchedule: true},
 		HookTransport: map[string]bool{TransportHTTP: true, TransportMCP: true},
 		ResourceTypes: map[string]bool{ResourceSkill: true},
 	}
 	if err := manifest.CheckCapabilities(full); err != nil {
 		t.Fatalf("CheckCapabilities with full host support: %v", err)
+	}
+}
+
+// assertGateAgrees pins the gate to the host set in both directions: a shipped
+// capability reported as missing would fail every install of a plugin the host
+// can actually run, and an unshipped one left unreported would install a
+// contribution that silently never fires.
+func assertGateAgrees(t *testing.T, reported []string, name string, shipped bool) {
+	t.Helper()
+	if shipped && containsString(reported, name) {
+		t.Fatalf("%q is shipped by this host but was reported unavailable", name)
+	}
+	if !shipped && !containsString(reported, name) {
+		t.Fatalf("%q is NOT shipped by this host but was not reported — it would install and never fire", name)
 	}
 }
 
@@ -419,4 +533,56 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// An event subscription delivers the same content the Action API would have
+// required a scope to read: issue.* carries the description, comment.created
+// carries the body. Without this check, subscribing was a way to receive what
+// reading was never granted.
+func TestEventSubscriptionRequiresTheMatchingReadScope(t *testing.T) {
+	manifest := func(scopes, events string) []byte {
+		return []byte(`{
+			"manifest_version": 1,
+			"key": "com.example.events",
+			"name": "Events",
+			"description": "d",
+			"version": "1.0.0",
+			"author": {"name": "example"},
+			"scopes": ` + scopes + `,
+			"contributes": {"hooks": [{
+				"key": "watch",
+				"name": "Watch",
+				"description": "Watch things happen.",
+				"triggers": ["event"],
+				"events": ` + events + `,
+				"transport": {"type": "http", "url": "https://example.com/hooks/watch"}
+			}]}
+		}`)
+	}
+
+	for name, tc := range map[string]struct {
+		scopes  string
+		events  string
+		wantErr bool
+	}{
+		"issue event without issues:read":     {`["net:example.com"]`, `["issue.created"]`, true},
+		"issue event with issues:read":        {`["issues:read", "net:example.com"]`, `["issue.created"]`, false},
+		"comment event without comments:read": {`["issues:read", "net:example.com"]`, `["comment.created"]`, true},
+		"comment event with comments:read":    {`["comments:read", "net:example.com"]`, `["comment.created"]`, false},
+		"task event without tasks:read":       {`["net:example.com"]`, `["task.failed"]`, true},
+		"task event with tasks:read":          {`["tasks:read", "net:example.com"]`, `["task.failed"]`, false},
+		"one of several events unscoped": {
+			`["issues:read", "net:example.com"]`, `["issue.created", "comment.created"]`, true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := ParseManifest(manifest(tc.scopes, tc.events))
+			if tc.wantErr && err == nil {
+				t.Fatal("subscribing to content the manifest may not read must be refused at install")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("a properly scoped subscription must parse: %v", err)
+			}
+		})
+	}
 }

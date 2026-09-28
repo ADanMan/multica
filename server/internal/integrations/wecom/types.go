@@ -17,16 +17,13 @@
 // active connection per installation across processes) already holds without
 // wecom-specific code.
 //
-// Maintenance: this package is COMMUNITY-MAINTAINED. @leroy-chen contributed it
-// and co-owns it with @seacen — they are the first stop for WeCom-specific bugs
-// and behavior questions, on a best-effort volunteer basis. The Multica team
-// keeps this package compiling and its tests green through shared-layer
-// refactors, but does not use WeCom and cannot verify behavior against the real
-// platform; that part depends on the code owners. If the integration breaks in a
-// way that cannot be fixed without real WeCom access and no fix lands for a few
-// releases, it may be deprecated rather than left quietly broken. Changing the
-// shared channel engine? Keep this adapter building — and loop in the code
-// owners for anything that changes WeCom-visible behavior.
+// Maintenance: this package is COMMUNITY-MAINTAINED. Its maintainers, the
+// support boundary and the retirement rule are published at
+// https://multica.ai/docs/community-maintained
+// (apps/docs/content/docs/community-maintained.mdx, four locales). That page
+// is the single source of truth — record ownership changes there, not here.
+// Changing the shared channel engine? Keep this adapter building, and loop in
+// its maintainers for anything that changes WeCom-visible behavior.
 //
 // Inbound handles text, the transcript WeCom returns for a voice note,
 // photos, files, videos and 图文混排 (media_ingest.go downloads and decrypts
@@ -41,10 +38,23 @@
 // (outbound_media.go) and never to the agent, which has already exited.
 // Routing that outcome back into a later turn is its own piece of work.
 //
-// Known limit, deliberate: outbound delivery requires a SINGLE backend
-// replica, because the only send path is the in-process WebSocket in
-// sendersRegistry while EventChatDone dispatches on the in-process
-// events.Bus. See SELF_HOSTING.md.
+// Outbound no longer requires a single backend replica. The only send path is
+// still the in-process WebSocket in sendersRegistry, held by whichever replica
+// owns that bot's lease, so a reply produced on another replica is routed to
+// the lease holder over the Redis Stream relay (relay_outbound.go). Where
+// there is no relay to route it — legacy relay mode, or no Redis at all — the
+// reply is dropped, and a WeCom-enabled backend has to run as a single
+// replica. In every mode, a reply produced while NO replica holds a live
+// connection (all of them mid-reconnect) is still lost. See SELF_HOSTING.md.
+//
+// Every aibot_send_msg leaves under a per-chat quota gate (rate_limit.go).
+// A chat slightly over WeCom's quota has its push delayed into the next free
+// slot; one that bursts past what the caller's budget can wait for is refused
+// before the write, with nothing on the wire — best effort, not lossless. A
+// frame WeCom throttles anyway is retried once, when the caller can still
+// afford the wait. The gate holds no shared state: the same lease that makes
+// one replica the only sender makes that replica's own count the platform's
+// count.
 package wecom
 
 import (

@@ -14,7 +14,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // Model describes a single LLM model exposed by an agent provider.
@@ -28,11 +31,12 @@ import (
 // default, which is always closer to what the user's account /
 // environment actually supports than a static guess here.
 type Model struct {
-	ID           string             `json:"id"`
-	Label        string             `json:"label"`
-	Provider     string             `json:"provider,omitempty"`
-	Default      bool               `json:"default,omitempty"`
-	ServiceTiers []ModelServiceTier `json:"service_tiers,omitempty"`
+	ID                                  string             `json:"id"`
+	Label                               string             `json:"label"`
+	Provider                            string             `json:"provider,omitempty"`
+	Default                             bool               `json:"default,omitempty"`
+	ServiceTiers                        []ModelServiceTier `json:"service_tiers,omitempty"`
+	SupportsExplicitStandardServiceTier bool               `json:"supports_explicit_standard_service_tier,omitempty"`
 	// Thinking advertises the runtime's reasoning/effort catalog for this
 	// model. nil means the runtime/model has no thinking-level control
 	// (or the daemon couldn't discover one); the UI hides its picker. The
@@ -40,6 +44,29 @@ type Model struct {
 	// per-model and Claude's `--effort` superset has known per-model gaps
 	// (`xhigh` is Opus-only, `max` is session-only). See MUL-2339.
 	Thinking *ModelThinking `json:"thinking,omitempty"`
+}
+
+// UnavailableModel is a model the runtime named but will not run on this host —
+// today only Claude Code, reporting one that needs a newer CLI than the
+// installed one. Reason is the runtime's own remedy ("Update to 2.1.255+ to use
+// Fable 5.1"), forwarded verbatim so the copy stays right without Multica
+// tracking upstream version floors.
+//
+// It is a distinct type, and travels in a distinct list, precisely so it can
+// never be mistaken for something selectable. Marking such a row with a flag
+// inside the models list was the first attempt and it was wrong twice over:
+// every consumer that did not learn the flag (the inspector picker, the agent
+// builder) kept offering it, and — the part a flag cannot fix — an already
+// installed desktop client does not know the field at all, so it would render
+// the row as an ordinary model and persist a model id the CLI rejects. Keeping
+// the two lists separate makes old clients correct by construction, since they
+// only ever read `models` (MUL-6961).
+type UnavailableModel struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Reason is display copy, not a machine contract: it comes from the
+	// runtime and may be empty when it offered none.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ModelServiceTier is one runtime-native execution tier advertised for a
@@ -80,6 +107,11 @@ type ThinkingLevel struct {
 // plus whether they were actually discovered.
 type Catalog struct {
 	Models []Model
+	// Unavailable carries models the runtime named but will not run here. It is
+	// deliberately NOT part of Models: every capability lookup in this package
+	// walks Models, so keeping these out is what makes an unrunnable model fail
+	// closed everywhere without each lookup having to remember a flag.
+	Unavailable []UnavailableModel
 	// Fallback reports that discovery did not succeed and Models is a static
 	// stand-in rather than the runtime's real catalog.
 	//
@@ -93,11 +125,37 @@ type Catalog struct {
 	// enter the server's day-scale model-catalog cache, which would pin one
 	// transient failure as the answer for 24h (MUL-5549).
 	Fallback bool
+	// CLIThinkingLevels is the effort vocabulary the installed binary itself
+	// accepts, read from the binary (claude's `--help`) rather than from any
+	// model list. nil means it is unknown; a non-nil empty slice means the
+	// binary has no effort flag at all.
+	//
+	// It is the one capability an unverified catalog still enforces: it
+	// describes the executable, not a guess about models, so it holds whether
+	// or not discovery succeeded (MUL-7691).
+	CLIThinkingLevels []string
+}
+
+// Verified reports whether the catalog is the runtime's own answer, and so may
+// be used to reject, rewrite, or drop a saved model, thinking level, or
+// service tier.
+//
+// A fallback is a static stand-in for a discovery that failed, and an empty
+// catalog is what the providers without one return in the same situation.
+// Both mean "unknown", not "unsupported": the saved value goes to the CLI
+// as-is and the CLI is the judge (MUL-7691).
+func (c Catalog) Verified() bool {
+	return !c.Fallback && len(c.Models) > 0
 }
 
 // discovered adapts a plain `([]Model, error)` discovery function to Catalog
 // for providers that have no static fallback — for them a failure is already
 // reported as an empty list or an error, which downstream guards handle.
+//
+// An empty list deliberately stays unflagged. The server treats a completed
+// empty report as fresh truth and drops its cached catalog, while a fallback
+// report leaves the cache alone; flagging it here would change that. The
+// capability checks read emptiness themselves (Catalog.Verified).
 func discovered(models []Model, err error) (Catalog, error) {
 	return Catalog{Models: models}, err
 }
@@ -105,8 +163,9 @@ func discovered(models []Model, err error) (Catalog, error) {
 // modelCache memoizes dynamic discovery calls so repeated UI loads
 // don't re-shell the agent CLI. Entries expire after cacheTTL.
 type modelCacheEntry struct {
-	models    []Model
-	expiresAt time.Time
+	models      []Model
+	unavailable []UnavailableModel
+	expiresAt   time.Time
 }
 
 var (
@@ -118,15 +177,14 @@ const modelCacheTTL = 60 * time.Second
 
 // ListModels returns the models supported by the given agent provider.
 // For providers with a known static catalog it returns the baked-in
-// list; for providers with a CLI discovery mechanism (codex, opencode,
-// pi, openclaw) it shells out with caching and falls back where the
+// list; for providers with a CLI discovery mechanism (claude, codex,
+// opencode, pi, openclaw) it shells out with caching and falls back where the
 // provider has a safe static catalog.
 //
-// For claude, codex, opencode, pi, and kimi, the catalog is augmented with
-// per-model thinking-level options discovered from the local CLI. Codex
-// discovery failures fall back to a model + thinking snapshot; providers
-// without a safe fallback leave Thinking nil, which makes the UI hide the
-// thinking picker.
+// For claude, codex, opencode, pi, and kimi, the catalog carries per-model
+// thinking-level options taken from the local CLI. Claude and Codex discovery
+// failures fall back to a model + thinking snapshot; providers without a safe
+// fallback leave Thinking nil, which makes the UI hide the thinking picker.
 //
 // runtimeCmd lets the caller point at a non-default binary; pass the zero
 // Command to use the provider's default name on PATH. Its launch prefix — a
@@ -152,14 +210,12 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 	}
 	switch providerType {
 	case "claude":
-		models := claudeStaticModels()
-		annotateClaudeThinking(ctx, models, runtimeCmd)
-		// Claude's catalog is static by design, not by failure: there is no
-		// discovery step to fall back from, so this is authoritative.
-		return Catalog{Models: models}, nil
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discoverClaudeCatalog(ctx, runtimeCmd), nil
+		})
 	case "codex":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
-			return discovered(discoverCodexModels(ctx, runtimeCmd), nil)
+			return discoverCodexCatalog(ctx, runtimeCmd), nil
 		})
 	case "antigravity":
 		// agy 1.0.6 added a `--model` flag plus an `agy models` catalog
@@ -211,6 +267,10 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discovered(discoverOpenCodeModels(ctx, runtimeCmd))
 		})
+	case "codearts":
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discovered(discoverCodeArtsModels(ctx, runtimeCmd))
+		})
 	case "deveco":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discovered(discoverDevecoModels(ctx, runtimeCmd))
@@ -254,9 +314,108 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discoverGrokModels(ctx, runtimeCmd)
 		})
+	case "dim":
+		// Dim (dimcode) is ACP-native (`dim acp`); its model catalog is
+		// advertised by session/new under models.availableModels. Enumeration
+		// requires a logged-in dim (OAuth); on any failure fall back to an
+		// empty catalog so the UI keeps manual entry available.
+		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
+			return discoverDimModels(ctx, runtimeCmd)
+		})
+	case "zeroclaw":
+		// ZeroClaw's ACP server advertises no catalog: session/new answers
+		// exactly {sessionId, workspaceDir} (verified against 0.8.4), and it
+		// has no session-scoped model selection to consume one anyway — see
+		// ModelSelectionSupported. Return an empty list rather than spawning
+		// an ACP subprocess that can only ever come back empty.
+		return Catalog{Models: []Model{}}, nil
 	default:
 		return Catalog{}, fmt.Errorf("unknown agent type: %q", providerType)
 	}
+}
+
+// ModelSelectorMustBeProviderQualified reports whether a runtime's CLI
+// refuses a model id that does not carry its `<provider>/` prefix.
+//
+// This is an execution contract, not a statement about catalog shape. It
+// decides one thing: whether the daemon has to read the runtime catalog before
+// launching a task that pins a model. That read costs a CLI subprocess with a
+// 15-30s ceiling which cachedDiscovery deliberately does not memoize when it
+// comes back empty or as a fallback (#3729, MUL-5549), so a logged-out runtime
+// pays the ceiling on every read — worth spending only where the launch
+// genuinely fails without it (MUL-6471 review).
+//
+// opencode's `run --model` and the DevEco fork of it resolve strictly through
+// `provider/model` and reject anything else — verified against opencode
+// 1.18.14, which answers a bare id with `UnknownError` before any provider
+// call. pi is deliberately absent: its resolver accepts a canonical selector,
+// a bare id, AND an id containing a slash (see buildPiArgs), so a pi task
+// launches correctly without the daemon qualifying anything first.
+//
+// Built-in runtime identities resolve through their protocol family, so a fork
+// inherits the contract from its descriptor entry rather than a name here.
+func ModelSelectorMustBeProviderQualified(providerType string) bool {
+	if desc, ok := BuiltinRuntimeByID(providerType); ok {
+		providerType = desc.ProtocolFamily
+	}
+	switch providerType {
+	case "opencode", "deveco":
+		return true
+	default:
+		return false
+	}
+}
+
+// QualifyModelID resolves a persisted model string to the canonical ID the
+// runtime's own catalog advertises, and reports whether it rewrote anything.
+// catalog is the runtime's discovered catalog; callers already holding one
+// (the daemon reads it for the thinking-level and service-tier checks) pay
+// nothing extra.
+//
+// Runtimes that namespace their catalog (opencode's `provider/model`, pi's
+// `provider/id` selector) want the qualified form, but `agent.model` holds
+// whatever was persisted — and for gateway-style providers the bare model id
+// is itself slash-shaped (`claude/claude-opus-5` under provider
+// `multica-anthropic`). The slash is therefore not a provider boundary and
+// cannot be guessed at: the catalog is the only thing that knows which
+// provider owns an id. Callers get the qualified id when exactly one provider
+// claims the value, and the input untouched otherwise.
+//
+// Untouched is the deliberate answer for every uncertain case — the catalog is
+// a static fallback rather than the runtime's real list, the value already
+// matches a catalog ID, or two providers expose the same bare id. Manual model
+// entry is supported everywhere, so a value this function cannot confidently
+// place must still reach the CLI verbatim; the CLI's own resolver is a better
+// judge than a guess here would be.
+func QualifyModelID(catalog Catalog, model string) (string, bool) {
+	model = strings.TrimSpace(model)
+	// A fallback catalog is a static stand-in, not what the runtime actually
+	// supports (see Catalog.Verified) — qualifying against it would rewrite a
+	// working id into one the CLI never advertised.
+	if model == "" || !catalog.Verified() {
+		return model, false
+	}
+	for _, m := range catalog.Models {
+		if m.ID == model {
+			return model, false
+		}
+	}
+	qualified := ""
+	for _, m := range catalog.Models {
+		if m.Provider == "" || m.ID != m.Provider+"/"+model {
+			continue
+		}
+		if qualified != "" && qualified != m.ID {
+			// Two providers expose this same bare id. Picking one would be a
+			// coin flip that silently routes the task to the wrong gateway.
+			return model, false
+		}
+		qualified = m.ID
+	}
+	if qualified == "" {
+		return model, false
+	}
+	return qualified, true
 }
 
 // ModelSelectionSupported reports whether setting `agent.model` has
@@ -273,7 +432,7 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 // dropdown plus a silently-ignored manual-entry field.
 func ModelSelectionSupported(providerType string) bool {
 	switch providerType {
-	case "qwenpaw", "mcode":
+	case "qwenpaw", "mcode", "zeroclaw":
 		// QwenPaw's `session/set_model` persists to agent.json at the agent
 		// scope, not the session scope. Calling it would mutate the user's
 		// shared, persistent agent config. Model override is therefore
@@ -281,7 +440,11 @@ func ModelSelectionSupported(providerType string) bool {
 		// the agent profile. If QwenPaw makes model selection session-scoped
 		// upstream, this can be reverted to `true`. MCode similarly exposes no
 		// model option through ACP, so its runtime configuration remains the
-		// source of truth.
+		// source of truth. ZeroClaw goes further: `session/set_model` is not in
+		// its ACP dispatch table at all (0.8.4 answers -32601) and no handler
+		// reads a model param, so the model comes from the ZeroClaw agent
+		// profile (`agents.<alias>.model_provider`) and nothing Multica sends
+		// can change it.
 		return false
 	default:
 		return true
@@ -289,22 +452,29 @@ func ModelSelectionSupported(providerType string) bool {
 }
 
 // ModelKnownIncompatibleWithProvider reports whether a saved model is a known
-// mismatch for a target runtime provider. For first-party providers with
-// maintained static catalogs, compatibility is exact: the model must be one of
-// the IDs that runtime advertises. Unknown/custom model strings still return
-// false because the UI and CLI allow manual entries and the server should not
-// erase values it cannot confidently classify.
+// mismatch for a target runtime provider. Only Claude and Codex are judged, and
+// only by model-family prefix: they gain same-family model IDs through live
+// discovery without a Multica release, so no static list could be an
+// allow-list here. Unknown/custom model strings still return false because the
+// UI and CLI allow manual entries and the server should not erase values it
+// cannot confidently classify.
 func ModelKnownIncompatibleWithProvider(providerType, model string) bool {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return false
 	}
 
-	accepted, ok := acceptedModelIDsForProvider(providerType)
-	if !ok {
-		return false
-	}
-	if accepted[modelIDForCapabilityLookup(providerType, model)] {
+	lookupID := modelIDForCapabilityLookup(providerType, model)
+	switch providerType {
+	case "claude":
+		if strings.HasPrefix(lookupID, "claude-") && !strings.ContainsAny(lookupID, "[]") {
+			return false
+		}
+	case "codex":
+		if strings.HasPrefix(lookupID, "gpt-") || isOpenAIReasoningSeriesID(lookupID) {
+			return false
+		}
+	default:
 		return false
 	}
 	return isRuntimeSpecificModelID(model)
@@ -328,32 +498,11 @@ func modelIDForCapabilityLookup(providerType, model string) string {
 	return claudeContextWindowTagRe.ReplaceAllString(model, "")
 }
 
-func acceptedModelIDsForProvider(providerType string) (map[string]bool, bool) {
-	switch {
-	case providerType == "claude":
-		return modelIDSet(claudeStaticModels()), true
-	case providerType == "codex":
-		return modelIDSet(codexStaticModels()), true
-	default:
-		return nil, false
-	}
-}
-
-func modelIDSet(models []Model) map[string]bool {
-	out := make(map[string]bool, len(models))
-	for _, m := range models {
-		out[m.ID] = true
-	}
-	return out
-}
-
 func isRuntimeSpecificModelID(model string) bool {
 	if strings.Contains(model, "/") {
 		return true
 	}
-	return modelHasKnownPrefix(model) ||
-		modelIDSet(claudeStaticModels())[model] ||
-		modelIDSet(codexStaticModels())[model]
+	return modelHasKnownPrefix(model)
 }
 
 func modelHasKnownPrefix(model string) bool {
@@ -371,9 +520,9 @@ func modelHasKnownPrefix(model string) bool {
 func cachedDiscovery(key string, fn func() (Catalog, error)) (Catalog, error) {
 	modelCacheMu.Lock()
 	if entry, ok := modelCache[key]; ok && time.Now().Before(entry.expiresAt) {
-		out := entry.models
+		out, unavailable := entry.models, entry.unavailable
 		modelCacheMu.Unlock()
-		return Catalog{Models: out}, nil
+		return Catalog{Models: out, Unavailable: unavailable}, nil
 	}
 	modelCacheMu.Unlock()
 
@@ -398,7 +547,11 @@ func cachedDiscovery(key string, fn func() (Catalog, error)) (Catalog, error) {
 	}
 
 	modelCacheMu.Lock()
-	modelCache[key] = modelCacheEntry{models: catalog.Models, expiresAt: time.Now().Add(modelCacheTTL)}
+	modelCache[key] = modelCacheEntry{
+		models:      catalog.Models,
+		unavailable: catalog.Unavailable,
+		expiresAt:   time.Now().Add(modelCacheTTL),
+	}
 	modelCacheMu.Unlock()
 	return catalog, nil
 }
@@ -424,13 +577,18 @@ func discoveryCacheKey(providerType string, runtimeCmd Command) string {
 // ── Static catalogs ──
 
 // claudeStaticModels reflects the Claude Code CLI's accepted --model
-// values. Keep this list short and current; stale entries here
-// mislead users more than they help. Default = Sonnet because it's
-// the everyday workhorse (Opus is reserved for advisor-style flows).
+// values. It only fills the picker when live discovery fails and is never
+// validated against (Catalog.Verified), so listing a current model is cheap:
+// a CLI too old to know it reports that itself at launch. Add new models
+// here; drop entries only once the CLI stops accepting them. Default = Sonnet
+// because it's the everyday workhorse (Opus is reserved for advisor-style
+// flows).
 func claudeStaticModels() []Model {
 	return []Model{
+		{ID: "claude-opus-5-5", Label: "Claude Opus 5.5", Provider: "anthropic"},
 		{ID: "claude-sonnet-5", Label: "Claude Sonnet 5", Provider: "anthropic"},
 		{ID: "claude-sonnet-4-6", Label: "Claude Sonnet 4.6", Provider: "anthropic", Default: true},
+		{ID: "claude-fable-5-1", Label: "Claude Fable 5.1", Provider: "anthropic"},
 		{ID: "claude-fable-5", Label: "Claude Fable 5", Provider: "anthropic"},
 		{ID: "claude-opus-5", Label: "Claude Opus 5", Provider: "anthropic"},
 		{ID: "claude-opus-4-8", Label: "Claude Opus 4.8", Provider: "anthropic"},
@@ -442,23 +600,24 @@ func claudeStaticModels() []Model {
 }
 
 // codexStaticModels is the fallback for Codex versions older than 0.122.0
-// and for failed/malformed `codex debug models --bundled` calls. Keep it in
-// sync with the visible entries in the newest locally verified bundled
-// catalog, plus still-common models from older Codex releases. Each entry
-// carries its own reasoning catalog so old/offline CLIs retain the same model
-// + thinking picker contract as dynamic discovery. Service tiers are
+// and for failed/malformed live and bundled discovery calls. It lists the
+// visible entries of the newest locally verified live catalog — which can run
+// ahead of the bundled one (gpt-6-sol and gpt-6-luna were live-only on
+// codex-cli 0.155.1) — plus still-common models from older Codex releases.
+// Each entry carries its own reasoning catalog so old/offline CLIs retain the
+// same model + thinking picker contract as dynamic discovery. Service tiers are
 // intentionally NOT guessed here: they are runtime/version/account-sensitive,
-// so a discovery failure hides the speed picker and fails the override closed.
+// so a discovery failure hides the speed picker. None of this is validated
+// against — a saved model, effort, or tier reaches the CLI as-is while this
+// list stands in (Catalog.Verified, MUL-7691).
 func codexStaticModels() []Model {
 	// `Default` here is NOT a user-facing "default model" badge — the picker
 	// stopped rendering that (Multica follows the CLI config when the model is
-	// unset). It only marks the current flagship for the "default must track
-	// the latest release" catalog guard
-	// (TestCodexStaticModelsMatchVerifiedFallbackCatalog,
-	// multica#2009). It is deliberately NOT used to validate effort for an
-	// empty (follow-CLI-config) model: that config can resolve to any model,
-	// so ValidateThinkingLevel fails an empty codex model closed rather than
-	// borrowing this entry's catalog (which alone advertises `ultra`) — see
+	// unset). It only marks the current flagship (multica#2009). It is
+	// deliberately NOT used to validate effort for an empty (follow-CLI-config)
+	// model: that config can resolve to any model, so ValidateThinkingLevel
+	// fails an empty codex model closed rather than borrowing this entry's
+	// catalog (Astra/Sol/Terra advertise `ultra`; Luna does not) — see
 	// ValidateThinkingLevel and MUL-4347. Keep exactly one entry flagged.
 	standardThinking := func(defaultLevel string, includeMax, includeUltra bool) *ModelThinking {
 		levels := []ThinkingLevel{
@@ -487,7 +646,10 @@ func codexStaticModels() []Model {
 		}
 	}
 	return []Model{
-		{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Provider: "openai", Default: true, Thinking: standardThinking("low", true, true)},
+		{ID: "gpt-6-astra", Label: "GPT-6 Astra", Provider: "openai", Default: true, Thinking: standardThinking("low", true, true)},
+		{ID: "gpt-6-sol", Label: "GPT-6 Sol", Provider: "openai", Thinking: standardThinking("medium", true, true)},
+		{ID: "gpt-6-luna", Label: "GPT-6 Luna", Provider: "openai", Thinking: standardThinking("medium", true, false)},
+		{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Provider: "openai", Thinking: standardThinking("low", true, true)},
 		{ID: "gpt-5.6-terra", Label: "GPT-5.6 Terra", Provider: "openai", Thinking: standardThinking("medium", true, true)},
 		{ID: "gpt-5.6-luna", Label: "GPT-5.6 Luna", Provider: "openai", Thinking: standardThinking("medium", true, false)},
 		{ID: "gpt-5.5", Label: "GPT-5.5", Provider: "openai", Thinking: standardThinking("medium", false, false)},
@@ -624,7 +786,7 @@ func discoverOpenCodeModels(ctx context.Context, runtimeCmd Command) ([]Model, e
 	// Parse whatever the verbose command printed, even on a non-zero exit — a
 	// stale config entry can make `opencode models` exit non-zero while still
 	// listing the resolvable catalog (mirrors the pi path; see #3729/#3627).
-	out, _ := cmd.Output()
+	out, _ := outputOwned(cmd, runtimeCmd.logger)
 	models := parseOpenCodeModels(string(out))
 	if len(models) == 0 {
 		// Verbose yielded nothing usable (unsupported flag, error text, or an
@@ -632,7 +794,7 @@ func discoverOpenCodeModels(ctx context.Context, runtimeCmd Command) ([]Model, e
 		// but still prints the IDs.
 		cmd = runtimeCmd.exec(runCtx, "models")
 		hideAgentWindow(cmd)
-		out, _ = cmd.Output()
+		out, _ = outputOwned(cmd, runtimeCmd.logger)
 		models = parseOpenCodeModels(string(out))
 	}
 	if len(models) == 0 {
@@ -869,7 +1031,7 @@ func discoverPiModelsWithin(ctx context.Context, runtimeCmd Command, rpcTimeout,
 	}
 	lookedUp, err := exec.LookPath(runtimeCmd.Path)
 	if err != nil {
-		return []Model{}, nil
+		return nil, fmt.Errorf("pi model discovery: %w", err)
 	}
 	// Split the established 15-second discovery budget so an RPC surface that
 	// accepts the mode but never answers cannot starve the compatibility table
@@ -915,10 +1077,11 @@ func discoverPiModelsRPC(ctx context.Context, runtimeCmd Command, lookedUp strin
 		_ = stdin.Close()
 		return nil, false
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedProcessTree(cmd, runtimeCmd.logger); err != nil {
 		_ = stdin.Close()
 		return nil, false
 	}
+	defer releaseProcessGroup(cmd)
 
 	encoder := json.NewEncoder(stdin)
 	requests := []map[string]string{
@@ -1070,15 +1233,17 @@ func discoverPiModelsTable(ctx context.Context, runtimeCmd Command) ([]Model, er
 	hideAgentWindow(cmd)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	stdout, err := cmd.Output()
-	if err != nil && len(stdout) == 0 && stderr.Len() == 0 {
-		return []Model{}, nil
-	}
+	stdout, err := outputOwned(cmd, runtimeCmd.logger)
+
 	text := string(stdout)
 	if strings.TrimSpace(text) == "" {
 		text = stderr.String()
 	}
-	return parsePiModels(text), nil
+	models := parsePiModels(text)
+	if len(models) == 0 && err != nil {
+		return nil, fmt.Errorf("pi model discovery: RPC probe failed; --list-models: %w: %s", err, strings.TrimSpace(text))
+	}
+	return models, nil
 }
 
 // parsePiModels accepts the `pi --list-models` output. Pi historically
@@ -1196,15 +1361,17 @@ func discoverOmpModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 		runtimeCmd.Path = "omp"
 	}
 	if _, err := exec.LookPath(runtimeCmd.Path); err != nil {
-		return []Model{}, nil
+		return nil, fmt.Errorf("omp model discovery: %w", err)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := runtimeCmd.exec(runCtx, "models", "--json")
 	hideAgentWindow(cmd)
-	stdout, err := cmd.Output()
-	if err != nil || len(stdout) == 0 {
-		return []Model{}, nil
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := outputOwned(cmd, runtimeCmd.logger)
+	if err != nil {
+		return nil, fmt.Errorf("omp models --json: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return parseOmpModels(stdout)
 }
@@ -1215,18 +1382,21 @@ func discoverOmpModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 //	{"models":[{"provider":"anthropic","id":"claude-sonnet-5","selector":"anthropic/claude-sonnet-5","name":"Claude Sonnet 5",...}]}
 //
 // The persistable Model.ID is the selector (provider/id), matching the
-// convention parsePiModels uses: buildPiArgs splits Model.ID on "/" and
-// emits --provider + --model. Using the bare id would drop --provider and
-// let omp's internal provider priority ranking pick a different backend
-// for the same model id. Provider is kept for UI grouping. The dedup key
-// is the selector when present, falling back to provider/id.
+// convention parsePiModels uses: buildPiArgs hands Model.ID to --model whole.
+// Using the bare id would let omp's internal provider priority ranking pick a
+// different backend for the same model id. Provider is kept for UI grouping.
+// The dedup key is the selector when present, falling back to provider/id.
+// Model.Thinking comes from the entry's `reasoning`/`thinking` fields — see
+// ompThinkingFromCatalogEntry for omp's own rules about what those mean.
 func parseOmpModels(data []byte) ([]Model, error) {
 	var wrapper struct {
 		Models []struct {
-			ID       string `json:"id"`
-			Provider string `json:"provider"`
-			Selector string `json:"selector"`
-			Name     string `json:"name"`
+			ID        string          `json:"id"`
+			Provider  string          `json:"provider"`
+			Selector  string          `json:"selector"`
+			Name      string          `json:"name"`
+			Reasoning bool            `json:"reasoning"`
+			Thinking  json.RawMessage `json:"thinking"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -1241,9 +1411,9 @@ func parseOmpModels(data []byte) ([]Model, error) {
 		}
 		provider := strings.TrimSpace(e.Provider)
 		// Model.ID is the qualified selector (provider/id) so buildPiArgs
-		// emits both --provider and --model. When selector is absent, fall
-		// back to provider/id; when provider is also absent, the bare id is
-		// the only form available.
+		// forwards a selector omp can resolve unambiguously. When selector is
+		// absent, fall back to provider/id; when provider is also absent, the
+		// bare id is the only form available.
 		selector := strings.TrimSpace(e.Selector)
 		if selector == "" {
 			if provider != "" {
@@ -1260,9 +1430,72 @@ func parseOmpModels(data []byte) ([]Model, error) {
 		if label == "" {
 			label = selector
 		}
-		models = append(models, Model{ID: selector, Label: label, Provider: provider})
+		models = append(models, Model{
+			ID:       selector,
+			Label:    label,
+			Provider: provider,
+			Thinking: ompThinkingFromCatalogEntry(e.Reasoning, e.Thinking),
+		})
 	}
 	return models, nil
+}
+
+// ompThinkingFromCatalogEntry maps one `omp models --json` entry's reasoning
+// metadata onto Multica's per-model effort catalog.
+//
+// The rules are omp's own, verified against can1357/oh-my-pi v18.2.0:
+//
+//   - `models --json` emits `thinking` as a concrete effort array or `null`,
+//     never an object — see ModelJson/toModelJson in cli/models-cli.ts.
+//   - omp's Effort vocabulary is minimal|low|medium|high|xhigh|max. `off` is
+//     NOT an effort and so never appears in that array (catalog/src/effort.ts).
+//   - `reasoning: true` with `thinking: null` means "reasons, but exposes no
+//     controllable effort dial": getSupportedEfforts documents that exact case.
+//     Inferring efforts there would offer levels omp then clamps away, which is
+//     the silent mismatch MUL-7412 exists to remove.
+//   - `off` is honoured for any model whatever its effort array, because
+//     resolveThinkingLevelForModel returns it before clamping runs
+//     (coding-agent/src/thinking.ts).
+//
+// So a reasoning model gets `off` plus exactly the efforts the catalog
+// advertised, and nothing inferred. A non-reasoning model gets no picker at
+// all, matching how Multica hides pi's inert `off`-only control.
+//
+// `auto` is deliberately excluded: omp keeps AUTO_THINKING as a session-level
+// sentinel that is explicitly never an Effort or ThinkingLevel and is resolved
+// per turn, so it is not a per-model capability, and providerThinkingEnums
+// rejects it (MUL-7412).
+func ompThinkingFromCatalogEntry(reasoning bool, raw json.RawMessage) *ModelThinking {
+	if !reasoning {
+		return nil
+	}
+	// `off` is always available; the catalog only ever adds efforts on top.
+	advertised := map[string]bool{"off": true}
+	for _, effort := range parseOmpEfforts(raw) {
+		advertised[strings.TrimSpace(effort)] = true
+	}
+	levels := make([]ThinkingLevel, 0, len(piThinkingLevelOrder))
+	for _, value := range piThinkingLevelOrder {
+		if advertised[value] {
+			levels = append(levels, ThinkingLevel{Value: value, Label: piThinkingLevelLabels[value]})
+		}
+	}
+	return &ModelThinking{SupportedLevels: levels}
+}
+
+// parseOmpEfforts reads the effort array out of a catalog entry's `thinking`
+// field. An absent field, `null`, and any shape that is not an array of strings
+// all yield no efforts: a payload we cannot read is not evidence that the model
+// supports anything.
+func parseOmpEfforts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var efforts []string
+	if err := json.Unmarshal(raw, &efforts); err != nil {
+		return nil
+	}
+	return efforts
 }
 
 // discoverHermesModels spins up a throwaway `hermes acp` process,
@@ -1272,15 +1505,26 @@ func parseOmpModels(data []byte) ([]Model, error) {
 // `_build_model_state` so whatever ~/.hermes/config.yaml resolves
 // to at runtime is exactly what the UI shows.
 //
-// Failure modes (hermes missing, no credentials, config resolution
-// error) all return an empty list so the UI falls back to the
-// creatable manual-entry input instead of blocking the form.
+// Failures propagate. Hermes has no static catalog to degrade to, so the
+// empty-list behaviour the other legacy providers keep would report a
+// successful discovery that found nothing — and the picker renders that as an
+// authoritative empty dropdown with no error and no hint, which is the one
+// outcome packages/core/runtimes/models.ts explicitly refuses to produce
+// (MUL-6606). An error instead puts the picker in its discovery-failed state,
+// which still offers the creatable manual-entry input, and carries the reason
+// Hermes gave for why it found nothing.
+//
+// Contrast grok (strictErrors with a static fallback) and codebuddy: those
+// substitute a baked-in list and only slog.Debug the reason, because a
+// stand-in catalog is better than nothing there. Here there is no stand-in.
 func discoverHermesModels(ctx context.Context, runtimeCmd Command) ([]Model, error) {
-	return discoverACPModels(ctx, runtimeCmd, acpDiscoveryProvider{
+	models, err := discoverACPModels(ctx, runtimeCmd, acpDiscoveryProvider{
 		defaultBin:   "hermes",
 		clientName:   "multica-model-discovery",
 		extraEnv:     []string{"HERMES_YOLO_MODE=1"},
 		tmpdirPrefix: "multica-hermes-discovery-",
+		strictErrors: true,
+		timeout:      hermesDiscoveryTimeout,
 		// The same handshake carries an effort selector on jcode and carries
 		// none on Hermes Agent, so annotate is what tells the two apart —
 		// Hermes Agent models come back with a nil Thinking and show no
@@ -1288,6 +1532,53 @@ func discoverHermesModels(ctx context.Context, runtimeCmd Command) ([]Model, err
 		// annotateACPThinkingForSessionModel.
 		annotate: annotateACPThinkingForSessionModel,
 	})
+	if err != nil {
+		return nil, annotateHermesDiscoveryUnconfigured(err)
+	}
+	return models, nil
+}
+
+// hermesDiscoveryUnconfiguredHint explains a "no LLM provider configured"
+// failure raised by MODEL DISCOVERY, which is a different story from the same
+// message raised by a task.
+//
+// Hermes' own remedy ("run `hermes model`") assumes the shell the user is
+// standing in. Discovery does not run there: it is a `hermes acp` child of the
+// daemon, and the daemon is frequently GUI-launched, in which case its
+// environment never saw the user's shell rc. agents_probe.go's login-shell
+// fallback does not close that gap — it resolves the binary's PATH and nothing
+// else — so a provider whose credentials live in an exported variable or in
+// gcloud/ADC state (GH: Vertex AI) resolves for the user and not for the
+// daemon.
+//
+// Deliberately NOT the task path's hint (annotateHermesProviderUnconfigured in
+// the daemon): that one is about a per-task HERMES_HOME overlay, and discovery
+// builds no overlay. Sending someone to set HERMES_HOME in an agent's
+// custom_env would be actively wrong here — discovery is per-runtime and never
+// reads any agent's custom_env, so that edit cannot put a single model in this
+// picker.
+//
+// Fixed prose, no interpolation, for the same reason the task hint is: this
+// text is error copy, and nothing user-controlled belongs in a string other
+// code may match on.
+const hermesDiscoveryUnconfiguredHint = " [multica] this is what hermes reported to the daemon, " +
+	"which runs `hermes acp` with its OWN environment — not your login shell. " +
+	"Credentials exported only from a shell rc file are invisible to it. " +
+	"Reproduce with `env -i HOME=\"$HOME\" PATH=\"$PATH\" hermes model`: if that fails while a plain " +
+	"`hermes model` succeeds, restart the daemon from a shell that already has those variables. " +
+	"Setting HERMES_HOME or custom_env on an agent will not populate this picker — " +
+	"model discovery is per-runtime and reads neither."
+
+// annotateHermesDiscoveryUnconfigured appends the hint above when, and only
+// when, the discovery failure is Hermes resolving no provider at all. Every
+// other failure (binary missing, handshake timeout, a rejected credential)
+// passes through untouched — the environment story would misdirect there, and
+// a rejected credential in particular means the config WAS found.
+func annotateHermesDiscoveryUnconfigured(err error) error {
+	if err == nil || !taskfailure.ProviderUnconfigured(err.Error()) {
+		return err
+	}
+	return fmt.Errorf("%w%s", err, hermesDiscoveryUnconfiguredHint)
 }
 
 // discoverKimiModels combines Kimi's ACP model catalog with the structured
@@ -1426,7 +1717,7 @@ func discoverKimiProviderThinking(ctx context.Context, runtimeCmd Command) (map[
 	cmd := runtimeCmd.exec(runCtx, "provider", "list", "--json")
 	hideAgentWindow(cmd)
 	cmd.Stderr = io.Discard
-	raw, err := cmd.Output()
+	raw, err := outputOwned(cmd, runtimeCmd.logger)
 	if err != nil {
 		return nil, fmt.Errorf("kimi provider list: %w", err)
 	}
@@ -1630,6 +1921,23 @@ func discoverQoderModels(ctx context.Context, runtimeCmd Command, defaultBin str
 	})
 }
 
+// acpDiscoveryDefaultTimeout bounds an ACP discovery handshake unless the
+// provider overrides it. Discovery is a foreground UI request, so the ceiling
+// is what a user will wait for a picker to populate, not what a CLI might
+// eventually manage.
+const acpDiscoveryDefaultTimeout = 15 * time.Second
+
+// hermesDiscoveryTimeout is sized to hermes' failure path, not its success
+// path. See acpDiscoveryProvider.timeout: a configured hermes returns its
+// catalog in ~2s, but one that cannot resolve its provider — the case that
+// actually needs to be reported — spends ~25s getting there. At the default 15s
+// the user would be told "context deadline exceeded" instead of the exact
+// command hermes wants them to run.
+//
+// Kept well below the server's 60s modelListRunningTimeout so discovery leaves
+// time for report delivery and retry backoffs before the request closes.
+const hermesDiscoveryTimeout = 40 * time.Second
+
 // acpDiscoveryProvider configures how discoverACPModels launches an
 // ACP-speaking agent CLI. The shared helper drives every CLI in
 // the same way (initialize → optional authenticate → session/new → parse
@@ -1661,6 +1969,17 @@ type acpDiscoveryProvider struct {
 	// ignores. CodeBuddy uses it to read its effort catalog out of the same
 	// handshake, which is why it needs no separate discovery call at all.
 	annotate func([]Model, json.RawMessage)
+	// timeout bounds the whole handshake — spawn, initialize, session/new.
+	// Zero means acpDiscoveryDefaultTimeout.
+	//
+	// It is per-provider because a CLI's UNHAPPY path is what has to fit, and
+	// that is the path with no shared shape: hermes answers a healthy
+	// session/new in ~2s but takes ~25s to conclude it cannot resolve a
+	// provider, because it re-probes before giving up (measured against hermes
+	// 0.20.0 — MUL-6606). A budget sized for the happy path turns every such
+	// diagnosis into "context deadline exceeded", which is the one failure text
+	// that tells the user nothing.
+	timeout time.Duration
 	// inspectInit receives the raw initialize result before any session is
 	// created. It is for reading capability facts the handshake already
 	// carries — Kimi reads `agentInfo.version` to gate a feature on the CLI
@@ -1689,7 +2008,11 @@ func discoverACPModels(ctx context.Context, runtimeCmd Command, p acpDiscoveryPr
 	if _, err := exec.LookPath(runtimeCmd.Path); err != nil {
 		return fail("executable lookup", err)
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	timeout := p.timeout
+	if timeout <= 0 {
+		timeout = acpDiscoveryDefaultTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var isolatedStateDir string
 	if p.isolatedStateEnv != "" {
@@ -1724,14 +2047,17 @@ func discoverACPModels(ctx context.Context, runtimeCmd Command, p acpDiscoveryPr
 	// Discard stderr; noisy logs here don't help us and we don't
 	// want them bleeding into the daemon log every 60s.
 	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedProcessTree(cmd, runtimeCmd.logger); err != nil {
 		return fail("process start", err)
 	}
-	// Ensure the child process is always reaped.
+	// Ensure the child process and everything it spawned are always reaped.
+	// This probe runs on a discovery schedule, so a leaked ACP server here
+	// accumulates rather than showing up once.
 	defer func() {
 		_ = stdin.Close()
-		_ = cmd.Process.Kill()
+		signalProcessGroup(cmd, syscall.SIGKILL)
 		_, _ = cmd.Process.Wait()
+		releaseProcessGroup(cmd)
 	}()
 
 	scanner := bufio.NewScanner(stdout)
@@ -2091,7 +2417,7 @@ func discoverAntigravityModels(ctx context.Context, runtimeCmd Command) ([]Model
 	defer cancel()
 	cmd := runtimeCmd.exec(runCtx, "models")
 	hideAgentWindow(cmd)
-	out, err := cmd.Output()
+	out, err := outputOwned(cmd, runtimeCmd.logger)
 	if err != nil && len(out) == 0 {
 		return nil, nil
 	}
@@ -2144,6 +2470,7 @@ func discoverGrokModels(ctx context.Context, runtimeCmd Command) (Catalog, error
 		clientName:   "multica-model-discovery",
 		tmpdirPrefix: "multica-grok-discovery-",
 		acpArgs:      []string{"--no-auto-update", "agent", "--always-approve", "stdio"},
+		annotate:     annotateGrokThinkingFromACP,
 		selectAuthMethod: func(initResult json.RawMessage, childEnv []string) (string, error) {
 			return selectGrokAuthMethod(extractACPAuthMethods(initResult), envHasNonEmpty(childEnv, "XAI_API_KEY"))
 		},
@@ -2160,15 +2487,16 @@ func discoverGrokModels(ctx context.Context, runtimeCmd Command) (Catalog, error
 			models[i].Provider = "xai"
 		}
 	}
-	annotateGrokThinking(models)
 	return Catalog{Models: models}, nil
 }
 
 // grokStaticModels is the offline fallback catalog for the Grok Build CLI.
 // IDs match a typical signed-in `session/new` / `grok models` listing.
+// Grok 4.6 is the current Grok Build default (xAI, 2026-08-12).
 func grokStaticModels() []Model {
 	models := []Model{
-		{ID: "grok-4.5", Label: "Grok 4.5", Provider: "xai", Default: true},
+		{ID: "grok-4.6", Label: "Grok 4.6", Provider: "xai", Default: true},
+		{ID: "grok-4.5", Label: "Grok 4.5", Provider: "xai"},
 		{ID: "grok-composer-2.5-fast", Label: "Grok Composer 2.5 Fast", Provider: "xai"},
 	}
 	annotateGrokThinking(models)
@@ -2176,19 +2504,94 @@ func grokStaticModels() []Model {
 }
 
 // annotateGrokThinking attaches only capabilities confirmed by xAI's
-// per-model reasoning documentation. session/new does not advertise effort
-// catalogs, so unknown and composer models deliberately keep Thinking nil
-// instead of exposing values that may fail at runtime.
+// per-model reasoning documentation and Grok Build's `--effort` flag.
+// Unknown and composer models deliberately keep Thinking nil instead of
+// exposing values that may fail at runtime. Successful discovery replaces
+// these fallback catalogs with the installed CLI's advertised values.
+//
+// grok-4.6 documents and accepts `xhigh` (docs.x.ai/developers/grok-4-6,
+// grok 1.0.5 `--effort`). grok-4.5 does not, so the fallback picker does not
+// offer it there. The daemon does not validate against this list: while it
+// stands in, a saved level reaches the CLI as-is (Catalog.Verified).
 func annotateGrokThinking(models []Model) {
 	for i := range models {
-		if models[i].ID != "grok-4.5" {
+		switch models[i].ID {
+		case "grok-4.6":
+			models[i].Thinking = grokThinkingCatalog(true)
+		case "grok-4.5":
+			models[i].Thinking = grokThinkingCatalog(false)
+		}
+	}
+}
+
+func grokThinkingCatalog(includeXHigh bool) *ModelThinking {
+	levels := []ThinkingLevel{
+		{Value: "low", Label: "Low"},
+		{Value: "medium", Label: "Medium"},
+		{Value: "high", Label: "High"},
+	}
+	if includeXHigh {
+		levels = append(levels, ThinkingLevel{Value: "xhigh", Label: "Extra high"})
+	}
+	return &ModelThinking{SupportedLevels: levels}
+}
+
+// annotateGrokThinkingFromACP fills in each model's effort catalog from the
+// xAI vendor `_meta` block on its `session/new` entry:
+//
+//	{"modelId": "grok-4.6", "_meta": {"supportsReasoningEffort": true,
+//	  "reasoningEfforts": [{"value": "high", "label": "High Effort", "default": true}, ...]}}
+//
+// This extension is outside the core ACP schema, so the parse stays narrow:
+// models whose entry does not advertise it keep Thinking nil, which hides the
+// picker instead of offering levels the CLI may reject.
+func annotateGrokThinkingFromACP(models []Model, sessionResult json.RawMessage) {
+	var resp struct {
+		Models struct {
+			AvailableModels []struct {
+				ModelID string `json:"modelId"`
+				Meta    struct {
+					SupportsReasoningEffort bool `json:"supportsReasoningEffort"`
+					ReasoningEfforts        []struct {
+						Value   string `json:"value"`
+						Label   string `json:"label"`
+						Default bool   `json:"default"`
+					} `json:"reasoningEfforts"`
+				} `json:"_meta"`
+			} `json:"availableModels"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(sessionResult, &resp); err != nil {
+		return
+	}
+	thinkingByModel := map[string]*ModelThinking{}
+	for _, entry := range resp.Models.AvailableModels {
+		if !entry.Meta.SupportsReasoningEffort {
 			continue
 		}
-		models[i].Thinking = &ModelThinking{SupportedLevels: []ThinkingLevel{
-			{Value: "low", Label: "Low"},
-			{Value: "medium", Label: "Medium"},
-			{Value: "high", Label: "High"},
-		}}
+		thinking := &ModelThinking{}
+		seen := map[string]bool{}
+		for _, effort := range entry.Meta.ReasoningEfforts {
+			value := strings.TrimSpace(effort.Value)
+			if value == "" || seen[value] || !isValidDynamicThinkingValue(value) {
+				continue
+			}
+			seen[value] = true
+			label := strings.TrimSpace(effort.Label)
+			if label == "" {
+				label = value
+			}
+			thinking.SupportedLevels = append(thinking.SupportedLevels, ThinkingLevel{Value: value, Label: label})
+			if effort.Default {
+				thinking.DefaultLevel = value
+			}
+		}
+		if len(thinking.SupportedLevels) > 0 {
+			thinkingByModel[strings.TrimSpace(entry.ModelID)] = thinking
+		}
+	}
+	for i := range models {
+		models[i].Thinking = thinkingByModel[models[i].ID]
 	}
 }
 
@@ -2212,7 +2615,7 @@ func discoverCursorModels(ctx context.Context, runtimeCmd Command) (Catalog, err
 	defer cancel()
 	cmd := runtimeCmd.exec(runCtx, "--list-models")
 	hideAgentWindow(cmd)
-	out, err := cmd.Output()
+	out, err := outputOwned(cmd, runtimeCmd.logger)
 	if err != nil && len(out) == 0 {
 		return Catalog{Models: cursorStaticModels(), Fallback: true}, nil
 	}
@@ -2302,6 +2705,17 @@ func discoverOpenclawAgents(ctx context.Context, runtimeCmd Command) ([]Model, e
 
 	// Try JSON modes first. Different openclaw builds expose the
 	// flag under different names; trying a couple is cheap.
+	//
+	// outputOwned, and this loop already has the salvage built in: a lingering
+	// `openclaw-config` helper makes Wait report exec.ErrWaitDelay with the
+	// catalog in the buffer, and `err != nil && len(out) == 0` lets a populated
+	// buffer through to the parse. The parse is the real gate — a truncated list
+	// does not unmarshal, so a short catalog cannot be mistaken for the real one.
+	//
+	// Not the collector in run_collect_quiet.go: it returns on the direct child's
+	// exit, and a wrapper that exits before the real CLI has printed would have
+	// its catalog killed mid-write. Pipe EOF is the signal that no more output is
+	// coming. See detectCLIVersion.
 	for _, jsonArgs := range [][]string{
 		{"agents", "list", "--json"},
 		{"agents", "list", "--output", "json"},
@@ -2309,7 +2723,7 @@ func discoverOpenclawAgents(ctx context.Context, runtimeCmd Command) ([]Model, e
 	} {
 		cmd := runtimeCmd.exec(runCtx, jsonArgs...)
 		hideAgentWindow(cmd)
-		out, err := cmd.Output()
+		out, err := outputOwned(cmd, runtimeCmd.logger)
 		if err != nil && len(out) == 0 {
 			continue
 		}
@@ -2323,7 +2737,7 @@ func discoverOpenclawAgents(ctx context.Context, runtimeCmd Command) ([]Model, e
 	// the wrong tokens produces nonsense entries like "Identity:".
 	cmd := runtimeCmd.exec(runCtx, "agents", "list")
 	hideAgentWindow(cmd)
-	out, err := cmd.Output()
+	out, err := outputOwned(cmd, runtimeCmd.logger)
 	if err != nil && len(out) == 0 {
 		return []Model{}, nil
 	}
@@ -2565,4 +2979,24 @@ func codebuddyStaticModels() []Model {
 		{ID: "gpt-5.5", Label: "GPT 5.5", Provider: "openai"},
 		{ID: "deepseek-v3-2-volc-ioa", Label: "Deepseek V3 2 Volc IOA", Provider: "deepseek"},
 	}
+}
+
+// discoverDimModels enumerates the model catalog from a Dim ACP session/new
+// handshake. Dim (dimcode) advertises models.availableModels; enumeration
+// requires a logged-in dim (OAuth). On any failure the caller falls back to
+// the manual-entry field.
+func discoverDimModels(ctx context.Context, runtimeCmd Command) (Catalog, error) {
+	models, err := discoverACPModels(ctx, runtimeCmd, acpDiscoveryProvider{
+		defaultBin:   "dim",
+		clientName:   "multica-model-discovery",
+		tmpdirPrefix: "multica-dim-discovery-",
+		acpArgs:      []string{"acp"},
+	})
+	if err != nil || len(models) == 0 {
+		if err != nil {
+			slog.Debug("dim model discovery failed; falling back to manual entry", "error", err)
+		}
+		return Catalog{Models: []Model{}, Fallback: true}, nil
+	}
+	return Catalog{Models: models}, nil
 }

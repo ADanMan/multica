@@ -20,8 +20,8 @@ func setupDirectChatSession(t *testing.T, ctx context.Context, title string) (ag
 	t.Helper()
 	agentID, runtimeID, daemonID = createRuntimeGuardAgent(t, ctx)
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, explicitly_created_at)
+		VALUES ($1, $2, $3, $4, now())
 		RETURNING id
 	`, testWorkspaceID, agentID, testUserID, title).Scan(&sessionID); err != nil {
 		t.Fatalf("setup: create chat session: %v", err)
@@ -120,7 +120,7 @@ func TestDirectChat_TaskOwnsItsOwnInputBatch(t *testing.T) {
 	// coalesced pair. The claim leaves T1 dispatched; move it to running so the
 	// completion CAS (WHERE status='running') applies.
 	markTaskRunning(t, ctx, t1)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "上海晴"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "上海晴"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete first task: %v", err)
 	}
 	claimed2 := claimTaskForRuntimeGuard(t, runtimeID, daemonID)
@@ -166,7 +166,7 @@ func TestDirectChat_ClaimKeepsQueuedTurnsPairedWithReplies(t *testing.T) {
 		t.Fatalf("claim moved already-visible A from %s to %s", inputABeforeClaim[0].CreatedAt.Time, inputAAfterClaim[0].CreatedAt.Time)
 	}
 	markTaskRunning(t, ctx, t1)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "assistant A"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "assistant A"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn A: %v", err)
 	}
 	transcript, err = testHandler.Queries.ListChatMessages(ctx, parseUUID(sessionID))
@@ -240,7 +240,7 @@ func TestDirectChat_ClaimKeepsQueuedTurnsPairedWithReplies(t *testing.T) {
 	}
 
 	markTaskRunning(t, ctx, t2)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t2), completeResult(t, "assistant B"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t2), completeResult(t, "assistant B"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn B: %v", err)
 	}
 	transcript, err = testHandler.Queries.ListChatMessages(ctx, parseUUID(sessionID))
@@ -257,7 +257,7 @@ func TestDirectChat_ClaimKeepsQueuedTurnsPairedWithReplies(t *testing.T) {
 	assertChatTranscriptContents(t, transcript, []string{"user A", "assistant A", "user B", "assistant B", "user C"})
 
 	markTaskRunning(t, ctx, t3)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t3), completeResult(t, "assistant C"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t3), completeResult(t, "assistant C"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn C: %v", err)
 	}
 	transcript, err = testHandler.Queries.ListChatMessages(ctx, parseUUID(sessionID))
@@ -398,7 +398,7 @@ func TestCompleteTask_ChatEmptyOutputWritesNoResponse(t *testing.T) {
 	markTaskRunning(t, ctx, taskID)
 
 	// Whitespace-only output trims to empty → no_response.
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, "   "), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, "   "), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 
@@ -427,7 +427,7 @@ func TestCompleteTask_ChatNonEmptyOutputWritesMessage(t *testing.T) {
 	taskID := sendDirectChat(t, ctx, agentID, sessionID, "hello")
 	markTaskRunning(t, ctx, taskID)
 
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, "hi there"), "sess-1", "/tmp/wd", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, "hi there"), "sess-1", "/tmp/wd", "", false, "", ""); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 	rows := assistantRows(t, ctx, sessionID)
@@ -454,15 +454,18 @@ func TestCompleteTask_ChatCallbackIdempotent(t *testing.T) {
 	markTaskRunning(t, ctx, taskID)
 
 	res := completeResult(t, "reply")
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), res, "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), res, "", "", "", false, "", ""); err != nil {
 		t.Fatalf("first complete: %v", err)
 	}
-	// Replay: the status CAS fails, so this is an idempotent no-op success.
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), res, "", "", "", false, ""); err != nil {
+	// Replay with conflicting content: the status CAS fails, so this is an
+	// idempotent no-op success and the first terminal payload remains final.
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, "conflicting replay"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("replayed complete must be idempotent success, got %v", err)
 	}
 	if rows := assistantRows(t, ctx, sessionID); len(rows) != 1 {
 		t.Fatalf("expected exactly one assistant outcome after replay, got %d", len(rows))
+	} else if rows[0].Content != "reply" {
+		t.Fatalf("replayed completion replaced the first outcome with %q", rows[0].Content)
 	}
 }
 
@@ -480,7 +483,7 @@ func TestFailTask_ChatRetryInheritsInputOwnerAndPriority(t *testing.T) {
 	rootID := sendDirectChat(t, ctx, agentID, sessionID, "root question")
 	markTaskRunning(t, ctx, rootID)
 
-	if _, err := testHandler.TaskService.FailTask(ctx, parseUUID(rootID), "runtime went away", "", "", "", "runtime_offline", false, ""); err != nil {
+	if _, err := testHandler.TaskService.FailTask(ctx, parseUUID(rootID), "runtime went away", "", "", "", "runtime_offline", false, "", ""); err != nil {
 		t.Fatalf("fail task: %v", err)
 	}
 
@@ -535,7 +538,7 @@ func TestFailTask_ChatFailureKeepsNextTurnAfterOutcome(t *testing.T) {
 	sendDirectChat(t, ctx, agentID, sessionID, "user B")
 	markTaskRunning(t, ctx, t1)
 
-	if _, err := testHandler.TaskService.FailTask(ctx, parseUUID(t1), "assistant failure", "", "", "", "agent_error.unknown", false, ""); err != nil {
+	if _, err := testHandler.TaskService.FailTask(ctx, parseUUID(t1), "assistant failure", "", "", "", "agent_error.unknown", false, "", ""); err != nil {
 		t.Fatalf("fail turn A: %v", err)
 	}
 	transcript, err := testHandler.Queries.ListChatMessages(ctx, parseUUID(sessionID))
@@ -724,7 +727,7 @@ func TestCompleteTask_ChannelEmptyOutputWritesNoRow(t *testing.T) {
 
 	// Empty output → no row at all.
 	emptyTask := insertChannelChatTask(t, ctx, agentID, runtimeID, sessionID)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(emptyTask), completeResult(t, "   "), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(emptyTask), completeResult(t, "   "), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete channel task (empty): %v", err)
 	}
 	if rows := assistantRows(t, ctx, sessionID); len(rows) != 0 {
@@ -733,7 +736,7 @@ func TestCompleteTask_ChannelEmptyOutputWritesNoRow(t *testing.T) {
 
 	// Non-empty output → one ordinary message (kind 'message', not no_response).
 	textTask := insertChannelChatTask(t, ctx, agentID, runtimeID, sessionID)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(textTask), completeResult(t, "channel reply"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(textTask), completeResult(t, "channel reply"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete channel task (text): %v", err)
 	}
 	rows := assistantRows(t, ctx, sessionID)
@@ -759,7 +762,7 @@ func TestCompleteTask_SealedChannelEmptyOutputWritesNoRow(t *testing.T) {
 	agentID, sessionID, runtimeID, _ := setupDirectChatSession(t, ctx, "sealed channel chat")
 
 	emptyTask := insertSealedChannelChatTask(t, ctx, agentID, runtimeID, sessionID, "[Image]")
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(emptyTask), completeResult(t, "   "), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(emptyTask), completeResult(t, "   "), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete sealed channel task (empty): %v", err)
 	}
 	if rows := assistantRows(t, ctx, sessionID); len(rows) != 0 {
@@ -768,7 +771,7 @@ func TestCompleteTask_SealedChannelEmptyOutputWritesNoRow(t *testing.T) {
 
 	// Non-empty output still writes one ordinary message.
 	textTask := insertSealedChannelChatTask(t, ctx, agentID, runtimeID, sessionID, "hello")
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(textTask), completeResult(t, "sealed channel reply"), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(textTask), completeResult(t, "sealed channel reply"), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete sealed channel task (text): %v", err)
 	}
 	rows := assistantRows(t, ctx, sessionID)
@@ -799,7 +802,7 @@ func TestCompleteTask_SealedChannelRetryEmptyOutputWritesNoRow(t *testing.T) {
 		t.Fatalf("setup: create retry clone: %v", err)
 	}
 
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(retryTask), completeResult(t, ""), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(retryTask), completeResult(t, ""), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete sealed channel retry (empty): %v", err)
 	}
 	if rows := assistantRows(t, ctx, sessionID); len(rows) != 0 {
@@ -820,7 +823,7 @@ func TestCompleteTask_ChatQuickActions(t *testing.T) {
 		`[{"label":"Draft it","prompt":"Draft the complete plan","primary":true},` +
 		`{"label":"Make a checklist","prompt":"Turn this into a checklist"}]` +
 		"\n```"
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, output), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), completeResult(t, output), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
 
@@ -850,7 +853,7 @@ func TestCompleteTask_ChatQuickActions(t *testing.T) {
 	actionsOnlyTask := sendDirectChat(t, ctx, agentID, sessionID, "give me options only")
 	markTaskRunning(t, ctx, actionsOnlyTask)
 	actionsOnly := "```quick-actions\n[{\"label\":\"Continue\",\"prompt\":\"Continue the plan\"}]\n```"
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(actionsOnlyTask), completeResult(t, actionsOnly), "", "", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(actionsOnlyTask), completeResult(t, actionsOnly), "", "", "", false, "", ""); err != nil {
 		t.Fatalf("complete actions-only task: %v", err)
 	}
 	rows = assistantRows(t, ctx, sessionID)
@@ -885,7 +888,7 @@ func TestCompleteTask_ChatQuickActionsSupplement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal complete request: %v", err)
 	}
-	task, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), result, "", "", "", false, "")
+	task, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(taskID), result, "", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("complete task: %v", err)
 	}
@@ -964,7 +967,7 @@ func TestChatQuickActions_ContextAnchorsOnTargetTurn(t *testing.T) {
 	taskID := sendDirectChat(t, ctx, agentID, sessionID, "first question")
 	markTaskRunning(t, ctx, taskID)
 	task, err := testHandler.TaskService.CompleteTask(
-		ctx, parseUUID(taskID), completeResult(t, "ANCHOR REPLY"), "", "", "", false, "")
+		ctx, parseUUID(taskID), completeResult(t, "ANCHOR REPLY"), "", "", "", false, "", "")
 	if err != nil {
 		t.Fatalf("complete turn 1: %v", err)
 	}
@@ -1030,7 +1033,7 @@ func TestRegenerateChatQuickActions_StaleTargetRejected(t *testing.T) {
 	// Turn 1: a resumable assistant reply (session_id + runtime bound) is latest.
 	t1 := sendDirectChat(t, ctx, agentID, sessionID, "first question")
 	markTaskRunning(t, ctx, t1)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn 1: %v", err)
 	}
 	session, err := testHandler.Queries.GetChatSession(ctx, parseUUID(sessionID))
@@ -1057,7 +1060,7 @@ func TestRegenerateChatQuickActions_StaleTargetRejected(t *testing.T) {
 	// Turn 2 lands, so m1 is no longer the latest.
 	t2 := sendDirectChat(t, ctx, agentID, sessionID, "second question")
 	markTaskRunning(t, ctx, t2)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t2), completeResult(t, "second reply"), "sess-2", "/tmp/wd", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t2), completeResult(t, "second reply"), "sess-2", "/tmp/wd", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn 2: %v", err)
 	}
 	session, err = testHandler.Queries.GetChatSession(ctx, parseUUID(sessionID))
@@ -1097,7 +1100,7 @@ func TestRegenerateChatQuickActions_ActiveTurnRejected(t *testing.T) {
 	// Turn 1 completes with a resumable session → m1 is the latest assistant turn.
 	t1 := sendDirectChat(t, ctx, agentID, sessionID, "first")
 	markTaskRunning(t, ctx, t1)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn 1: %v", err)
 	}
 	session, err := testHandler.Queries.GetChatSession(ctx, parseUUID(sessionID))
@@ -1139,7 +1142,7 @@ func TestRegenerateChatQuickActions_DeferredActiveTurnRejected(t *testing.T) {
 
 	t1 := sendDirectChat(t, ctx, agentID, sessionID, "first")
 	markTaskRunning(t, ctx, t1)
-	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, ""); err != nil {
+	if _, err := testHandler.TaskService.CompleteTask(ctx, parseUUID(t1), completeResult(t, "first reply"), "sess-1", "/tmp/wd", "", false, "", ""); err != nil {
 		t.Fatalf("complete turn 1: %v", err)
 	}
 	session, err := testHandler.Queries.GetChatSession(ctx, parseUUID(sessionID))

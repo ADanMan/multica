@@ -293,8 +293,9 @@ func prepareCodexHomeWithOpts(codexHome string, opts CodexHomeOptions, logger *s
 		// so the fail-closed policy just computed above would only exist in
 		// memory while the effective config silently stays loose. Abort rather
 		// than launch Codex with an unenforced sandbox: on fresh Prepare this
-		// fails the task; on Reuse the caller leaves env.CodexHome unset, which
-		// configureCodexTaskShellEnvironment then refuses to start (MUL-4957).
+		// fails the task; on Reuse the caller declines the reuse and falls back
+		// to Prepare, which re-runs this check against a fresh home and fails
+		// the task if the managed block still cannot be written (MUL-4957).
 		return fmt.Errorf("ensure codex sandbox config: %w", err)
 	}
 
@@ -480,7 +481,7 @@ func PruneCodexSessionStores(profile string, retention time.Duration, now time.T
 				continue
 			}
 			storeDir := filepath.Join(agentDir, is.Name())
-			newest, size := codexStoreStat(storeDir)
+			newest, size := dirStat(storeDir)
 			if newest.IsZero() || now.Sub(newest) <= retention {
 				kept++
 				continue
@@ -518,9 +519,10 @@ func PruneCodexSessionStores(profile string, retention time.Duration, now time.T
 	return removed, bytesFreed
 }
 
-// codexStoreStat walks dir once, returning the newest modification time seen
-// (the store's last activity) and its total byte size (for GC accounting).
-func codexStoreStat(dir string) (newest time.Time, size int64) {
+// dirStat walks dir once, returning the newest modification time seen (the
+// directory's last activity) and its total byte size (for GC accounting).
+// Shared by the store pruners and the task temp sweep.
+func dirStat(dir string) (newest time.Time, size int64) {
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -665,7 +667,7 @@ func linkCodexSessionsToStore(dst, storeDir, sharedSessions, resumeID string, lo
 }
 
 // touchCodexSessionStore refreshes storeDir's modification time to now — the
-// signal codexStoreStat reads as the store's last activity. Best-effort: a
+// signal dirStat reads as the store's last activity. Best-effort: a
 // failed touch only risks an over-eager prune, which the active-store guard
 // still prevents.
 func touchCodexSessionStore(storeDir string, logger *slog.Logger) {

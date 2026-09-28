@@ -38,6 +38,50 @@ const handlerTestManifest = `{
   }
 }`
 
+// hookOnlyTestManifest declares a contribution kind the host does not ship yet.
+// Kept separate from handlerTestManifest so flipping a surface on never silently
+// changes what the capability-gate test is asserting.
+const hookOnlyTestManifest = `{
+  "manifest_version": 1,
+  "key": "com.example.hooked",
+  "name": "Hooked",
+  "version": "1.0.0",
+  "author": { "name": "example" },
+  "scopes": ["issues:read", "net:example.com"],
+  "contributes": {
+    "hooks": [{
+      "key": "summarize",
+      "name": "Summarize",
+      "description": "Compress the discussion.",
+      "triggers": ["ui"],
+      "transport": { "type": "http", "url": "https://example.com/hooks/summarize" }
+    }]
+  }
+}`
+
+// scheduleHookTestManifest runs daily on purpose. Manifest validation walks
+// every occurrence in a 400-day window to enforce the five-minute floor, and a
+// test manifest is parsed on every write and publish: "*/5 * * * *" cost ~115k
+// cron steps per parse (seconds per test under -race), a daily cron ~400.
+const scheduleHookTestManifest = `{
+  "manifest_version": 1,
+  "key": "com.example.scheduled",
+  "name": "Scheduled",
+  "version": "1.0.0",
+  "author": { "name": "example" },
+  "scopes": ["net:example.com"],
+  "contributes": {
+    "hooks": [{
+      "key": "heartbeat",
+      "name": "Heartbeat",
+      "description": "Send a periodic heartbeat.",
+      "triggers": ["schedule"],
+      "schedule": { "cron": "0 6 * * *", "timezone": "UTC" },
+      "transport": { "type": "http", "url": "https://example.com/hooks/heartbeat" }
+    }]
+  }
+}`
+
 func pluginHandlerRequest(method, path string, body []byte, params map[string]string) *http.Request {
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))
 	request.Header.Set("X-User-ID", testUserID)
@@ -49,26 +93,63 @@ func pluginHandlerRequest(method, path string, body []byte, params map[string]st
 	return request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
 }
 
+// writeLocalPluginManifest writes the manifest plus a stub for every file it
+// declares.
+//
+// Publishing validates that the whole bundle is present, which is the point of
+// the artifact model: a surface whose entry does not exist is refused at publish
+// instead of failing in a reader's browser. A file a test already wrote is left
+// alone, so a suite that supplies its own SKILL.md keeps it.
 func writeLocalPluginManifest(t *testing.T, root, manifest string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(root, "hello"), 0o755); err != nil {
+	dir := filepath.Join(root, "hello")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("create local plugin dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "hello", plugincontract.ManifestFilename), []byte(manifest), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, plugincontract.ManifestFilename), []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write local manifest: %v", err)
+	}
+	// A manifest that does not parse is itself a fixture — publishing has to be
+	// what rejects it, so there is nothing to stub out.
+	parsed, _, err := plugincontract.ParseManifest([]byte(manifest))
+	if err != nil {
+		return
+	}
+	for _, surface := range parsed.Contributes.Surfaces {
+		writeLocalPluginFile(t, dir, surface.Entry, "// stub surface\n")
+	}
+	for _, resource := range parsed.Contributes.Resources {
+		writeLocalPluginFile(t, dir, resource.Entry, "---\nname: "+resource.Key+"\ndescription: Stub resource.\n---\n\nStub.\n")
+	}
+	if parsed.Icon != "" {
+		writeLocalPluginFile(t, dir, parsed.Icon, "icon")
 	}
 }
 
-// withLocalPluginSource points the service at a temp MULTICA_PLUGIN_DIR and
-// enables every capability, so these tests exercise the HTTP surface rather
-// than the staged-rollout gate.
+func writeLocalPluginFile(t *testing.T, dir, entry, content string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(entry))
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create plugin file dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write plugin file %s: %v", entry, err)
+	}
+}
+
+// withLocalPluginSource points the service at a temp MULTICA_PLUGIN_DIR,
+// enables every capability, publishes the plugin, and returns the published
+// version id — which is what an install names now.
 func withLocalPluginSource(t *testing.T, manifest string) string {
 	t.Helper()
 	return withLocalPluginSourceIn(t, t.TempDir(), manifest)
 }
 
 // withLocalPluginSourceIn takes the root explicitly so an upgrade test can
-// rewrite the manifest in place and install again from the same source URL.
+// rewrite the manifest in place and publish a second version from it.
 func withLocalPluginSourceIn(t *testing.T, root string, manifest string) string {
 	t.Helper()
 	writeLocalPluginManifest(t, root, manifest)
@@ -79,7 +160,7 @@ func withLocalPluginSourceIn(t *testing.T, root string, manifest string) string 
 	testHandler.PluginService.LocalDir = root
 	testHandler.PluginService.Host = plugincontract.Capabilities{
 		SurfaceTypes:  map[string]bool{plugincontract.SurfaceIssuePanel: true, plugincontract.SurfaceSidebarPanel: true, plugincontract.SurfaceModal: true},
-		HookTriggers:  map[string]bool{plugincontract.TriggerUI: true, plugincontract.TriggerManual: true, plugincontract.TriggerAgent: true, plugincontract.TriggerEvent: true},
+		HookTriggers:  map[string]bool{plugincontract.TriggerUI: true, plugincontract.TriggerManual: true, plugincontract.TriggerAgent: true, plugincontract.TriggerEvent: true, plugincontract.TriggerSchedule: true},
 		HookTransport: map[string]bool{plugincontract.TransportHTTP: true, plugincontract.TransportMCP: true},
 		ResourceTypes: map[string]bool{plugincontract.ResourceSkill: true},
 	}
@@ -93,19 +174,194 @@ func withLocalPluginSourceIn(t *testing.T, root string, manifest string) string 
 		testHandler.PluginService.Host = previousHost
 		testHandler.PluginService.Secrets = previousSecrets
 	})
-	return service.LocalSourcePrefix + "hello"
+	return publishLocalPlugin(t, "hello")
+}
+
+// publishLocalPlugin publishes a directory under MULTICA_PLUGIN_DIR and returns
+// the id of the version it created. Re-publishing an unchanged version string is
+// what a development loop does, so the service gives those a `+dev.N` suffix
+// rather than a conflict — which is why this always returns a NEW version.
+func publishLocalPlugin(t *testing.T, name string) string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"name": name})
+	recorder := httptest.NewRecorder()
+	testHandler.PublishLocalPluginPackage(recorder,
+		pluginHandlerRequest(http.MethodPost, "/plugins/packages/local", body, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("publish %s: status=%d body=%s", name, recorder.Code, recorder.Body.String())
+	}
+	var published service.PluginPackageSummary
+	if err := json.Unmarshal(recorder.Body.Bytes(), &published); err != nil {
+		t.Fatalf("decode published package: %v", err)
+	}
+	if len(published.Versions) == 0 {
+		t.Fatalf("publish %s returned no versions", name)
+	}
+	// Newest first.
+	return published.Versions[0].ID
 }
 
 func cleanupPluginInstallations(t *testing.T) {
 	t.Helper()
 	remove := func() {
 		ctx := context.Background()
+		testPool.Exec(ctx, `DELETE FROM plugin_invocation WHERE installation_id IN (SELECT id FROM plugin_installation WHERE workspace_id = $1)`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM plugin_hook_schedule WHERE workspace_id = $1`, testWorkspaceID)
 		testPool.Exec(ctx, `DELETE FROM plugin_storage WHERE installation_id IN (SELECT id FROM plugin_installation WHERE workspace_id = $1)`, testWorkspaceID)
 		testPool.Exec(ctx, `DELETE FROM plugin_secret WHERE installation_id IN (SELECT id FROM plugin_installation WHERE workspace_id = $1)`, testWorkspaceID)
 		testPool.Exec(ctx, `DELETE FROM plugin_installation WHERE workspace_id = $1`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM plugin_package_file WHERE version_id IN (SELECT id FROM plugin_package_version WHERE workspace_id = $1)`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM plugin_package_version WHERE workspace_id = $1`, testWorkspaceID)
+		testPool.Exec(ctx, `DELETE FROM plugin_package WHERE workspace_id = $1`, testWorkspaceID)
 	}
 	remove()
 	t.Cleanup(remove)
+}
+
+func TestPluginScheduleLifecycleReconcilesAtomically(t *testing.T) {
+	withPluginsV1Flag(t, testHandler, true)
+	cleanupPluginInstallations(t)
+	root := t.TempDir()
+	versionID := withLocalPluginSourceIn(t, root, scheduleHookTestManifest)
+
+	install, _ := json.Marshal(map[string]any{
+		"version_id":     versionID,
+		"granted_scopes": []string{"net:example.com"},
+	})
+	recorder := httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", install, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("install status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var installed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &installed); err != nil {
+		t.Fatalf("decode installation: %v", err)
+	}
+
+	loadSchedule := func() (enabled bool, generation string, cron string) {
+		t.Helper()
+		if err := testPool.QueryRow(context.Background(), `
+			SELECT enabled, generation::text, cron_expression
+			FROM plugin_hook_schedule
+			WHERE installation_id = $1 AND hook_key = 'heartbeat'`, installed.ID).
+			Scan(&enabled, &generation, &cron); err != nil {
+			t.Fatalf("load schedule: %v", err)
+		}
+		return enabled, generation, cron
+	}
+
+	enabled, generation1, cron := loadSchedule()
+	if !enabled || cron != "0 6 * * *" {
+		t.Fatalf("installed schedule enabled=%v cron=%q", enabled, cron)
+	}
+	params := map[string]string{"id": testWorkspaceID, "installationId": installed.ID}
+
+	recorder = httptest.NewRecorder()
+	testHandler.DisablePlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins/disable", nil, params))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	enabled, generationDisabled, _ := loadSchedule()
+	if enabled || generationDisabled != generation1 {
+		t.Fatalf("disabled schedule enabled=%v generation=%q, want disabled generation %q", enabled, generationDisabled, generation1)
+	}
+	var hasNextRun bool
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT next_run_at IS NOT NULL FROM plugin_hook_schedule WHERE installation_id = $1`, installed.ID).
+		Scan(&hasNextRun); err != nil {
+		t.Fatalf("load disabled next run: %v", err)
+	}
+	if hasNextRun {
+		t.Fatal("disabled schedule must not advertise a next run")
+	}
+
+	recorder = httptest.NewRecorder()
+	testHandler.EnablePlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins/enable", nil, params))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	enabled, generation2, _ := loadSchedule()
+	if !enabled || generation2 == generation1 {
+		t.Fatalf("reactivated schedule enabled=%v generation=%q, previous %q", enabled, generation2, generation1)
+	}
+
+	// A code-only upgrade preserves the activation generation and any in-flight
+	// retry. Changing cron rotates it so the new definition cannot collide with
+	// an execution claimed under the previous definition.
+	unchanged := strings.Replace(scheduleHookTestManifest, `"version": "1.0.0"`, `"version": "2.0.0"`, 1)
+	writeLocalPluginManifest(t, root, unchanged)
+	upgradeVersionID := publishLocalPlugin(t, "hello")
+	upgrade, _ := json.Marshal(map[string]any{"version_id": upgradeVersionID, "granted_scopes": []string{"net:example.com"}})
+	recorder = httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", upgrade, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("unchanged upgrade status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	_, generationUnchanged, _ := loadSchedule()
+	if generationUnchanged != generation2 {
+		t.Fatalf("code-only upgrade rotated generation: got %q want %q", generationUnchanged, generation2)
+	}
+
+	changed := strings.Replace(unchanged, `"version": "2.0.0"`, `"version": "3.0.0"`, 1)
+	changed = strings.Replace(changed, `"cron": "0 6 * * *"`, `"cron": "0 7 * * *"`, 1)
+	writeLocalPluginManifest(t, root, changed)
+	changedVersionID := publishLocalPlugin(t, "hello")
+	upgrade, _ = json.Marshal(map[string]any{"version_id": changedVersionID, "granted_scopes": []string{"net:example.com"}})
+	recorder = httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", upgrade, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("changed upgrade status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	_, generation3, cron := loadSchedule()
+	if generation3 == generation2 || cron != "0 7 * * *" {
+		t.Fatalf("changed schedule generation=%q cron=%q, previous generation %q", generation3, cron, generation2)
+	}
+
+	removed := strings.Replace(changed, `"version": "3.0.0"`, `"version": "4.0.0"`, 1)
+	removed = strings.Replace(removed, `"triggers": ["schedule"],
+      "schedule": { "cron": "0 7 * * *", "timezone": "UTC" },`, `"triggers": ["manual"],`, 1)
+	writeLocalPluginManifest(t, root, removed)
+	removedVersionID := publishLocalPlugin(t, "hello")
+	upgrade, _ = json.Marshal(map[string]any{"version_id": removedVersionID, "granted_scopes": []string{"net:example.com"}})
+	recorder = httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", upgrade, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("schedule-removing upgrade status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var remaining int
+	if err := testPool.QueryRow(context.Background(), `SELECT COUNT(*) FROM plugin_hook_schedule WHERE installation_id = $1`, installed.ID).Scan(&remaining); err != nil {
+		t.Fatalf("count removed schedules: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("schedule-removing upgrade left %d rows", remaining)
+	}
+
+	// Restore the schedule so uninstall exercises its own cleanup path instead
+	// of succeeding only because the previous upgrade already removed the row.
+	restored := strings.Replace(changed, `"version": "3.0.0"`, `"version": "5.0.0"`, 1)
+	writeLocalPluginManifest(t, root, restored)
+	restoredVersionID := publishLocalPlugin(t, "hello")
+	upgrade, _ = json.Marshal(map[string]any{"version_id": restoredVersionID, "granted_scopes": []string{"net:example.com"}})
+	recorder = httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", upgrade, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("schedule-restoring upgrade status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	loadSchedule()
+
+	recorder = httptest.NewRecorder()
+	testHandler.UninstallPlugin(recorder, pluginHandlerRequest(http.MethodDelete, "/plugins", nil, params))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("uninstall status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if err := testPool.QueryRow(context.Background(), `SELECT COUNT(*) FROM plugin_hook_schedule WHERE installation_id = $1`, installed.ID).Scan(&remaining); err != nil {
+		t.Fatalf("count schedules after uninstall: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("uninstall left %d schedule rows", remaining)
+	}
 }
 
 func TestPluginManagementRequiresPluginsV1(t *testing.T) {
@@ -122,7 +378,7 @@ func TestPluginManagementRequiresPluginsV1(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			handler(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", []byte(`{}`), map[string]string{"id": testWorkspaceID}))
-			if recorder.Code != http.StatusServiceUnavailable {
+			if recorder.Code != http.StatusForbidden {
 				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
 		})
@@ -132,10 +388,10 @@ func TestPluginManagementRequiresPluginsV1(t *testing.T) {
 func TestPluginPreviewShowsScopesWithoutInstalling(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
-	source := withLocalPluginSource(t, handlerTestManifest)
+	versionID := withLocalPluginSource(t, handlerTestManifest)
 
 	recorder := httptest.NewRecorder()
-	body, _ := json.Marshal(map[string]string{"source_url": source})
+	body, _ := json.Marshal(map[string]string{"version_id": versionID})
 	testHandler.PreviewPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins/preview", body, map[string]string{"id": testWorkspaceID}))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
@@ -173,9 +429,9 @@ func TestPluginPreviewShowsScopesWithoutInstalling(t *testing.T) {
 func TestPluginInstallRequiresExactConsent(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
-	source := withLocalPluginSource(t, handlerTestManifest)
+	versionID := withLocalPluginSource(t, handlerTestManifest)
 
-	partial, _ := json.Marshal(map[string]any{"source_url": source, "granted_scopes": []string{"issues:read"}})
+	partial, _ := json.Marshal(map[string]any{"version_id": versionID, "granted_scopes": []string{"issues:read"}})
 	recorder := httptest.NewRecorder()
 	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", partial, map[string]string{"id": testWorkspaceID}))
 	if recorder.Code != http.StatusConflict {
@@ -183,7 +439,7 @@ func TestPluginInstallRequiresExactConsent(t *testing.T) {
 	}
 
 	extra, _ := json.Marshal(map[string]any{
-		"source_url":     source,
+		"version_id":     versionID,
 		"granted_scopes": []string{"issues:read", "comments:write", "storage:user", "issues:write"},
 	})
 	recorder = httptest.NewRecorder()
@@ -196,10 +452,10 @@ func TestPluginInstallRequiresExactConsent(t *testing.T) {
 func TestPluginInstallConfigureAndUninstall(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
-	source := withLocalPluginSource(t, handlerTestManifest)
+	versionID := withLocalPluginSource(t, handlerTestManifest)
 
 	install, _ := json.Marshal(map[string]any{
-		"source_url":     source,
+		"version_id":     versionID,
 		"granted_scopes": []string{"issues:read", "comments:write", "storage:user"},
 	})
 	recorder := httptest.NewRecorder()
@@ -289,14 +545,23 @@ func TestPluginInstallConfigureAndUninstall(t *testing.T) {
 	}
 }
 
-func TestPluginInstallRejectsMalformedManifest(t *testing.T) {
+// A malformed manifest is now refused by PUBLISHING, not by installing. That is
+// the move this whole change is: the artifact is parsed once, when the author
+// hands it over, so an administrator can never be shown a consent screen for
+// something that was never going to load.
+func TestPluginPublishRejectsMalformedManifest(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
-	source := withLocalPluginSource(t, `{"manifest_version":1,"key":"com.example.hello","surprise":true}`)
+	root := t.TempDir()
+	writeLocalPluginManifest(t, root, `{"manifest_version":1,"key":"com.example.hello","surprise":true}`)
+	previousDir := testHandler.PluginService.LocalDir
+	testHandler.PluginService.LocalDir = root
+	t.Cleanup(func() { testHandler.PluginService.LocalDir = previousDir })
 
-	body, _ := json.Marshal(map[string]any{"source_url": source, "granted_scopes": []string{}})
+	body, _ := json.Marshal(map[string]string{"name": "hello"})
 	recorder := httptest.NewRecorder()
-	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", body, map[string]string{"id": testWorkspaceID}))
+	testHandler.PublishLocalPluginPackage(recorder,
+		pluginHandlerRequest(http.MethodPost, "/plugins/packages/local", body, map[string]string{"id": testWorkspaceID}))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("malformed manifest status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -305,25 +570,113 @@ func TestPluginInstallRejectsMalformedManifest(t *testing.T) {
 	}
 }
 
+// The other half of publish-time validation: a manifest that parses but names a
+// file the bundle does not carry. Under URL hosting this failed months later in
+// a reader's browser, with nothing in the product that could have caught it.
+func TestPluginPublishRejectsMissingSurfaceEntry(t *testing.T) {
+	withPluginsV1Flag(t, testHandler, true)
+	cleanupPluginInstallations(t)
+	root := t.TempDir()
+	// Written directly rather than through writeLocalPluginManifest, which
+	// stubs out every declared file — the missing entry IS the fixture.
+	if err := os.MkdirAll(filepath.Join(root, "hello"), 0o755); err != nil {
+		t.Fatalf("create local plugin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hello", plugincontract.ManifestFilename), []byte(handlerTestManifest), 0o644); err != nil {
+		t.Fatalf("write local manifest: %v", err)
+	}
+	previousDir := testHandler.PluginService.LocalDir
+	testHandler.PluginService.LocalDir = root
+	t.Cleanup(func() { testHandler.PluginService.LocalDir = previousDir })
+
+	body, _ := json.Marshal(map[string]string{"name": "hello"})
+	recorder := httptest.NewRecorder()
+	testHandler.PublishLocalPluginPackage(recorder,
+		pluginHandlerRequest(http.MethodPost, "/plugins/packages/local", body, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("missing surface entry status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "ui/main.js") {
+		t.Fatalf("error does not name the missing file: %s", recorder.Body.String())
+	}
+}
+
 func TestPluginInstallRejectsUnshippedCapabilities(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
-	source := withLocalPluginSource(t, handlerTestManifest)
-	// A declared-but-unshipped contribution must fail the install outright: a
-	// silently dropped surface would look installed and never render.
-	testHandler.PluginService.Host = plugincontract.HostCapabilities()
+	// Tests the WIRING — that install consults the capability gate and refuses
+	// what the host cannot run — against an explicitly narrowed host set rather
+	// than against whatever HostCapabilities happens to contain today.
+	//
+	// The earlier version picked a contribution kind that was unshipped at the
+	// time, so shipping it turned this red with a message about the flip instead
+	// of about the gate. It also had a shelf life: once every kind ships there
+	// is nothing left to write such a fixture against. Narrowing the host here
+	// keeps the assertion true for good.
+	versionID := withLocalPluginSource(t, hookOnlyTestManifest)
+	testHandler.PluginService.Host = plugincontract.Capabilities{
+		SurfaceTypes:  map[string]bool{plugincontract.SurfaceIssuePanel: true},
+		HookTriggers:  map[string]bool{},
+		HookTransport: map[string]bool{},
+		ResourceTypes: map[string]bool{},
+	}
 
 	body, _ := json.Marshal(map[string]any{
-		"source_url":     source,
-		"granted_scopes": []string{"issues:read", "comments:write", "storage:user"},
+		"version_id":     versionID,
+		"granted_scopes": []string{"issues:read", "net:example.com"},
 	})
 	recorder := httptest.NewRecorder()
 	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", body, map[string]string{"id": testWorkspaceID}))
 	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("unshipped capability status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "issue_panel") {
+	// A declared-but-unrunnable contribution must fail the install outright and
+	// name what is missing: silently dropping it would look installed and never
+	// fire.
+	if !strings.Contains(recorder.Body.String(), "hook trigger") {
 		t.Fatalf("error does not name the missing capability: %s", recorder.Body.String())
+	}
+}
+
+// The gate must also let through what the host DOES ship, read from the real
+// set. Together with the test above this pins both directions: nothing
+// unrunnable installs, and nothing runnable is refused.
+func TestPluginInstallAcceptsEveryCapabilityThisHostShips(t *testing.T) {
+	withPluginsV1Flag(t, testHandler, true)
+	cleanupPluginInstallations(t)
+	versionID := withLocalPluginSource(t, hookOnlyTestManifest)
+	testHandler.PluginService.Host = plugincontract.HostCapabilities()
+
+	body, _ := json.Marshal(map[string]any{
+		"version_id":     versionID,
+		"granted_scopes": []string{"issues:read", "net:example.com"},
+	})
+	recorder := httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", body, map[string]string{"id": testWorkspaceID}))
+	// hookOnlyTestManifest declares ui + http, both shipped by the hook engine.
+	// If this starts failing, the gate is refusing something the host can run.
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("a manifest declaring only shipped capabilities was refused: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPluginInstallAcceptsAShippedSurface(t *testing.T) {
+	withPluginsV1Flag(t, testHandler, true)
+	cleanupPluginInstallations(t)
+	// The other half of the gate: a contribution the host DOES ship must install
+	// against the real HostCapabilities set, not only against a test set that
+	// enables everything.
+	versionID := withLocalPluginSource(t, handlerTestManifest)
+	testHandler.PluginService.Host = plugincontract.HostCapabilities()
+
+	body, _ := json.Marshal(map[string]any{
+		"version_id":     versionID,
+		"granted_scopes": []string{"issues:read", "comments:write", "storage:user"},
+	})
+	recorder := httptest.NewRecorder()
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", body, map[string]string{"id": testWorkspaceID}))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("shipped surface was refused: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -343,10 +696,10 @@ func TestPluginUpgradePrunesSecretsTheNewManifestDropped(t *testing.T) {
 	withPluginsV1Flag(t, testHandler, true)
 	cleanupPluginInstallations(t)
 	root := t.TempDir()
-	source := withLocalPluginSourceIn(t, root, handlerTestManifest)
+	versionID := withLocalPluginSourceIn(t, root, handlerTestManifest)
 
 	install, _ := json.Marshal(map[string]any{
-		"source_url":     source,
+		"version_id":     versionID,
 		"granted_scopes": []string{"issues:read", "comments:write", "storage:user"},
 	})
 	recorder := httptest.NewRecorder()
@@ -374,9 +727,16 @@ func TestPluginUpgradePrunesSecretsTheNewManifestDropped(t *testing.T) {
 	upgraded = strings.Replace(upgraded, `,
     "token": { "type": "secret", "label": "Token" }`, "", 1)
 	writeLocalPluginManifest(t, root, upgraded)
+	// Upgrading is installing a DIFFERENT version. Re-posting the same version
+	// id would be a no-op by design, which is the guarantee under test elsewhere.
+	upgradedVersionID := publishLocalPlugin(t, "hello")
 
+	upgrade, _ := json.Marshal(map[string]any{
+		"version_id":     upgradedVersionID,
+		"granted_scopes": []string{"issues:read", "comments:write", "storage:user"},
+	})
 	recorder = httptest.NewRecorder()
-	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", install, map[string]string{"id": testWorkspaceID}))
+	testHandler.InstallPlugin(recorder, pluginHandlerRequest(http.MethodPost, "/plugins", upgrade, map[string]string{"id": testWorkspaceID}))
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("upgrade status=%d body=%s", recorder.Code, recorder.Body.String())
 	}

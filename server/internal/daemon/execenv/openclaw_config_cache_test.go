@@ -26,9 +26,7 @@ func newOpenclawCacheFixture(t *testing.T) *openclawCacheFixture {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "openclaw")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake openclaw binary: %v", err)
-	}
+	writeTestExecutable(t, bin, []byte("#!/bin/sh\nexit 0\n"))
 	configPath := filepath.Join(dir, "openclaw.json")
 	if err := os.WriteFile(configPath, []byte(`{ "agents": { "list": [] } }`), 0o600); err != nil {
 		t.Fatalf("write user config: %v", err)
@@ -144,9 +142,7 @@ func TestOpenclawDiscoveryCacheInvalidatesOnBinaryChange(t *testing.T) {
 	f := newOpenclawCacheFixture(t)
 	f.run(t)
 
-	if err := os.WriteFile(f.bin, []byte("#!/bin/sh\n# upgraded\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("rewrite fake binary: %v", err)
-	}
+	writeTestExecutable(t, f.bin, []byte("#!/bin/sh\n# upgraded\nexit 0\n"))
 
 	if got := f.run(t); got != 2 {
 		t.Errorf("preparation after a binary upgrade made %d CLI calls, want 2 (cache must be invalid)", got)
@@ -291,6 +287,38 @@ func TestOpenclawDiscoveryCacheSkipsFailedDiscovery(t *testing.T) {
 	}
 }
 
+// TestOpenclawDiscoveryCacheFutureDatedEntry pins both edges of the
+// future-dating rule.
+//
+// Callers sample time.Now() once and pass it down, so on a daemon running
+// several tasks at once a peer routinely commits an entry stamped after the
+// reader's sample. That entry is completely valid — rejecting it just costs an
+// extra discovery run, and it is what made the concurrency test below flake.
+// A real clock jump still has to be caught, since an entry dated far ahead
+// would otherwise never age out of its TTL.
+func TestOpenclawDiscoveryCacheFutureDatedEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		ahead time.Duration
+		want  bool
+	}{
+		{"concurrent writer, microseconds ahead", 500 * time.Microsecond, true},
+		{"just inside the tolerance", openclawDiscoveryCacheFutureSkew - time.Millisecond, true},
+		{"clock jump, well past the tolerance", openclawDiscoveryCacheFutureSkew + time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOpenclawCacheFixture(t)
+			readerNow := time.Now()
+			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, f.configPath, []any{map[string]any{"id": "scout"}}, openclawAgentsSourceList, readerNow.Add(tc.ahead)); err != nil {
+				t.Fatalf("store: %v", err)
+			}
+			if _, ok := loadOpenclawDiscoveryCache(f.cachePath(), f.bin, readerNow); ok != tc.want {
+				t.Fatalf("entry dated %v ahead of the reader: hit = %t, want %t", tc.ahead, ok, tc.want)
+			}
+		})
+	}
+}
+
 // TestOpenclawDiscoveryCacheConcurrentPreparations covers several tasks
 // starting at once on the same daemon: the writes are atomic, so every task
 // either sees a complete old entry or a complete new one, and none of them
@@ -317,7 +345,7 @@ func TestOpenclawDiscoveryCacheConcurrentPreparations(t *testing.T) {
 			// Each worker gets its own stub-free path into discovery: the
 			// shared stub is not goroutine-safe, so drive the cache directly
 			// with the same store/load pair preparation uses.
-			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, f.configPath, []any{map[string]any{"id": "scout"}}, false, time.Now()); err != nil {
+			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, f.configPath, []any{map[string]any{"id": "scout"}}, openclawAgentsSourceList, time.Now()); err != nil {
 				mu.Lock()
 				failures = append(failures, err)
 				mu.Unlock()

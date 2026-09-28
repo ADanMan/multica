@@ -13,6 +13,19 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
+// retries builds a Config.MaxRetries value, failing loudly on a budget Retries
+// rejects. Tests that assert an exact upstream request count pass retries(0) to
+// take SDK retries out of the picture; before MUL-6364 that required the
+// negative -1, because a plain 0 was indistinguishable from unset and quietly
+// restored the default budget.
+func retries(n int) *RetryOverride {
+	override, err := Retries(n)
+	if err != nil {
+		panic(err)
+	}
+	return override
+}
+
 // stubUpstream returns an httptest server that mimics the OpenAI
 // chat-completions endpoint. handler receives the decoded request body.
 func stubUpstream(t *testing.T, handler func(w http.ResponseWriter, body map[string]any)) *httptest.Server {
@@ -165,6 +178,75 @@ func TestGenerateJSONUsesGPT56CompatibleParameters(t *testing.T) {
 	}
 }
 
+func TestDisableThinkingDefaultOmitsChatTemplateKwargs(t *testing.T) {
+	var gotBody map[string]any
+	srv := stubUpstream(t, func(w http.ResponseWriter, body map[string]any) {
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"a title"},"finish_reason":"stop"}]}`)
+	})
+
+	c := New(Config{APIKey: "k", BaseURL: srv.URL})
+	if c.DisableThinking() {
+		t.Fatal("default config must report DisableThinking=false")
+	}
+	if _, err := c.GenerateText(context.Background(), "", "system", "hi"); err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+	if _, ok := gotBody["chat_template_kwargs"]; ok {
+		t.Fatalf("default config must not send chat_template_kwargs, got body %#v", gotBody)
+	}
+}
+
+// TestDisableThinkingInjectsChatTemplateKwargs pins the request shape behind
+// MULTICA_LLM_DISABLE_THINKING: the hint rides on every request the client
+// makes — GenerateText (titles) and GenerateJSON (quick actions) alike — as a
+// body mutation that must not disturb the fields the helpers manage
+// themselves.
+func TestDisableThinkingInjectsChatTemplateKwargs(t *testing.T) {
+	var bodies []map[string]any
+	srv := stubUpstream(t, func(w http.ResponseWriter, body map[string]any) {
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if len(bodies) == 1 {
+			_, _ = io.WriteString(w, `{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"a title"},"finish_reason":"stop"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"cmpl-2","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"{\"actions\":[]}"},"finish_reason":"stop"}]}`)
+	})
+
+	c := New(Config{APIKey: "k", BaseURL: srv.URL, DefaultModel: "huya/glm-5.3-flash", DisableThinking: true})
+	if !c.DisableThinking() {
+		t.Fatal("expected DisableThinking to report true")
+	}
+	if _, err := c.GenerateText(context.Background(), "", "you are helpful", "make a title"); err != nil {
+		t.Fatalf("GenerateText failed: %v", err)
+	}
+	// A non-GPT-5.6 model keeps the caller's temperature and gets no
+	// reasoning_effort — the thinking-off hint must coexist with that shape.
+	if _, err := c.GenerateJSON(context.Background(), "", "Return JSON.", "Generate actions.", 0.3, 2048); err != nil {
+		t.Fatalf("GenerateJSON failed: %v", err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("expected two requests, got %d", len(bodies))
+	}
+	for i, body := range bodies {
+		kwargs, ok := body["chat_template_kwargs"].(map[string]any)
+		if !ok {
+			t.Fatalf("request %d must carry chat_template_kwargs, got %#v", i+1, body)
+		}
+		if kwargs["enable_thinking"] != false {
+			t.Fatalf("request %d must disable thinking, got %#v", i+1, kwargs)
+		}
+	}
+	if bodies[1]["temperature"] != 0.3 {
+		t.Fatalf("GenerateJSON must preserve temperature alongside the hint, got %#v", bodies[1])
+	}
+	if _, ok := bodies[1]["reasoning_effort"]; ok {
+		t.Fatalf("non-GPT-5.6 models must not get reasoning_effort, got %#v", bodies[1])
+	}
+}
+
 func TestGenerateJSONFallsBackToLegacyMaxTokens(t *testing.T) {
 	var bodies []map[string]any
 	srv := stubUpstream(t, func(w http.ResponseWriter, body map[string]any) {
@@ -178,7 +260,7 @@ func TestGenerateJSONFallsBackToLegacyMaxTokens(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"{\"actions\":[]}"},"finish_reason":"stop"}]}`)
 	})
 
-	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1})
+	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: retries(0)})
 	if _, err := c.GenerateJSON(context.Background(), "legacy-model", "Return JSON.", "Generate actions.", 0.3, 800); err != nil {
 		t.Fatalf("GenerateJSON failed: %v", err)
 	}
@@ -215,7 +297,7 @@ func TestGenerateJSONFallsBackFromUnsupportedReasoningEffort(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"cmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"{\"actions\":[]}"},"finish_reason":"stop"}]}`)
 	})
 
-	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1})
+	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: retries(0)})
 	if _, err := c.GenerateJSON(context.Background(), "gpt-5.6-luna", "Return JSON.", "Generate actions.", 0.3, 800); err != nil {
 		t.Fatalf("GenerateJSON failed: %v", err)
 	}
@@ -250,7 +332,7 @@ func TestGenerateJSONNegotiatesBothLegacyParameters(t *testing.T) {
 		}
 	})
 
-	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1})
+	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: retries(0)})
 	if _, err := c.GenerateJSON(context.Background(), "gpt-5.6-luna", "Return JSON.", "Generate actions.", 0.3, 800); err != nil {
 		t.Fatalf("GenerateJSON failed: %v", err)
 	}
@@ -278,7 +360,7 @@ func TestGenerateJSONDoesNotRetryInvalidTokenLimit(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":{"message":"Invalid max_completion_tokens value","type":"invalid_request_error","param":"max_completion_tokens","code":"invalid_value"}}`)
 	})
 
-	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: -1})
+	c := New(Config{APIKey: "k", BaseURL: srv.URL, MaxRetries: retries(0)})
 	if _, err := c.GenerateJSON(context.Background(), "gpt-5.6-luna", "Return JSON.", "Generate actions.", 0.3, 800); err == nil {
 		t.Fatal("expected invalid token limit error")
 	}

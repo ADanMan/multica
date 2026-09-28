@@ -11,17 +11,22 @@ All configuration is done via environment variables. Copy `.env.example` as a st
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://multica:multica@localhost:5432/multica?sslmode=disable` |
-| `JWT_SECRET` | **Must change from default.** Secret key for signing JWT tokens. Use a long random string. | `openssl rand -hex 32` |
+| `JWT_SECRET` | **Required — no safe default.** Secret key for signing JWT tokens. A production backend refuses to boot if this is empty or a known placeholder. Generate with `openssl rand -hex 32`. | `openssl rand -hex 32` |
 | `FRONTEND_ORIGIN` | URL where the frontend is served (used for CORS) | `https://app.example.com` |
 
 ### Database Pool Tuning (Optional)
 
-These have sensible defaults and only need to be set when tuning a large or constrained deployment. Precedence (highest first): env var → `pool_*` query params on `DATABASE_URL` → built-in default.
+These have sensible defaults and only need to be set when tuning a large or constrained deployment. For each pool, precedence is: its environment variable → `pool_*` query parameters on that pool's URL → built-in default.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_MAX_CONNS` | pgxpool max connections per pod. `pod_count × DATABASE_MAX_CONNS` should stay well below the Postgres `max_connections` ceiling. With a connection pooler (PgBouncer / RDS Proxy / Supavisor) in front, this can be raised significantly. | `25` |
 | `DATABASE_MIN_CONNS` | pgxpool warm baseline connections per pod. Auto-clamped to `DATABASE_MAX_CONNS`. | `5` |
+| `DATABASE_REPLICA_URL` | Optional PostgreSQL read-only replica connection string. New connections are validated as read-only, but no business traffic uses the replica until a read path explicitly opts in. | - |
+| `DATABASE_REPLICA_MAX_CONNS` | Maximum replica connections per pod. This budget is independent of `DATABASE_MAX_CONNS`. | `10` |
+| `DATABASE_REPLICA_MIN_CONNS` | Warm replica connections per pod. | `0` |
+
+Budget the sum of primary and replica pool limits across every API pod against the PostgreSQL cluster connection ceiling. The replica pool defaults to a five-minute connection lifetime (overridable with the `pool_max_conn_lifetime` URL parameter) so read-only validation is refreshed after promotion. Replica configuration is non-critical: invalid configuration or runtime connection failure makes explicitly opted-in reads fall back to primary, with a short passive circuit preventing every request from paying the connection timeout. Existing read paths remain primary-only until migrated individually. Replica reads have no application-enforced staleness bound; monitor replication lag in the database layer and keep consistency-sensitive reads on primary.
 
 ### Email (Required for Authentication)
 
@@ -66,7 +71,7 @@ Changes take effect after restarting the backend / compose stack. The web UI rea
 
 | Variable | Description |
 |----------|-------------|
-| `ALLOW_SIGNUP` | Set to `false` to disable new user signups on a private instance |
+| `ALLOW_SIGNUP` | Set to `false` to restrict new accounts to allowlisted or invited users |
 | `ALLOWED_EMAIL_DOMAINS` | Optional comma-separated allowlist of email domains |
 | `ALLOWED_EMAILS` | Optional comma-separated allowlist of exact email addresses |
 | `DISABLE_WORKSPACE_CREATION` | Set to `true` to make `POST /api/workspaces` return 403 for every caller — users can only join workspaces they were invited to |
@@ -75,18 +80,28 @@ Changes take effect after restarting the backend / compose stack. The web UI rea
 
 #### Locking down workspace creation
 
-`ALLOW_SIGNUP=false` blocks new accounts from being created, but it does **not** block an already-signed-in user from creating another workspace via `POST /api/workspaces`. On a self-hosted instance where every issue/repo/agent must be visible to the platform admin, set `DISABLE_WORKSPACE_CREATION=true` to close that gap. The recommended bootstrap sequence is:
+`ALLOW_SIGNUP=false` restricts new accounts to allowlisted or invited users, but it does **not** block an already-signed-in user from creating another workspace via `POST /api/workspaces`. On a self-hosted instance where every issue/repo/agent must be visible to the platform admin, set `DISABLE_WORKSPACE_CREATION=true` to close that gap. The recommended bootstrap sequence is:
 
 1. Start the instance with `DISABLE_WORKSPACE_CREATION=false` (the default).
 2. Sign in as the admin and create the shared workspace.
-3. Set `DISABLE_WORKSPACE_CREATION=true` and restart the backend. Optionally set `ALLOW_SIGNUP=false` at the same time if you also want to block new account creation.
+3. Set `DISABLE_WORKSPACE_CREATION=true` and restart the backend. Optionally set `ALLOW_SIGNUP=false` at the same time if you also want to restrict new account creation.
 4. Going forward, additional users join via invitation only — the "Create workspace" affordance is hidden in the UI and any direct API call returns 403.
 
-> Note: setting `ALLOW_SIGNUP=false` blocks **all** new account creation, including users who already have a pending invitation. If you need invited users to be able to sign up but not create their own workspaces, keep `ALLOW_SIGNUP=true` (optionally combined with `ALLOWED_EMAIL_DOMAINS` / `ALLOWED_EMAILS`) and only flip `DISABLE_WORKSPACE_CREATION=true`.
+> Note: setting `ALLOW_SIGNUP=false` enables invite-only account creation. A new user with a live pending workspace invitation can create an account with the invited email; users without an allowlist match or a valid invitation remain blocked. Invitations also permit emails outside configured allowlists when `ALLOW_SIGNUP=true`. Revocation does not delete accounts already created using an invitation or prevent those accounts from signing in. Combine this with `DISABLE_WORKSPACE_CREATION=true` when invitees must join an existing workspace instead of creating their own.
 
 ### File Storage (Optional)
 
-For file uploads and attachments, configure S3 and (optionally) CloudFront:
+Uploads and attachments are written to local disk by default. Set `S3_BUCKET` to
+use S3-compatible object storage instead.
+
+#### Local disk (default)
+
+| Variable | Description |
+|----------|-------------|
+| `LOCAL_UPLOAD_DIR` | Directory attachments are written to (default: `./data/uploads`). The default is **relative to the backend's working directory** — `/app` in the bundled image, where the compose file mounts the `backend_uploads` volume. When running the binary manually it resolves against whatever directory you launched from, so set an absolute path; otherwise uploads land somewhere new each time the launch directory changes, and existing `attachment` rows point at files the server no longer looks for |
+| `LOCAL_UPLOAD_BASE_URL` | Optional absolute base for attachment URLs (e.g. `http://localhost:8080`). Leave empty to store `/uploads/...` paths that stay relative to the API origin |
+
+#### S3 / CloudFront
 
 | Variable | Description |
 |----------|-------------|
@@ -162,6 +177,71 @@ rewrite configuration. Its backend fallback therefore accepts
 `BACKEND_PORT` → `API_PORT` → `SERVER_PORT` → `8080`, while an explicit
 `REMOTE_API_URL` or `NEXT_PUBLIC_API_URL` still takes priority.
 
+### Private CA Certificates (Optional)
+
+The backend checks the TLS certificates of the HTTPS services it calls against
+the system trust store in its image. A service whose certificate comes from an
+internal CA — for example a [self-hosted Gitea, Forgejo, or GitLab](https://multica.ai/docs/vcs-integration)
+— fails until the backend trusts that CA. Connecting such a Git provider reports
+that its certificate is signed by a certificate authority the server does not
+trust.
+
+Add the CA to the backend's trust store rather than turning verification off.
+The backend is a Go program: on Linux it loads the system certificate bundle
+plus every PEM file in the directories listed in `SSL_CERT_DIR`. Mount the CA
+into its own read-only directory and list it after the system directory:
+
+```
+SSL_CERT_DIR=/etc/ssl/certs:/etc/multica/ca-certs
+```
+
+**Kubernetes (Helm):** create a ConfigMap whose keys are PEM files, then point
+`backend.extraCACerts.configMap` at it. The chart mounts it at
+`/etc/multica/ca-certs` and sets `SSL_CERT_DIR` as above.
+
+```bash
+kubectl -n multica create configmap multica-extra-ca --from-file=internal-ca.crt
+helm upgrade multica oci://ghcr.io/multica-ai/charts/multica \
+  --version <chart-version> -n multica --reuse-values \
+  --set backend.extraCACerts.configMap=multica-extra-ca
+```
+
+**Docker Compose:** put the PEM files in a directory next to
+`docker-compose.selfhost.yml` (here `./ca-certs`) and add an override file,
+`docker-compose.ca.yml`:
+
+```yaml
+services:
+  backend:
+    environment:
+      SSL_CERT_DIR: /etc/ssl/certs:/etc/multica/ca-certs
+    volumes:
+      - ./ca-certs:/etc/multica/ca-certs:ro
+```
+
+```bash
+docker compose -f docker-compose.selfhost.yml -f docker-compose.ca.yml up -d backend
+```
+
+Pass both files every time you run a command that recreates the backend. A
+command with only `docker-compose.selfhost.yml`, such as `make selfhost`,
+recreates the backend without the CA.
+
+Things to know:
+
+- **The backend reads the CA only when it starts.** After you add or replace a
+  CA file, restart the backend: `kubectl -n multica rollout restart deploy/multica-backend`,
+  or `docker compose -f docker-compose.selfhost.yml -f docker-compose.ca.yml restart backend`.
+  With Compose, `up -d` is not enough here: the container's configuration has
+  not changed, so Compose keeps the running container. With Helm, a
+  `helm upgrade` also restarts the backend when the ConfigMap has changed.
+- **The CA applies to the whole backend process**, not only the Git provider
+  integration: every outbound TLS client in the backend that uses the system
+  trust store trusts it too.
+- **Only the trust problem is fixed.** An expired certificate, or one that does
+  not cover the host name in the URL, is still rejected; fix the certificate
+  itself.
+
 ### WeCom frame tracing
 
 | Variable | Default | Description |
@@ -194,7 +274,8 @@ These are configured on each user's machine, not on the server:
 |----------|---------|-------------|
 | `MULTICA_SERVER_URL` | `ws://localhost:8080/ws` | WebSocket URL for daemon → server connection |
 | `MULTICA_APP_URL` | `http://localhost:3000` | Frontend URL for CLI login flow |
-| `MULTICA_DAEMON_POLL_INTERVAL` | `3s` | How often the daemon polls for tasks |
+| `MULTICA_DAEMON_POLL_INTERVAL` | `30s` | Catch-up poll for tasks; WebSocket wake signals normally deliver work sooner |
+| `MULTICA_DAEMON_WS_CLAIM_POLL_INTERVAL` | `3m` | Upper bound for healthy WebSocket claim safety polls, configured independently of `MULTICA_DAEMON_POLL_INTERVAL`; downward jitter keeps normal polls at `2m30s`–`2m45s`, while old servers and uncertain claims retain the ordinary poll interval |
 | `MULTICA_DAEMON_HEARTBEAT_INTERVAL` | `15s` | Heartbeat frequency |
 
 Agent-specific overrides:
@@ -209,6 +290,8 @@ Agent-specific overrides:
 | `MULTICA_COPILOT_MODEL` | Override the Copilot model used (note: GitHub Copilot routes models through your account entitlement, so this may not be honoured) |
 | `MULTICA_OPENCODE_PATH` | Custom path to the `opencode` binary |
 | `MULTICA_OPENCODE_MODEL` | Override the OpenCode model used |
+| `MULTICA_CODEARTS_PATH` | Custom path to the `codearts` launcher or binary |
+| `MULTICA_CODEARTS_MODEL` | Override the CodeArts model used |
 | `MULTICA_OPENCLAW_PATH` | Custom path to the `openclaw` binary |
 | `MULTICA_OPENCLAW_MODEL` | Override the OpenClaw model used |
 | `MULTICA_OPENCLAW_CLI_TIMEOUT` | Deadline for each `openclaw config ...` call during task preparation (default 30s; accepts `45s` or `45`). Raise it when the local CLI is slow to start; the daemon also reads it from `backends.openclaw.cli_timeout` in the CLI config |
@@ -223,7 +306,37 @@ Agent-specific overrides:
 
 ## Database Setup
 
-Multica requires PostgreSQL 17 with the pgvector extension.
+Multica requires PostgreSQL 17. It does **not** use pgvector — no migration
+declares a `vector` column or runs `CREATE EXTENSION vector`. The bundled image
+is named `pgvector/pgvector:pg17` for historical reasons only; a stock
+PostgreSQL 17 is sufficient.
+
+Migrations reference four extensions:
+
+| Extension | Migration | Required |
+| --- | --- | --- |
+| `pgcrypto` | `001_init` | **Yes** — a bare `CREATE EXTENSION`; the migration fails without it |
+| `pg_trgm` | `137_search_index_pg_trgm_extension` | **Yes** — same, and the search indexes depend on it |
+| `pg_bigm` | `032_issue_search_index` | No — wrapped in `DO ... EXCEPTION`, skipped with a `NOTICE` when unavailable |
+| `pg_cron` | `076_task_usage_pgcron_extension` | No — same; the usage rollup runs in-process instead, see [Usage Dashboard Rollup](#usage-dashboard-rollup) |
+
+`pgcrypto` and `pg_trgm` ship with every standard PostgreSQL 17 build
+(`postgresql-contrib` on Debian/Ubuntu, bundled in Homebrew's `postgresql@17`
+and in the official `postgres:17` image), so neither hard requirement needs a
+custom image.
+
+`pg_bigm` is optional and only affects **CJK search quality** — bigram indexes
+are far more selective than trigram ones for Chinese, Japanese, and Korean text.
+Search works without it: migrations 138–142 install portable `pg_trgm` fallback
+indexes covering every column the search handlers touch. Installing `pg_bigm`
+does require a custom image or a source build — the bundled
+`pgvector/pgvector:pg17` image does not ship it either.
+
+> Because `pg_bigm` and `pg_cron` are installed conditionally, a row in
+> `schema_migrations` proves the migration ran, not that its objects exist. Run
+> `SELECT extname FROM pg_extension` to see what a database actually has. To
+> recover a missing comment-content search index, follow
+> `server/cmd/migrate/README.md`.
 
 ### Using Docker Compose (Recommended)
 
@@ -231,10 +344,12 @@ The `docker-compose.selfhost.yml` includes PostgreSQL. No separate setup needed.
 
 ### Using Your Own PostgreSQL
 
-If you prefer to use an existing PostgreSQL instance, ensure the pgvector extension is available:
+If you prefer to use an existing PostgreSQL instance, confirm the migration role
+can create the two required extensions:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
 
 Set `DATABASE_URL` in your `.env` and remove the `postgres` service from the compose file.
@@ -313,7 +428,7 @@ If you are upgrading from a binary that pre-dates MUL-2957 (or the auto-hook fai
 
 If you prefer to build and run services manually:
 
-**Prerequisites:** Go 1.26.6, Node.js 22, pnpm 10.28.2, PostgreSQL 17 with pgvector.
+**Prerequisites:** Go 1.26.6, Node.js 22, pnpm 10.28.2, PostgreSQL 17 — a stock install is enough, see [Database Setup](#database-setup).
 
 ```bash
 # Start your PostgreSQL (or use: docker compose up -d postgres)
@@ -480,10 +595,10 @@ COOKIE_DOMAIN=                       # empty: cookies are host-only on app.examp
 # Frontend
 NEXT_PUBLIC_API_URL=                 # empty: the client uses relative /api paths on the page origin
 NEXT_PUBLIC_WS_URL=                  # empty
-REMOTE_API_URL=http://backend:8080   # target the Next.js rewrites proxy /api, /auth and /uploads to
+REMOTE_API_URL=http://backend:8080   # target the Next.js rewrites proxy /v1, /api, /auth and /uploads to
 ```
 
-Serve everything from the single `app.example.com` vhost. HTTP works out of the box, because Next.js rewrites forward `/api`, `/auth` and `/uploads` to `REMOTE_API_URL`. WebSockets do **not** go through those rewrites, so add a `/ws` block to the frontend vhost that reaches the backend directly:
+Serve everything from the single `app.example.com` vhost. HTTP works out of the box, because Next.js rewrites forward `/v1`, `/api`, `/auth` and `/uploads` to `REMOTE_API_URL`. WebSockets do **not** go through those rewrites, so add a `/ws` block to the frontend vhost that reaches the backend directly:
 
 ```nginx
 # Add to the app.example.com server block above
@@ -519,7 +634,7 @@ docker compose -f docker-compose.selfhost.yml up -d
 
 ### WebSocket for LAN / Non-localhost Access
 
-HTTP requests (issues, comments, uploads) work on LAN out of the box — Next.js rewrites proxy `/api`, `/auth`, and `/uploads` to the backend. **WebSockets do not**: Next.js rewrites only forward HTTP requests, not the `Upgrade` handshake a WebSocket needs. If you open the app on `http://<lan-ip>:3000`, real-time features (chat streaming, live issue updates, notifications) will fail to connect until you do one of the following:
+HTTP requests (Plugin API, issues, comments, uploads) work on LAN out of the box — Next.js rewrites proxy `/v1`, `/api`, `/auth`, and `/uploads` to the backend. **WebSockets do not**: Next.js rewrites only forward HTTP requests, not the `Upgrade` handshake a WebSocket needs. If you open the app on `http://<lan-ip>:3000`, real-time features (chat streaming, live issue updates, notifications) will fail to connect until you do one of the following:
 
 1. **Put a reverse proxy in front of the stack (recommended).** Nginx or Caddy terminates the WebSocket upgrade and forwards it to the backend on port 8080. See the [Reverse Proxy](#reverse-proxy) section above — the Nginx example already includes a `location /ws { ... }` block with the correct `Upgrade` / `Connection` headers. Once a proxy is in place the browser connects directly through it, so no frontend rebuild is needed.
 
@@ -580,6 +695,34 @@ networking, allowlists, NetworkPolicy, or proxy authentication. If you bind
 `METRICS_ADDR=0.0.0.0:9090` inside a container, only publish that port to a
 trusted network, for example a host-local mapping such as
 `127.0.0.1:9090:9090`.
+
+## Go Runtime Profiling
+
+The backend exposes all standard Go pprof routes on the fixed loopback-only
+management listener `127.0.0.1:6060`, including CPU, heap, allocs, goroutine,
+block, mutex, threadcreate, symbol, and trace profiles:
+
+```bash
+go tool pprof 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+```
+
+The public API port does not serve `/debug/pprof/`. The listener address is not
+configurable and is never bound to a container or host network interface.
+Profiles can reveal process internals and some captures add CPU or memory
+pressure, so access should remain limited to operators on the same host or in
+the same container network namespace.
+
+A loopback listener inside a container belongs to that container's network
+namespace and is not reachable directly from the host. With the Compose stack,
+capture the profile inside the backend container and copy it out:
+
+```bash
+docker compose -f docker-compose.selfhost.yml exec backend \
+  wget -qO /tmp/heap.pprof http://127.0.0.1:6060/debug/pprof/heap
+docker compose -f docker-compose.selfhost.yml cp backend:/tmp/heap.pprof ./heap.pprof
+go tool pprof ./heap.pprof
+```
 
 ## Upgrading
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,25 +23,7 @@ import (
 
 func newPluginStoragePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("database unavailable: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("database unreachable: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return sharedTestPool(t)
 }
 
 // seedPluginInstallation creates the one row the storage tables hang off. There
@@ -61,10 +42,14 @@ func seedPluginInstallation(t *testing.T, pool *pgxpool.Pool) pgtype.UUID {
 	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, workspaceID) })
 
 	manifest, _ := json.Marshal(map[string]any{"manifest_version": 1})
+	// An installation names the published version it runs. This suite is about
+	// the KV quotas, so the version id is a bare identifier with no package row
+	// behind it — relationships are application-owned by repository policy, and
+	// nothing on this path resolves it.
 	var installationID string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO plugin_installation (workspace_id, plugin_key, source_url, version, manifest)
-		 VALUES ($1, $2, 'local:fixture', '1.0.0', $3) RETURNING id`,
+		`INSERT INTO plugin_installation (workspace_id, plugin_key, package_version_id, version, manifest)
+		 VALUES ($1, $2, gen_random_uuid(), '1.0.0', $3) RETURNING id`,
 		workspaceID, fmt.Sprintf("com.example.storage%d", suffix), manifest,
 	).Scan(&installationID); err != nil {
 		t.Fatalf("seed plugin installation: %v", err)

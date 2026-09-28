@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { cleanup, render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { RESOURCES } from "@multica/views/locales";
@@ -31,8 +31,12 @@ vi.mock("@/hooks/use-tab-history", () => ({
   useTabHistory: () => ({
     canGoBack: false,
     canGoForward: false,
+    historyEntries: [],
+    historyIndex: 0,
+    browsingHistory: [],
     goBack: vi.fn(),
     goForward: vi.fn(),
+    goToHistoryIndex: vi.fn(),
   }),
   useNavigationInputBindings: () => {},
 }));
@@ -77,6 +81,7 @@ vi.mock("@multica/views/platform", () => ({
 vi.mock("@multica/views/layout", () => ({
   AppSidebar: () => <div data-testid="app-sidebar" />,
   GlobalShortcuts: () => <div data-testid="global-shortcuts" />,
+  NavigationProgress: () => <div data-testid="navigation-progress" />,
 }));
 
 vi.mock("@multica/views/modals/registry", () => ({
@@ -134,19 +139,43 @@ function renderShell() {
 }
 
 beforeEach(() => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1280,
+  });
+  localStorage.clear();
   state.currentSlug = "acme";
   state.wsList = [{ id: "ws-1", slug: "acme" }];
 });
 
 describe("DesktopShell workspace gating", () => {
   it("mounts workspace-scoped chrome while the slug resolves", () => {
-    const { queryByTestId } = renderShell();
+    const { queryByRole, queryByTestId } = renderShell();
 
     expect(queryByTestId("app-sidebar")).not.toBeNull();
     expect(queryByTestId("search-command")).not.toBeNull();
     expect(queryByTestId("global-shortcuts")).not.toBeNull();
     expect(queryByTestId("modal-registry")).not.toBeNull();
     expect(queryByTestId("floating-chat")).not.toBeNull();
+    expect(queryByRole("status", { name: /loading workspace/i })).toBeNull();
+  });
+
+  it("keeps traffic-light clearance and a loading shell while the slug is unresolved", () => {
+    state.currentSlug = null;
+
+    const { container, getByRole, getByTestId, queryByTestId } = renderShell();
+
+    expect(queryByTestId("app-sidebar")).toBeNull();
+    expect(
+      container.querySelectorAll("[data-slot='sidebar-trigger']"),
+    ).toHaveLength(0);
+    expect(
+      container.querySelector('[data-slot="main-top-bar"]'),
+    ).toHaveStyle({ paddingLeft: "200px" });
+    expect(
+      getByRole("status", { name: /loading workspace/i }),
+    ).toBeVisible();
+    expect(getByTestId("tab-content")).toBeInTheDocument();
   });
 
   it("drops workspace-scoped chrome when the singleton still points at a deleted workspace", () => {
@@ -161,6 +190,7 @@ describe("DesktopShell workspace gating", () => {
     expect(queryByTestId("global-shortcuts")).toBeNull();
     expect(queryByTestId("modal-registry")).toBeNull();
     expect(queryByTestId("floating-chat")).toBeNull();
+    expect(queryByTestId("tab-content")).not.toBeNull();
   });
 
   it("keeps TabContent mounted with no workspace so the tab router can still resolve one", () => {
@@ -169,6 +199,19 @@ describe("DesktopShell workspace gating", () => {
     const { queryByTestId } = renderShell();
 
     expect(queryByTestId("tab-content")).not.toBeNull();
+  });
+
+  // The shell had no navigation feedback at all before MUL-6404 — the bar
+  // only ever shipped inside web's DashboardLayout. It sits beside TabContent
+  // in the canvas and, like it, is not workspace-gated: a cold workspace
+  // resolve is exactly when the wait is longest.
+  it("mounts the navigation progress bar, workspace or not", () => {
+    expect(renderShell().queryByTestId("navigation-progress")).not.toBeNull();
+
+    cleanup();
+    state.wsList = [];
+
+    expect(renderShell().queryByTestId("navigation-progress")).not.toBeNull();
   });
 
   it("drops chrome for a slug belonging to a workspace the user lost access to", () => {
