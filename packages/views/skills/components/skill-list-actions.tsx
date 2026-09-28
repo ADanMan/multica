@@ -321,9 +321,6 @@ export function AddToAgentDialog({
           <DialogTitle className="text-body">
             {t(($) => $.actions.add_to_agent)}
           </DialogTitle>
-          <DialogDescription className="text-caption">
-            {t(($) => $.actions.add_dialog_description)}
-          </DialogDescription>
         </DialogHeader>
 
         <SkillChips skills={skills} />

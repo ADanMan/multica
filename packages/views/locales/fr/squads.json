@@ -2,7 +2,7 @@
   "page": {
     "title": "Squads",
     "new_button": "Nouveau squad",
-    "empty_no_squads": "Aucun squad pour l'instant. Créez-en un pour commencer.",
+    "empty_no_squads": "Aucun squad pour l’instant.",
     "empty_no_match": "Aucun squad ne correspond à vos filtres.",
     "table": {
       "name": "Squad",
@@ -42,7 +42,7 @@
   },
   "add_member_dialog": {
     "title": "Ajouter un membre",
-    "description": "Ajoutez un membre de l'espace de travail ou un agent à ce squad.",
+    "description": "Choisissez des membres ou des agents de l’espace de travail.",
     "label_member": "Membre",
     "label_role": "Rôle",
     "label_optional": "(facultatif)",
@@ -124,7 +124,7 @@
     "more_members_other": "+{{count}} de plus"
   },
   "instructions_tab": {
-    "description": "Les instructions du squad sont ajoutées au prompt de l'agent responsable chaque fois qu'il travaille sur une tâche assignée à ce squad. Utilisez-les pour donner des directives communes, des accords de travail ou un contexte à suivre à chaque exécution.",
+    "description": "Le chef lit ces instructions chaque fois qu’il travaille sur une tâche assignée à ce squad.",
     "unsaved_changes": "Modifications non enregistrées",
     "save_button": "Enregistrer",
     "placeholder": "Par exemple : commencez toujours par écrire un test qui échoue. Privilégiez des commits petits et atomiques."

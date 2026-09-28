@@ -3,16 +3,13 @@
     "wordmark": "Multica",
     "label": "Étapes de prise en main",
     "about_you": {
-      "label": "À propos de vous",
-      "description": "Votre rôle, et ce que vous voulez accomplir."
+      "label": "À propos de vous"
     },
     "workspace": {
-      "label": "Espace de travail",
-      "description": "Nommez-le et choisissez son URL."
+      "label": "Espace de travail"
     },
     "runtime": {
-      "label": "Rencontrez Mika",
-      "description": "Votre premier coéquipier agent, et où il s'exécute."
+      "label": "Rencontrez Mika"
     }
   },
   "welcome": {
@@ -22,12 +19,10 @@
     "headline_emphasis": "un seul espace de travail.",
     "lede": "Confiez-leur du travail comme à un collègue — ils s'en saisissent, mettent à jour le statut et commentent une fois terminé.",
     "lede_web": "L'application de bureau embarque le runtime — rien à installer. Continuez sur le web pour connecter votre propre CLI.",
-    "lede_desktop": "À la fin, un vrai agent répondra à votre première tâche.",
     "download_desktop": "Télécharger l'application de bureau",
     "continue_on_web": "Continuer sur le web",
     "start_exploring": "Commencer l'exploration",
     "skip_existing": "Je l'ai déjà fait",
-    "illustration_caption": "Chaque tâche, chaque fil, chaque décision — partagés par votre équipe et vos agents.",
     "illustration": {
       "card1_actor_name": "Vous",
       "card1_actor_initial": "N",
@@ -59,9 +54,8 @@
   },
   "source_backfill": {
     "eyebrow": "Une question rapide",
-    "lede": "Une seule question — elle nous aide à comprendre à qui Multica est utile. Répondez une fois et vous reprenez votre travail.",
+    "lede": "Aidez-nous à comprendre comment vous avez découvert Multica.",
     "submit": "Envoyer",
-    "hint_ready": "C'est bon. Cliquez sur Envoyer quand vous êtes prêt.",
     "save_failed_toast": "Échec de l'enregistrement"
   },
   "questions": {
@@ -117,13 +111,15 @@
     "other_aria": "Décrire autre chose"
   },
   "step_question": {
-    "hint_pick": "Choisissez-en un pour continuer — ou passez si vous préférez ne pas répondre.",
-    "hint_continue": "C'est bon. Cliquez sur Continuer quand vous êtes prêt."
+    "hint_pick": "Vous pouvez passer cette étape."
   },
   "cli_install": {
     "copy_aria": "Copier",
     "intro": "Il vous faut un runtime d'agent sur cet ordinateur (Claude Code, Codex, Cursor, …) pour qu'il exécute votre agent. Fonctionne aussi sur des serveurs et des machines de développement distantes.",
     "step1_label": "Installer le CLI Multica",
+    "platform_group": "Choisissez votre système",
+    "platform_macos_linux": "macOS / Linux",
+    "platform_windows": "Windows",
     "step2_label": "Démarrer le daemon"
   },
   "cloud_waitlist": {
@@ -175,7 +171,6 @@
     "issue_prefix_suffix": ". Vous pourrez le changer plus tard dans les paramètres.",
     "issue_prefix_pending": "Définissez l'URL ci-dessus et les numéros de tâches la suivront — ou saisissez un préfixe ici.",
     "create_new_title": "Créer un espace de travail",
-    "create_new_subtitle": "Repartez de zéro — un espace distinct pour une autre facette de votre travail.",
     "hint_opening": "Ouverture de {{name}}.",
     "hint_creating": "Création de {{name}}.",
     "hint_creating_pending": "Création de {{name}}…",
@@ -204,7 +199,6 @@
     "scanning_lede_prefix": "Votre agent passe par un outil de codage IA que vous possédez déjà — comme ",
     "scanning_lede_suffix": ", et d'autres. Nous vérifions lesquels sont installés sur cet ordinateur.",
     "found_headline": "Où Mika doit-il s'exécuter ?",
-    "found_lede": "Voici les runtimes d'agent trouvés sur cet ordinateur. Vous pourrez en changer ou en ajouter plus tard.",
     "runtime_count_one": "{{count}} runtime d'agent",
     "runtime_count_other": "{{count}} runtimes d'agent",
     "status_all_online": "tous en ligne",
@@ -216,7 +210,7 @@
     "empty_lede_prefix": "Un runtime d'agent est un outil de codage IA auquel nous nous connectons — comme ",
     "empty_lede_suffix": ". Installez-en un et actualisez, ou choisissez une option ci-dessous.",
     "empty_skip_title": "Passer pour l'instant",
-    "empty_skip_subtitle": "Entrez dans votre espace de travail maintenant. Votre agent ne pourra pas démarrer d'exécutions tant qu'un runtime d'agent ne sera pas connecté sur cet ordinateur, mais vous pouvez déjà parcourir, planifier et inviter des coéquipiers.",
+    "empty_skip_subtitle": "Les agents ne peuvent pas travailler sans runtime connecté.",
     "empty_skip_action": "Ignorer",
     "empty_waitlist_title": "Utiliser un ordinateur cloud",
     "empty_waitlist_subtitle": "Nous ferons tourner un ordinateur pour vous dans le cloud. Pas encore actif.",
@@ -227,16 +221,15 @@
     "hint_selected": "Sélectionné : {{name}}",
     "hint_pick": "Choisissez un runtime d'agent ci-dessus pour commencer avec Mika.",
     "hint_waiting": "En attente du premier résultat…",
-    "hint_skip_or_refresh": "Actualisez après en avoir installé un, ou passez pour entrer dans votre espace de travail.",
     "continue": "Commencer avec Mika"
   },
   "step_platform": {
     "eyebrow": "Connecter un ordinateur",
     "headline": "Connectez un ordinateur pour exécuter votre agent.",
-    "lede": "Mika, le chef de cabinet de votre espace de travail, s'exécute sur un vrai ordinateur que vous connectez à Multica. Choisissez comment en connecter un.",
-    "hint_default": "Choisissez un mode de connexion — ou passez et connectez un ordinateur plus tard.",
+    "lede": "Connectez un ordinateur pour que Mika puisse travailler.",
+    "hint_default": "Vous pouvez vous connecter plus tard.",
     "download_title": "Utiliser cet ordinateur",
-    "download_subtitle": "Installez notre application de bureau pour connecter cet ordinateur. S'ouvre dans un nouvel onglet — choisissez-y votre plateforme.",
+    "download_subtitle": "Installez Multica Desktop pour connecter cet ordinateur.",
     "download_button": "Télécharger",
     "cli_title": "Connecter depuis le terminal",
     "cli_subtitle": "Connectez un serveur, une machine de développement distante, ou tout ordinateur sans interface graphique. Terminal requis.",
@@ -245,7 +238,6 @@
     "cloud_subtitle": "Nous ferons tourner un ordinateur pour vous dans le cloud. Pas encore actif.",
     "cloud_action": "Bientôt disponible",
     "cli_dialog_title": "Connecter depuis le terminal",
-    "cli_dialog_description": "La même connexion que l'application de bureau, configurée depuis le terminal. Pour les serveurs, les machines de développement distantes, ou tout ordinateur sans interface graphique.",
     "cli_dialog_pick_hint": "Choisissez un ordinateur ci-dessus.",
     "cli_dialog_connect": "Connecter et continuer",
     "runtimes_connected_one": "{{count}} ordinateur connecté",

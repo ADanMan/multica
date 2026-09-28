@@ -30,6 +30,7 @@
     "open_in_new_tab": "Ouvrir dans un nouvel onglet"
   },
   "list": {
+    "loading_selection": "Chargement de la notification…",
     "empty": "Aucune notification",
     "mark_done_tooltip": "Marquer comme traité",
     "archive_tooltip": "Archiver",
@@ -42,7 +43,10 @@
     "archived_title": "Archivées",
     "archived_empty": "Aucune notification archivée",
     "unarchive_tooltip": "Désarchiver",
-    "actions_aria": "Actions de notification"
+    "actions_aria": "Actions de notification",
+    "load_more": "Charger plus",
+    "loading_more": "Chargement…",
+    "retry": "Réessayer"
   },
   "detail": {
     "select_prompt": "Sélectionnez une notification pour afficher les détails",
@@ -76,6 +80,7 @@
     "quick_create_failed": "Échec de la création avec un agent",
     "quick_create_unconfirmed": "Création avec un agent non confirmée",
     "autopilot_paused": "Automatisation en pause",
+    "children_done": "Sous-tâches terminées",
     "autopilot_quota_exceeded": "Limite d'exécutions d'automatisation atteinte"
   },
   "labels": {
@@ -90,7 +95,8 @@
     "reacted_to_comment": "A réagi {{emoji}} à votre commentaire",
     "created_with_agent": "Créé avec un agent : {{identifier}}",
     "failed_with_detail": "Échec : {{detail}}",
-    "autopilot_quota_blocked": "Exécution bloquée car la limite a été atteinte"
+    "autopilot_quota_blocked": "Exécution bloquée car la limite a été atteinte",
+    "children_done_stage": "Sous-tâches de l’étape {{stage}} terminées"
   },
   "toasts": {
     "source_context_retry_started": "Nouvelle tentative démarrée avec le contexte d'origine",
@@ -98,6 +104,7 @@
     "unarchived": "Notification restaurée"
   },
   "errors": {
+    "archived_lookup_failed": "Échec du chargement de la notification liée",
     "source_context_retry_failed": "Impossible de réessayer avec le contexte d'origine",
     "source_context_retry_unavailable": "Ce contexte ne peut plus être réutilisé pour une nouvelle tentative. Recommencez depuis le point de branchement.",
     "mark_read_failed": "Échec du marquage comme lu",
@@ -109,6 +116,7 @@
     "archive_all_read_failed": "Échec de l'archivage des éléments lus",
     "archive_completed_failed": "Échec de l'archivage des éléments terminés",
     "unarchive_failed": "Échec du désarchivage",
-    "archived_load_failed": "Échec du chargement des notifications archivées"
+    "archived_load_failed": "Échec du chargement des notifications archivées",
+    "filters_load_failed": "Impossible de charger les filtres"
   }
 }

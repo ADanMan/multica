@@ -25,7 +25,7 @@
     },
     "empty": {
       "title": "Aucun skill pour l'instant",
-      "description": "Créez votre premier skill, importez-en un depuis une URL ou un dossier local, ou copiez-en un depuis un runtime connecté : tous les agents de l'espace de travail pourront l'utiliser."
+      "description": "Créez ou importez un skill."
     },
     "no_matches": {
       "title": "Aucune correspondance",
@@ -99,7 +99,6 @@
     "updated_toast_one": "{{count}} skill mis à jour depuis sa source",
     "updated_toast_other": "{{count}} skills mis à jour depuis leur source",
     "update_partial_toast": "{{count}} mis à jour, {{failed}} en échec",
-    "add_dialog_description": "Sélectionnez les agents qui doivent recevoir les skills sélectionnés.",
     "cancel": "Annuler",
     "add_confirm": "Ajouter ({{num}})",
     "adding": "Ajout...",
@@ -121,7 +120,9 @@
     "sort_by": "Trier par",
     "direction_asc": "Croissant",
     "direction_desc": "Décroissant",
-    "section_columns": "Colonnes"
+    "section_columns": "Colonnes",
+    "manage_labels": "Gérer les étiquettes...",
+    "manage_labels_title": "Étiquettes des skills"
   },
   "detail": {
     "all_skills": "Tous les skills",
@@ -222,14 +223,16 @@
       "properties_hint": "Ces champs restent synchronisés avec le frontmatter du SKILL.md.",
       "name": "Nom",
       "description": "Description",
-      "description_hint": "{{count}} caractères. Les agents la lisent pour décider s'ils chargent le skill.",
+      "description_hint": "Les agents s’en servent pour décider quand charger le skill.",
       "labels": "Étiquettes",
       "used_by_one": "Utilisé par {{count}} agent",
       "used_by_other": "Utilisé par {{count}} agents",
       "used_by_empty": "Assigné à aucun agent pour l'instant. Ouvrez l'onglet Skills d'un agent pour l'assigner.",
       "permissions_owner": "Vous pouvez modifier et supprimer ce skill. Les changements prennent effet à la prochaine exécution d'agent.",
       "permissions_locked_creator": "Seuls le créateur ({{name}}) ou un administrateur de l'espace de travail peuvent modifier ce skill.",
-      "permissions_locked": "Seuls le créateur ou un administrateur de l'espace de travail peuvent modifier ce skill."
+      "permissions_locked": "Seuls le créateur ou un administrateur de l'espace de travail peuvent modifier ce skill.",
+      "properties_help": "À propos des propriétés du skill",
+      "character_count": "{{count}} caractères"
     },
     "files": {
       "list_aria": "Fichiers du skill",
@@ -326,9 +329,7 @@
     "load_failed": "Échec du chargement des skills locaux du runtime",
     "not_supported": "Ce fournisseur de runtime n'expose pas encore d'inventaire de skills locaux.",
     "no_skills_title": "Aucun skill local trouvé",
-    "no_skills_hint": "Ce runtime n'a encore aucun skill local détectable.",
     "search_placeholder": "Rechercher des skills locaux",
-    "no_search_results_title": "Aucun skill local correspondant",
     "no_search_results_hint": "Aucun skill local ne correspond à « {{query}} ».",
     "ignored_files_hint": "Les liens symboliques, les fichiers illisibles, les fichiers trop volumineux et les ensembles très gros sont ignorés à l'importation.",
     "ready": "Prêt à importer",

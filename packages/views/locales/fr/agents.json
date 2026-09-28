@@ -45,7 +45,7 @@
   },
   "empty": {
     "title": "Aucun agent pour l'instant",
-    "description": "Créez un agent et assignez-lui des tâches, comme à n'importe quel coéquipier. Les agents locaux s'exécutent sur votre machine ; les agents cloud s'exécutent sur le runtime de Multica."
+    "description": "Créez un agent, puis assignez-lui des tâches."
   },
   "no_matches": {
     "title": "Aucune correspondance",
@@ -170,11 +170,8 @@
   },
   "inspector": {
     "section_profile": "Profil",
-    "section_profile_hint": "Gérez la façon dont cet agent apparaît dans l'espace de travail.",
     "section_execution": "Exécution",
-    "section_execution_hint": "Choisissez le runtime, le modèle, le niveau de raisonnement, la vitesse et la limite d'exécutions parallèles.",
     "section_access": "Accès",
-    "section_access_hint": "Contrôlez qui peut exécuter cet agent et utiliser ses capacités connectées.",
     "section_properties": "Propriétés",
     "section_details": "Détails",
     "section_details_hint": "Informations de propriété et de cycle de vie, en lecture seule.",
@@ -191,7 +188,6 @@
     "prop_updated": "Mise à jour",
     "no_description_placeholder": "Aucune description",
     "avatar_label": "Avatar",
-    "avatar_hint": "Affiché dans les assignations, l'activité et les discussions.",
     "name_label": "Nom",
     "description_label": "Description",
     "change_avatar_aria": "Changer d'avatar",
@@ -295,7 +291,6 @@
     "back": "Revenir en arrière",
     "eyebrow": "Création d'agent",
     "choose_title": "Comment souhaitez-vous commencer ?",
-    "choose_description": "Prenez le contrôle total, ou décrivez ce dont vous avez besoin et construisez-le par la conversation.",
     "recommended": "Recommandé",
     "continue": "Continuer",
     "step_choose": "Choisir un point de départ",
@@ -304,7 +299,7 @@
     "modes": {
       "blank": {
         "title": "Partir de zéro",
-        "description": "Configurez chaque champ vous-même. Idéal quand vous savez déjà exactement comment cet agent doit fonctionner."
+        "description": "Définissez vous-même le nom, les instructions et le runtime."
       },
       "template": {
         "title": "Partir d'un modèle",
@@ -312,18 +307,15 @@
       },
       "ai": {
         "title": "Construire avec l'IA",
-        "description": "Décrivez le résultat souhaité. Un Agent Builder posera des questions ciblées et préparera un brouillon en direct."
+        "description": "Créez une configuration modifiable par la conversation."
       }
     },
     "sections": {
       "identity": "Identité",
-      "identity_hint": "Donnez à l'agent un nom reconnaissable et un objectif concis.",
       "behavior": "Comportement et capacités",
-      "behavior_hint": "Définissez son mode de fonctionnement et rattachez les skills de l'espace de travail sur lesquels il peut s'appuyer.",
       "execution": "Exécution",
-      "execution_hint": "Choisissez où l'agent s'exécute et, si vous le souhaitez, remplacez le modèle, le niveau de réflexion et la vitesse par défaut du runtime.",
-      "access": "Accès",
-      "access_hint": "Contrôlez qui peut lancer des exécutions avec cet agent. Vous pourrez le modifier plus tard."
+      "execution_hint": "Les options non spécifiées utilisent les valeurs par défaut du runtime.",
+      "access": "Accès"
     },
     "thinking_label": "Réflexion",
     "speed_label": "Vitesse",
@@ -344,7 +336,7 @@
     },
     "builder": {
       "setup_title": "Choisir un runtime pour l'Agent Builder",
-      "setup_description": "Le runtime en ligne sélectionné alimente la conversation de configuration et devient par défaut le runtime du nouvel agent.",
+      "setup_description": "Ce runtime sert à la configuration et sera celui du nouvel agent par défaut.",
       "start": "Démarrer la conversation",
       "connect_runtime": "Connecter un runtime",
       "start_failed": "Impossible de démarrer l'Agent Builder.",
@@ -354,11 +346,10 @@
       "switch_runtime_pending": "Arrêtez la réponse en cours pour changer de runtime.",
       "switch_runtime_success": "Runtime changé. Votre brouillon est conservé et la conversation se poursuit sur le nouveau runtime avec une session de modèle neuve.",
       "chat_title": "Agent Builder",
-      "chat_hint": "Précisez les besoins par la conversation et affinez la configuration à côté.",
       "runtime_online": "Runtime en ligne",
       "runtime_offline": "Runtime hors ligne",
       "empty_title": "Que doit faire cet agent ?",
-      "empty_description": "Décrivez son rôle, son déroulé, ses productions ou ses contraintes. Un premier brouillon utile apparaîtra à droite.",
+      "empty_description": "Décrivez ce que cet agent doit faire.",
       "prompt_review": "Relire les pull requests du frontend",
       "prompt_research": "Étudier les concurrents et résumer les constats",
       "prompt_assistant": "Aider notre équipe à planifier et rédiger des projets",
@@ -367,7 +358,7 @@
       "send": "Envoyer le message"
     },
     "live_draft": "Configuration de l'agent",
-    "live_draft_hint": "Les mises à jour de la conversation apparaissent ici, et vous pouvez ajuster directement n'importe quel champ.",
+    "live_draft_hint": "Vous pouvez modifier le brouillon directement.",
     "duplicate_env_notice": "Les instructions, les skills et les arguments de commande sont copiés. Les variables d'environnement, les serveurs MCP et la configuration de runtime locale à la machine ne le sont pas.",
     "duplicate_runtime_reset_notice": "Le runtime d'origine est indisponible : cette copie s'exécute donc sur un autre. Le modèle, le niveau de réflexion et la vitesse ont été effacés car ils ne valent que pour le runtime sur lequel ils ont été choisis.",
     "create_and_open": "Créer et ouvrir l'agent",
@@ -390,7 +381,6 @@
   "create_dialog": {
     "title_create": "Créer un agent",
     "title_duplicate": "Dupliquer l'agent",
-    "description_create": "Créez un nouvel agent IA pour votre espace de travail.",
     "description_duplicate": "Créez un agent à partir de « {{name}} ». Les instructions, l'environnement et les skills sont copiés pour vous.",
     "name_label": "Nom",
     "name_placeholder": "ex. Agent de recherche approfondie",
@@ -455,7 +445,7 @@
   },
   "conversation_starters": {
     "label": "Amorces de conversation",
-    "hint": "Jusqu'à trois exemples, affichés à l'ouverture d'une nouvelle discussion avec cet agent. Sélectionner un exemple remplit le champ de saisie sans envoyer le message.",
+    "hint": "Trois au maximum. En choisir une remplit le champ de saisie sans envoyer le message.",
     "add": "Ajouter une suggestion",
     "item_label": "Libellé de la suggestion {{number}}",
     "prompt_label": "Prompt de la suggestion {{number}}",
@@ -513,7 +503,7 @@
       "reveal_action": "Afficher et modifier",
       "revealing": "Affichage…",
       "reveal_failed_toast": "Échec du chargement des valeurs d'environnement",
-      "empty_editable": "Aucune variable d'environnement configurée. Ajoutez-en une pour l'injecter dans l'agent au lancement."
+      "empty_editable": "Aucune variable d’environnement configurée."
     },
     "custom_args": {
       "intro": "Ajoutez des arguments CLI transmis au démarrage de cet agent.",
@@ -528,7 +518,6 @@
       "input_aria": "Argument {{index}}",
       "new_argument_aria": "Nouvel argument",
       "empty_title": "Aucun argument pour l'instant",
-      "empty_hint": "Ajoutez le premier jeton pour composer la commande de lancement.",
       "edit_aria": "Modifier l'argument {{index}}",
       "remove_aria": "Supprimer l'argument {{index}}",
       "saved_toast": "Arguments personnalisés enregistrés",
@@ -583,7 +572,6 @@
       "dialog_edit_title": "Modifier le serveur MCP",
       "dialog_edit_title_named": "Modifier la configuration de {{name}}",
       "dialog_replace_title": "Remplacer la configuration de {{name}}",
-      "dialog_description": "Choisissez un mode de connexion et saisissez ses paramètres. Passez au JSON pour une configuration avancée.",
       "dialog_replace_description": "Pour protéger les informations sensibles, les valeurs enregistrées ne sont plus affichées. Saisissez la nouvelle configuration complète. Les assignations aux agents resteront inchangées.",
       "dialog_name_label": "Nom du serveur",
       "dialog_name_hint": "Identifie ce serveur lors de l'exécution. Utilisez des lettres, des chiffres, des tirets et des traits de soulignement.",
@@ -632,14 +620,14 @@
       "invalid_json": "JSON invalide : {{error}}",
       "save_failed_toast": "Échec de l'enregistrement de la configuration MCP",
       "redacted_title": "Configuré — masqué pour vous",
-      "redacted_hint": "Seul le propriétaire de l'agent ou un administrateur de l'espace de travail peut lire cette configuration."
+      "redacted_hint": "Seul le propriétaire de l'agent ou un administrateur de l'espace de travail peut lire cette configuration.",
+      "dialog_json_help": "Modifiez la configuration complète du serveur en JSON."
     },
     "composio_mcp": {
       "subtitle": "Cochez une boîte à outils pour permettre à cet agent de la monter comme serveur MCP — mais uniquement lorsque c'est vous (son créateur) qui avez déclenché l'exécution, directement ou via une chaîne de sous-agents.",
       "loading": "Chargement de vos connexions…",
       "load_failed": "Impossible de charger vos applications connectées. Réessayez dans un instant.",
       "empty_title": "Aucune application connectée pour l'instant",
-      "empty_hint": "Vous n'avez connecté aucun service tiers. Autorisez-en un d'abord, puis revenez ici pour l'activer.",
       "empty_link_to_settings": "Connectez-en un dans Paramètres → Intégrations",
       "connected": "Connecté",
       "toggle_aria": "Autoriser {{toolkit}} pour cet agent",
@@ -651,11 +639,10 @@
       "workspace_warning": "Public pour l'espace de travail : tout membre de l'espace de travail peut utiliser ces applications Composio via cet agent."
     },
     "runtime_config": {
-      "intro": "Choisissez la façon dont le runtime OpenClaw exécute les tours de cet agent. Le mode Local exécute l'agent dans le processus du daemon. Le mode Passerelle transmet chaque tour à une passerelle OpenClaw — utile lorsque l'hôte du daemon est un simple coordinateur et que l'agent doit s'exécuter sur une machine plus puissante.",
       "mode_label": "Mode de routage",
       "mode_local": "Local",
       "mode_gateway": "Passerelle",
-      "mode_local_hint": "Par défaut. Le daemon lance `openclaw agent --local …` et la boucle de l'agent s'exécute sur cet hôte.",
+      "mode_local_hint": "Exécuter sur cet ordinateur.",
       "mode_gateway_hint": "Le daemon compose vers une passerelle OpenClaw. Laissez les champs de point d'accès vides pour les hériter du `~/.openclaw/openclaw.json` de l'hôte du daemon.",
       "gateway_legend": "Point d'accès de la passerelle",
       "host_label": "Hôte",
@@ -671,9 +658,8 @@
       "save_failed_toast": "Échec de l'enregistrement de la configuration de routage"
     },
     "skills": {
-      "intro": "Voici l'ensemble effectif des skills de l'agent. Les skills de l'espace de travail se gèrent ici ; les skills hérités de Codex et Claude Code peuvent aussi être désactivés agent par agent.",
       "assigned_title": "Assignés à l'agent",
-      "assigned_hint": "Les skills de l'espace de travail suivent l'agent. Désactivez-en un temporairement sans le retirer.",
+      "assigned_hint": "Désactivez un skill pour suspendre son utilisation sans le retirer.",
       "runtime_title": "Hérités du runtime",
       "runtime_hint": "Détectés automatiquement depuis {{runtime}} et disponibles chaque fois que cet agent s'y exécute.",
       "workspace_badge": "Espace de travail",
@@ -701,10 +687,8 @@
       "detail_supporting_files": "Fichiers annexes",
       "add_action": "Ajouter un skill",
       "empty_title": "Aucun skill assigné",
-      "empty_hint": "Ajoutez des skills de l'espace de travail pour partager le savoir de l'équipe avec cet agent.",
       "remove_failed_toast": "Échec du retrait du skill",
       "add_dialog_title": "Ajouter un skill",
-      "add_dialog_description": "Sélectionnez un skill de l'espace de travail à assigner à cet agent.",
       "add_dialog_search_placeholder": "Rechercher des skills",
       "add_dialog_empty": "Tous les skills de l'espace de travail sont déjà assignés.",
       "add_dialog_no_match": "Aucun skill ne correspond à votre recherche.",
@@ -717,7 +701,6 @@
       "add_failed_toast": "Échec de l'ajout du skill"
     },
     "integrations": {
-      "intro": "Connectez cet agent à des plateformes de discussion externes pour que chacun puisse travailler avec lui là où il se trouve déjà.",
       "members_note": "Seuls les propriétaires et administrateurs de l'espace de travail peuvent gérer cette connexion. Vous pouvez voir les bots connectés dans Paramètres → Intégrations."
     },
     "activity": {
@@ -852,7 +835,6 @@
     "copy_filtered": "Copier la sélection filtrée",
     "copied": "Copié",
     "waiting_events": "En attente d'événements...",
-    "antigravity_live_unavailable": "Antigravity ne fournit pas encore d'événements d'exécution en direct. La transcription sera disponible une fois l'exécution terminée.",
     "no_data": "Aucune donnée d'exécution enregistrée.",
     "sort_chronological": "Plus anciens d'abord",
     "sort_newest_first": "Plus récents d'abord",
@@ -868,6 +850,7 @@
     "status_cancelled": "Annulée",
     "status_waiting": "En attente",
     "trigger_initial": "Exécution initiale",
+    "trigger_text": "Déclencheur",
     "trigger_comment": "Depuis un commentaire",
     "trigger_autopilot": "Automatisation",
     "trigger_retry": "Relance",
@@ -928,7 +911,8 @@
     "tool_kind_command": "Commandes",
     "tool_kind_write": "Modifications",
     "tool_kind_read": "Lectures",
-    "tool_kind_misc": "Autres"
+    "tool_kind_misc": "Autres",
+    "trigger_wakeup": "Réveil"
   },
   "task_failure": {
     "cancelled_by_system": "Annulée par le système",
@@ -945,6 +929,7 @@
       "skill_bundle_unavailable": "Impossible de télécharger les skills de l'agent",
       "runtime_cli_timeout": "Délai du CLI du runtime local dépassé",
       "environment_prepare_failed": "Impossible de préparer l'environnement d'exécution",
+      "runtime_access_denied": "Cet agent ne peut pas s'exécuter sur son runtime privé et n'a donc pas pu répondre. Passez le runtime en public, ou réassociez/copiez l'agent vers un runtime que son propriétaire peut utiliser.",
       "invalid_task_identity": "Identité d'exécution incohérente",
       "agent_error_provider_auth_or_access": "Échec de l'authentification auprès du fournisseur",
       "agent_error_provider_quota_limit": "Quota du fournisseur épuisé",

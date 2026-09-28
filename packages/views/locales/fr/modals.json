@@ -13,7 +13,6 @@
   "delete_issue": {
     "title": "Supprimer la tâche",
     "description": "Cette tâche et tous ses commentaires seront définitivement supprimés. Cette action est irréversible.",
-    "hint": "Tout membre de l'espace de travail peut supprimer des tâches.",
     "cancel": "Annuler",
     "confirm": "Supprimer",
     "deleting": "Suppression...",
@@ -29,14 +28,16 @@
     "toast_failed": "Échec de l'envoi du retour",
     "send": "Envoyer le retour",
     "sending": "Envoi…",
-    "github_hint_prefix": "Vous voulez un traitement plus rapide et une discussion ouverte ? Rendez-vous sur ",
+    "github_hint_prefix": "Vous pouvez aussi envoyer vos commentaires sur ",
     "github_hint_link": "GitHub"
   },
   "issue_picker": {
     "search_placeholder": "Rechercher des tâches...",
     "searching": "Recherche...",
     "no_results": "Aucune tâche trouvée.",
-    "prompt_to_search": "Saisissez du texte pour rechercher des tâches"
+    "prompt_to_search": "Saisissez du texte pour rechercher des tâches",
+    "suggested_similar": "Titres similaires",
+    "suggested_recent": "Consultées récemment"
   },
   "set_parent": {
     "title": "Définir la tâche parente",
@@ -76,7 +77,7 @@
     "leader_placeholder": "Sélectionnez un agent chef",
     "members_label": "Membres supplémentaires",
     "members_optional": "(facultatif)",
-    "members_hint": "Membres auxquels le responsable peut déléguer des sous-tâches. Vous pouvez les ajouter plus tard.",
+    "members_hint": "Le chef peut déléguer des sous-tâches à ces membres.",
     "members_placeholder": "Ajouter des agents ou des membres de l'espace de travail",
     "members_selected_count_one": "{{count}} sélectionné",
     "members_selected_count_other": "{{count}} sélectionnés",
@@ -138,7 +139,8 @@
     "local_clear": "Effacer",
     "local_pick_failed": "Impossible d'ouvrir le sélecteur de répertoire.",
     "local_invalid_dir": "Ce répertoire ne peut pas être utilisé. Choisissez-en un autre.",
-    "local_hint": "Les agents des autres machines ne verront pas ce chemin — ils ne pourront pas démarrer. Utilisez des dépôts pour le travail partagé."
+    "local_hint": "Les agents des autres machines ne verront pas ce chemin — ils ne pourront pas démarrer. Utilisez des dépôts pour le travail partagé.",
+    "repos_ref_default": "Branche par défaut"
   },
   "create_issue": {
     "sr_manual": "Nouvelle tâche",
@@ -186,6 +188,7 @@
     "toast_link_subissues_partial": "Échec de la liaison de {{failed}} sous-tâches sur {{total}}",
     "toast_link_labels_failed": "Échec du rattachement des étiquettes",
     "toast_set_properties_failed": "Impossible de définir {{count}} valeurs de propriétés personnalisées",
+    "unavailable_property_removed": "Une propriété personnalisée qui n’est plus disponible a été retirée du brouillon. Vérifiez-le avant de le soumettre à nouveau.",
     "switch_to_agent": "Passer en mode agent",
     "switch_to_agent_tooltip": "Passer à la création avec un agent — décrivez en une ligne et laissez l'agent rédiger la tâche",
     "switch_to_manual": "Passer en mode manuel",
@@ -245,5 +248,13 @@
       "error_unknown": "Échec de l'envoi. Réessayez.",
       "sub_issue_of": "Sous-tâche de {{identifier}}"
     }
+  },
+  "mark_duplicate": {
+    "title": "Marquer comme doublon",
+    "description": "Recherchez la tâche d'origine. Cette tâche sera annulée et liée à celle-ci.",
+    "toast_success": "Marquée comme doublon de {{identifier}}",
+    "toast_failed": "Échec du marquage comme doublon",
+    "error_target_is_duplicate": "{{identifier}} est elle-même un doublon. Choisissez plutôt sa tâche d'origine.",
+    "error_has_duplicates": "D'autres tâches sont marquées comme doublons de celle-ci. Retirez d'abord ces marques."
   }
 }

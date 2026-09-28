@@ -105,7 +105,7 @@
   },
   "empty": {
     "title": "Aucune consommation pour l'instant",
-    "body": "Dès que des agents commenceront à travailler ici, leur consommation de tokens et leur temps d'exécution apparaîtront dans cette vue."
+    "body": "Lancez des agents pour voir leur consommation de tokens et leur durée d’exécution."
   },
   "duration": {
     "less_than_minute": "<1 min"

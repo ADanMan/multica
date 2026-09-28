@@ -165,7 +165,7 @@ func BehaviorsForCategory(category string) []string {
 	}
 }
 
-// ParseCategory normalizes API spellings and pre-backfill stored categories.
+// ParseCategory normalizes API spellings from installed and current clients.
 func ParseCategory(value string) (string, bool) {
 	if IsCategory(value) {
 		return value, true
@@ -207,7 +207,6 @@ func WireCategory(status, category string) string {
 // Custom statuses inherit only terminal lifecycle semantics, not parked, review,
 // blocked or active-agent recovery behavior. Nonterminal keys stay distinct.
 func customBehavior(status, category string) string {
-	category, _ = ParseCategory(category)
 	switch category {
 	case CategoryDone:
 		return Done
@@ -453,8 +452,8 @@ func categoryAndName(ctx context.Context, q Querier, workspaceID pgtype.UUID, st
 	if err != nil {
 		return "", "", fmt.Errorf("resolve issue status %q category: %w", status, err)
 	}
-	category, ok := ParseCategory(entry.Category)
-	if !ok {
+	category := entry.Category
+	if !IsCategory(category) {
 		return "", entry.Name, fmt.Errorf("invalid category %q for issue status %q", entry.Category, status)
 	}
 	return category, entry.Name, nil
@@ -587,6 +586,7 @@ type Resolver struct {
 	workspaceID pgtype.UUID
 	categories  map[string]string
 	names       map[string]string
+	archived    map[string]bool
 	loaded      bool
 	loadErr     error
 }
@@ -616,9 +616,13 @@ func (r *Resolver) load(ctx context.Context, q Querier) {
 	}
 	r.categories = make(map[string]string, len(entries))
 	r.names = make(map[string]string, len(entries))
+	r.archived = make(map[string]bool)
 	for _, e := range entries {
-		r.categories[e.Key], _ = ParseCategory(e.Category)
+		r.categories[e.Key] = e.Category
 		r.names[e.Key] = e.Name
+		if e.ArchivedAt.Valid {
+			r.archived[e.Key] = true
+		}
 	}
 }
 
@@ -651,6 +655,27 @@ func (r *Resolver) Category(ctx context.Context, q Querier, status string) strin
 		return category
 	}
 	r.load(ctx, q)
+	category := r.categories[status]
+	if !IsCategory(category) {
+		return ""
+	}
+	return category
+}
+
+// WritableCategory returns the category of a status a background writer may
+// still move an issue to: a built-in (resolved without I/O), or a custom
+// status that exists and is not archived. It returns "" for anything else,
+// including a failed catalog read, so side-effect callers fail closed. It
+// mirrors Resolve's rules while sharing the Resolver's single catalog read.
+func (r *Resolver) WritableCategory(ctx context.Context, q Querier, status string) string {
+	if IsBuiltIn(status) {
+		category, _ := CategoryForBehavior(status)
+		return category
+	}
+	r.load(ctx, q)
+	if r.archived[status] {
+		return ""
+	}
 	category := r.categories[status]
 	if !IsCategory(category) {
 		return ""
@@ -768,8 +793,8 @@ func CustomKeyCategories(ctx context.Context, q Querier, workspaceID pgtype.UUID
 	}
 	out := make(map[string]string, len(entries))
 	for _, e := range entries {
-		category, ok := ParseCategory(e.Category)
-		if IsBuiltIn(e.Key) || !ok {
+		category := e.Category
+		if IsBuiltIn(e.Key) || !IsCategory(category) {
 			continue
 		}
 		out[e.Key] = category

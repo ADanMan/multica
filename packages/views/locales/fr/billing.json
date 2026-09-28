@@ -89,7 +89,7 @@
     },
     "load_failed": {
       "title": "La facturation est temporairement indisponible",
-      "description": "Nous n'avons pas pu lire un état d'abonnement fiable. Votre forfait n'a pas été modifié."
+      "description": "Impossible de charger les détails de l’abonnement. Réessayez."
     },
     "actions": {
       "retry": "Réessayer",
@@ -103,6 +103,7 @@
     "errors": {
       "action_title": "Échec de l'action de facturation",
       "temporarily_unavailable": "La facturation est temporairement indisponible. Réessayez dans un instant.",
+      "not_enabled": "Les abonnements d’espace de travail ne sont pas activés pour ce déploiement. Contactez votre administrateur.",
       "permission_changed": "Votre rôle dans l'espace de travail n'autorise plus cette action. Actualisez la page pour voir vos droits actuels.",
       "checkout_response": "Le paiement n'a pas pu s'ouvrir car la réponse du serveur était illisible. Réessayez sans changer l'intervalle sélectionné.",
       "already_subscribed": "Cet espace de travail a déjà un abonnement. Le forfait actuel a été actualisé.",
@@ -115,7 +116,6 @@
       "cancel_title": "Paiement annulé",
       "cancel_description": "Aucun changement de forfait n'a été effectué.",
       "portal_title": "Détails de facturation actualisés",
-      "portal_description": "Le dernier état d'abonnement est affiché ci-dessous.",
       "syncing_title": "Activation de votre abonnement",
       "syncing_description": "Le paiement est terminé. Nous attendons que Stripe confirme le changement de forfait.",
       "timeout_description": "Le paiement a été reçu, mais l'abonnement est encore en cours de synchronisation. Actualisez cette page dans un instant.",
@@ -124,12 +124,12 @@
     },
     "past_due": {
       "title": "Le paiement demande votre attention",
-      "description": "Ouvrez le portail de facturation pour mettre à jour votre moyen de paiement. Le badge du forfait ci-dessus indique l'accès actuellement disponible.",
+      "description": "Mettez à jour votre moyen de paiement dans la gestion de la facturation.",
       "grace_description": "Mettez à jour votre moyen de paiement avant le {{date}} pour conserver l'accès Pro."
     },
     "subscription_notice": {
       "canceling_title": "Résiliation programmée",
-      "canceling_description": "Cet abonnement sera résilié le {{date}}. Le badge du forfait ci-dessus indique l'accès actuellement appliqué.",
+      "canceling_description": "Votre abonnement sera résilié le {{date}}.",
       "canceling_description_without_date": "Cet abonnement sera résilié à la fin de sa période actuelle.",
       "incomplete_title": "La configuration de l'abonnement est incomplète",
       "incomplete_description": "Ouvrez la gestion de la facturation pour terminer ou vérifier la configuration du paiement.",
@@ -139,21 +139,17 @@
       "paused_description": "Ouvrez la gestion de la facturation pour vérifier la pause et les options de rétablissement disponibles.",
       "unpaid_title": "L'abonnement est impayé",
       "unpaid_description": "Ouvrez la gestion de la facturation pour régler le solde impayé.",
-      "canceled_title": "L'abonnement est résilié",
-      "canceled_description": "Le badge des droits ci-dessus indique le forfait actuellement appliqué à cet espace de travail."
+      "canceled_title": "L'abonnement est résilié"
     },
     "current": {
       "title": "Forfait actuel",
       "plan": "Forfait de l'espace de travail",
-      "plan_description": "Les droits actuellement appliqués à cet espace de travail.",
       "members": "Membres humains",
       "members_description": "Les agents et les invitations en attente ne comptent pas comme des sièges.",
       "member_count_one": "{{count}} membre",
       "member_count_other": "{{count}} membres",
       "billing_interval": "Intervalle de facturation",
-      "billing_interval_description": "L'intervalle enregistré pour l'abonnement actif.",
-      "period_end": "Fin de la période en cours",
-      "period_end_description": "La date indiquée par l'état d'abonnement actuel."
+      "period_end": "Fin de la période en cours"
     },
     "upgrade": {
       "title": "Passer à Pro",
@@ -169,18 +165,14 @@
     },
     "management": {
       "title": "Gestion de l'abonnement",
-      "description": "Stripe gère de façon sécurisée les moyens de paiement, les factures et la résiliation.",
+      "description": "Moyens de paiement, factures et résiliation.",
       "portal": "Portail de facturation Stripe",
-      "portal_description": "Ouvrez Stripe pour gérer l'abonnement de cet espace de travail.",
       "portal_unavailable": "Aucun portail de facturation Stripe n'est disponible pour cet espace de travail."
     },
     "limits": {
       "title": "Consommation et limites",
-      "description": "Les limites et la consommation proviennent des droits actuels et du suivi des quotas du serveur.",
       "issues": "Tâches",
-      "issues_description": "Nombre actuel de tâches et limite effective indiqués par le serveur.",
       "autopilots": "Exécutions d'automatisation",
-      "autopilots_description": "Consommation actuelle des automatisations et date de réinitialisation indiquées par le serveur.",
       "unlimited": "Illimité",
       "per_month": "{{count}} / mois",
       "usage_loading": "Chargement de la consommation des automatisations",
@@ -196,15 +188,13 @@
       "title": "Sièges",
       "description": "Les sièges achetés couvrent les membres humains actuels et les invitations en attente. Les agents n'utilisent jamais de siège.",
       "human_members": "Sièges utilisés",
-      "human_members_description": "Membres humains confirmés utilisant la capacité achetée. Actualisez après une modification des membres pour rapprocher le nombre.",
       "billed": "Sièges achetés",
-      "billed_description": "Nombre de sièges actuellement achetés via Stripe.",
       "pending_invitations": "Invitations en attente",
       "pending_invitations_description": "Les invitations valides réservent des sièges achetés jusqu'à leur acceptation ou expiration.",
       "available": "Sièges disponibles",
-      "available_description": "Sièges achetés qui ne sont ni utilisés par des membres ni réservés pour des invitations.",
+      "available_description": "Sièges achetés moins les membres et les invitations réservées.",
       "pending": "Nombre de sièges programmé",
-      "pending_description": "Quantité réduite indiquée par la facturation cloud pour la prochaine période.",
+      "pending_description": "Prend effet à la prochaine période de facturation.",
       "seat_count_one": "{{count}} siège",
       "seat_count_other": "{{count}} sièges",
       "pending_with_date_one": "{{count}} siège à partir du {{date}}",
@@ -218,7 +208,8 @@
       "members_over_capacity_title": "Les membres dépassent le nombre de sièges achetés",
       "members_over_capacity_description": "Cet espace de travail compte {{actual}} membres mais seulement {{purchased}} sièges achetés. Ajoutez suffisamment de sièges ou retirez des membres avant d'envoyer de nouvelles invitations.",
       "occupancy_over_capacity_description": "Cet espace de travail occupe {{occupied}} des {{purchased}} sièges achetés ({{members}} membres et {{reserved}} invitations en attente). Ajoutez des sièges, retirez un membre ou révoquez une invitation en attente avant d'inviter quelqu'un d'autre.",
-      "updated": "Achat de sièges soumis"
+      "updated": "Achat de sièges soumis",
+      "available_help": "Calcul des sièges disponibles"
     },
     "seat_purchase": {
       "title": "Ajouter des sièges",

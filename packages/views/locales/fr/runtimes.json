@@ -13,7 +13,7 @@
     "filter_all_description": "Tous les runtimes de cette vue",
     "empty": {
       "title": "Aucun runtime pour l'instant",
-      "hint": "L'application de bureau analyse automatiquement cet ordinateur. Pour utiliser une autre machine — un serveur, une machine de développement, ou tout ordinateur doté d'un terminal — ajoutez-la ici."
+      "hint": "Desktop détecte cet ordinateur automatiquement. Connectez d’autres ordinateurs ici."
     },
     "no_matches": {
       "title": "Aucune correspondance",
@@ -24,16 +24,15 @@
     },
     "bootstrapping": {
       "title": "Démarrage du runtime local…",
-      "hint": "Cela prend généralement quelques secondes. Votre daemon s'enregistre auprès de l'espace de travail."
+      "hint": "Connexion à l’espace de travail..."
     }
   },
   "mika_setup": {
     "title": "Votre runtime est prêt. Commencez avec Mika.",
-    "description": "Mika transforme votre objectif en tâche, mobilise le bon agent et vous aide à ajouter des spécialistes réutilisables quand votre organisation en a besoin.",
+    "description": "Laissez Mika organiser les tâches et coordonner les agents.",
     "action": "Commencer avec Mika",
     "failed": "Impossible de démarrer Mika",
     "dialog_title": "Où Mika doit-il s'exécuter ?",
-    "dialog_description": "Choisissez le runtime que Mika utilisera. Vous pourrez le changer plus tard dans les paramètres.",
     "cancel": "Annuler"
   },
   "machine": {
@@ -80,7 +79,7 @@
     "rename": "Renommer la machine",
     "rename_dialog": {
       "title": "Renommer la machine",
-      "description": "Donnez à cette machine un nom que vous reconnaîtrez. Il s'applique à tous ses runtimes et apparaît lorsque vous choisissez un runtime pour un agent.",
+      "description": "Utilisé pour cet ordinateur et tous ses runtimes.",
       "placeholder": "ex. MacBook de Bohan",
       "hint": "Laissez vide pour utiliser le nom par défaut de l'appareil.",
       "cancel": "Annuler",
@@ -203,10 +202,12 @@
     "title": "Ajouter un ordinateur",
     "description": "Exécutez ces deux commandes sur l'ordinateur à ajouter. Nous le détecterons dès que le daemon sera en ligne.",
     "step1_label": "Installer le CLI Multica",
+    "platform_group": "Choisissez votre système",
+    "platform_macos_linux": "macOS / Linux",
+    "platform_windows": "Windows",
     "step2_label": "Démarrer le daemon",
     "step2_hint": "Ouvre un navigateur pour la connexion, puis laisse le daemon tourner en arrière-plan.",
     "live_listening": "En attente de votre ordinateur",
-    "live_listening_hint": "Nous le détecterons dès le démarrage du daemon — généralement en moins d'une minute.",
     "troubleshooting": "Impossible d'ouvrir un navigateur sur cet ordinateur ?",
     "trouble_intro": "Utilisez un jeton plutôt que la connexion par navigateur. Cela remplace l'étape 2 et fonctionne partout où vous disposez d'un terminal.",
     "trouble_token_hint_prefix": "Créez un jeton dans ",
@@ -217,21 +218,20 @@
     "copy_aria": "Copier",
     "cancel": "Annuler",
     "success_title": "Ordinateur connecté",
-    "success_description": "Votre ordinateur est en ligne et prêt. Créez un agent pour qu'il commence à prendre en charge des exécutions ici.",
+    "success_description": "Ordinateur connecté. Vous pouvez maintenant créer un agent.",
     "view_runtime": "Voir le runtime",
     "create_agent": "Créer un agent"
   },
   "cloud_runtime": {
     "action": "Cloud Runtime",
     "title": "Cloud Runtime",
-    "description": "Lancez un nœud cloud géré et suivez son état dans Fleet.",
+    "description": "Créez un runtime cloud.",
     "create_title": "Nouveau nœud",
-    "create_hint": "Choisissez un nom, un type d'instance et une taille de disque. Fleet applique le reste.",
     "nodes_title": "Nœuds Fleet",
     "refresh": "Actualiser",
     "nodes_empty": "Aucun nœud cloud",
     "nodes_failed": "Cloud Runtime indisponible",
-    "nodes_failed_hint": "Fleet n'a pas renvoyé de liste de nœuds.",
+    "nodes_failed_hint": "Impossible de charger les nœuds cloud. Réessayez.",
     "node_fallback_name": "Nœud cloud",
     "create": "Créer le nœud",
     "creating": "Création...",
@@ -351,7 +351,7 @@
       "read_only": "Lecture seule"
     },
     "detail": {
-      "base_family": "Famille de protocoles de base",
+      "base_family": "Runtime de base",
       "command": "Commande",
       "description": "Description",
       "no_description": "Aucune description",
@@ -363,12 +363,12 @@
     "form": {
       "create_title": "Nouveau runtime personnalisé",
       "edit_title": "Modifier le runtime personnalisé",
-      "step_family_label": "Choisissez une famille de protocoles de base",
-      "step_family_hint": "Le protocole CLI sous-jacent que parle ce runtime.",
+      "step_family_label": "Choisissez un runtime de base",
+      "step_family_hint": "Sélectionnez le CLI compatible avec cette commande.",
       "step_details_label": "Configurez le runtime",
       "step_progress": "Étape {{current}} sur {{total}}",
-      "family_label": "Famille de protocoles de base",
-      "family_locked_hint": "La famille de protocoles de base ne peut pas être modifiée après création.",
+      "family_label": "Runtime de base",
+      "family_locked_hint": "Le runtime de base ne peut pas être modifié après la création.",
       "display_name_label": "Nom affiché",
       "display_name_placeholder": "ex. Mon Claude personnalisé…",
       "command_name_label": "Commande",
