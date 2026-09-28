@@ -541,6 +541,14 @@ function BillingTabContent() {
   };
 
   const reportActionError = (error: unknown, fallback: string) => {
+    const code = errorCode(error);
+    if (
+      code === "workspace_subscriptions_disabled" ||
+      code === "cloud_runtime_not_configured"
+    ) {
+      setActionError(t(($) => $.workspace.errors.not_enabled));
+      return;
+    }
     if (error instanceof ApiError && error.status === 503) {
       setActionError(t(($) => $.workspace.errors.temporarily_unavailable));
       return;
@@ -739,6 +747,7 @@ function BillingTabContent() {
     return (
       <SettingsTab
         title={t(($) => $.workspace.title)}
+        scope="workspace"
       >
         <SettingsCard>
           <div
@@ -758,6 +767,7 @@ function BillingTabContent() {
     return (
       <SettingsTab
         title={t(($) => $.workspace.title)}
+        scope="workspace"
       >
         <Alert variant="destructive">
           <AlertCircle />
@@ -850,6 +860,7 @@ function BillingTabContent() {
   return (
     <SettingsTab
       title={t(($) => $.workspace.title)}
+      scope="workspace"
     >
       {returnResult === "cancel" ? (
         <Alert>
