@@ -9,6 +9,8 @@ import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { cn } from "@multica/ui/lib/utils";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useQuery } from "@tanstack/react-query";
+import { workspaceWakeupSummariesOptions } from "@multica/core/issues/wakeups";
 import {
   useViewStore,
   ViewStoreProvider,
@@ -38,6 +40,7 @@ import { TableView } from "../components/table-view";
 import { useT } from "../../i18n";
 import { IssueContextMenuProvider } from "../actions";
 import { IssueSurfaceActionsProvider } from "./actions-context";
+import { IssuePeekHost } from "../components/issue-peek";
 import { IssueSurfaceSelectionProvider } from "./selection-context";
 import type { IssueCreateDefaults, IssueSurfaceProps } from "./types";
 import {
@@ -194,6 +197,9 @@ function IssueSurfaceContent({
   batchToolbar,
   contentClassName,
 }: Omit<IssueSurfaceComponentProps, "surfaceKey">) {
+  const workspaceId = useWorkspaceId();
+  // One polling owner for the whole surface; individual cards only select cache data.
+  useQuery({ ...workspaceWakeupSummariesOptions(workspaceId), refetchInterval: 10_000 });
   const { t } = useT("projects");
   const controller = useIssueSurfaceController({
     scope,
@@ -277,6 +283,10 @@ function IssueSurfaceContent({
             }
           />
         )}
+        {/* Every view opens the side peek on Shift+Click. The host wraps the
+            loading and empty states too, so a view switch that briefly shows
+            a skeleton keeps the peek open. */}
+        <IssuePeekHost>
         {/* A failed status catalog precedes loading/empty/content on purpose.
             Row fetching is suspended while it is down (a custom status filter
             cannot be routed without it), so every branch below would render an
@@ -377,6 +387,7 @@ function IssueSurfaceContent({
             )}
           </div>
         )}
+        </IssuePeekHost>
         {shouldShowBatchToolbar && (
           <BatchActionToolbar
             issues={
