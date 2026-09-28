@@ -541,11 +541,15 @@ func resolveTargetWorkspaceID(cmd *cobra.Command) (string, error) {
 	return resolveWorkspaceID(cmd), nil
 }
 
-// requireWorkspaceID resolves the workspace ID and returns an error with
-// actionable instructions if it is empty (e.g. user has multiple workspaces
-// but no default configured).
+// requireWorkspaceID resolves the workspace ID (honoring --workspace, so URL
+// paths built from it match the X-Workspace-ID header set by newAPIClient) and
+// returns an error with actionable instructions if it is empty (e.g. user has
+// multiple workspaces but no default configured).
 func requireWorkspaceID(cmd *cobra.Command) (string, error) {
-	id := resolveWorkspaceID(cmd)
+	id, err := resolveTargetWorkspaceID(cmd)
+	if err != nil {
+		return "", err
+	}
 	if id == "" {
 		if inDaemonManagedExecutionContext() {
 			return "", fmt.Errorf("workspace_id is required: MULTICA_WORKSPACE_ID must be set by the daemon in agent execution context (no fallback to user config)")

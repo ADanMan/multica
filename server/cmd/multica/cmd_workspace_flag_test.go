@@ -195,3 +195,28 @@ func TestNewAPIClient_WorkspaceFlagSetsClientWorkspaceID(t *testing.T) {
 		t.Fatalf("client.WorkspaceID = %q, want %q", client.WorkspaceID, bureauWorkspaceID)
 	}
 }
+
+// Commands that build workspace-scoped URL paths (repo, runtime-profile, ...)
+// read the id through requireWorkspaceID; it must honor --workspace so the path
+// and the X-Workspace-ID header never point at different workspaces.
+func TestRequireWorkspaceID_HonorsWorkspaceFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearDaemonContextEnv(t)
+	t.Setenv("MULTICA_WORKSPACE_ID", "")
+	if err := cli.SaveCLIConfig(cli.CLIConfig{WorkspaceID: digLabWorkspaceID}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	cmd := workspaceFlagTestCmd()
+	if err := cmd.Flags().Set("workspace", bureauWorkspaceID); err != nil {
+		t.Fatalf("set --workspace: %v", err)
+	}
+
+	got, err := requireWorkspaceID(cmd)
+	if err != nil {
+		t.Fatalf("requireWorkspaceID: %v", err)
+	}
+	if got != bureauWorkspaceID {
+		t.Fatalf("requireWorkspaceID() = %q, want %q", got, bureauWorkspaceID)
+	}
+}

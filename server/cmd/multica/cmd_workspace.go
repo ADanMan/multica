@@ -481,7 +481,7 @@ func resolveWorkspaceArg(cmd *cobra.Command, args []string) (string, error) {
 		}
 		return ws.ID, nil
 	}
-	return resolveWorkspaceID(cmd), nil
+	return resolveTargetWorkspaceID(cmd)
 }
 
 func runWorkspaceGet(cmd *cobra.Command, args []string) error {
