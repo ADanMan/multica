@@ -4,11 +4,11 @@ import {
   queryOptions,
   type QueryClient,
 } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import type {
   Issue,
   IssueAssigneeType,
-  IssueStatus,
+  IssueStatusCategory,
   IssueTableFacetsRequest,
   IssueTableGroupSpec,
   IssueTableGroupsRequest,
@@ -19,6 +19,16 @@ import type {
   ListIssuesCache,
 } from "../types";
 import { ALL_STATUSES } from "./config";
+
+export function issueTasksOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.tasks(issueId),
+    queryFn: () => api.listTasksByIssue(issueId),
+    enabled: !!issueId,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
 
 export interface IssueSortParam {
   sort_by?: ListIssuesParams["sort_by"];
@@ -120,6 +130,11 @@ export const issueKeys = {
   /** Resolve a bare issue identifier (e.g. "MUL-123") to an issue. */
   identifier: (wsId: string, identifier: string) =>
     [...issueKeys.all(wsId), "identifier", identifier] as const,
+  /** Prefix for every per-issue duplicate-relation query in a workspace. */
+  duplicatesAll: (wsId: string) =>
+    [...issueKeys.all(wsId), "duplicates"] as const,
+  duplicates: (wsId: string, id: string) =>
+    [...issueKeys.duplicatesAll(wsId), id] as const,
   /** Prefix for every per-parent children query in a workspace. */
   childrenAll: (wsId: string) =>
     [...issueKeys.all(wsId), "children"] as const,
@@ -177,7 +192,21 @@ export const issueKeys = {
   tasksAll: () => ["issues", "tasks"] as const,
   /** Per-issue task list (issue-detail Execution log section). */
   tasks: (issueId: string) => [...issueKeys.tasksAll(), issueId] as const,
+  sourceContextPreview: (wsId: string, anchorCommentId: string) =>
+    ["source-context", "preview", wsId, anchorCommentId] as const,
 };
+
+export function sourceContextPreviewOptions(
+  wsId: string,
+  anchorCommentId: string | null | undefined,
+) {
+  return queryOptions({
+    queryKey: issueKeys.sourceContextPreview(wsId, anchorCommentId ?? ""),
+    queryFn: () => api.getCommentSubIssuePreview(anchorCommentId!),
+    enabled: !!anchorCommentId,
+    staleTime: 0,
+  });
+}
 
 export type MyIssuesFilter = Pick<
   ListIssuesParams,
@@ -217,18 +246,21 @@ export type AssigneeGroupedIssuesFilter = Omit<
 export const ISSUE_PAGE_SIZE = 50;
 
 /**
- * Statuses fetched and paginated into the list/board cache — every lifecycle
- * status, `cancelled` included. `cancelled` is a first-class default status
- * (MUL-4290), so it lives in the cache and renders like any other column;
- * there is no separate "visible board" subset. This constant governs
- * fetch/cache membership.
+ * CATEGORIES fetched and paginated into the list/board cache — all four,
+ * `closed` included. It lives in the cache even when hidden by the surface's
+ * display preferences; there is no separate
+ * "visible board" subset. This constant governs fetch/cache membership.
+ *
+ * These are internal legacy cache buckets, not user-facing columns.
+ * Board/List use independently paged exact-key table branches; Swimlane uses
+ * compound status branches. Never derive visible column identity from this cache.
  */
-export const PAGINATED_STATUSES: readonly IssueStatus[] = ALL_STATUSES;
+export const PAGINATED_CATEGORIES: readonly IssueStatusCategory[] = ALL_STATUSES;
 
 /** Flatten a bucketed response to a single Issue[] for consumers that want the whole list. */
 export function flattenIssueBuckets(data: ListIssuesCache) {
   const out = [];
-  for (const status of PAGINATED_STATUSES) {
+  for (const status of PAGINATED_CATEGORIES) {
     const bucket = data.byStatus[status];
     if (bucket) out.push(...bucket.issues);
   }
@@ -237,12 +269,12 @@ export function flattenIssueBuckets(data: ListIssuesCache) {
 
 async function fetchFirstPages(filter: MyIssuesFilter = {}, sort?: IssueSortParam): Promise<ListIssuesCache> {
   const responses = await Promise.all(
-    PAGINATED_STATUSES.map((status) =>
-      api.listIssues({ status, limit: ISSUE_PAGE_SIZE, offset: 0, ...sort, ...filter }),
+    PAGINATED_CATEGORIES.map((category) =>
+      api.listIssues({ status_category: category, limit: ISSUE_PAGE_SIZE, offset: 0, ...sort, ...filter }),
     ),
   );
   const byStatus: ListIssuesCache["byStatus"] = {};
-  PAGINATED_STATUSES.forEach((status, i) => {
+  PAGINATED_CATEGORIES.forEach((status: IssueStatusCategory, i: number) => {
     const res = responses[i]!;
     byStatus[status] = { issues: res.issues, total: res.total };
   });
@@ -413,11 +445,18 @@ export function issueDetailOptions(wsId: string, id: string) {
 /**
  * Resolve a bare issue identifier ("MUL-123") to its issue, or `null`.
  *
- * Backs the Linear-style autolink: the backend `q` search matches an
- * identifier on issue NUMBER only (prefix-agnostic — `MUL-123` and `TES-123`
- * both hit number 123), so the exact `identifier === value` filter here is
- * what enforces the workspace prefix. A non-existent or wrong-prefix
- * identifier resolves to `null` and renders as plain text.
+ * Backs the Linear-style autolink. This is an EXACT lookup, so it goes to
+ * `GET /api/issues/{identifier}` — the server parses `PREFIX-NUMBER`, checks
+ * the prefix against the workspace's own `issue_prefix`, and reads the issue
+ * through the unique `(workspace_id, number)` index. A non-existent or
+ * wrong-prefix identifier 404s, which maps to `null` here and renders as
+ * plain text — the same contract the previous implementation had.
+ *
+ * It deliberately does NOT use `/api/issues/search`: that endpoint runs the
+ * workspace-wide full-text query (title/description/comment `LIKE`, ranking,
+ * and snippet subqueries) which is orders of magnitude more expensive than a
+ * point read, and autolink resolution was the dominant caller of it
+ * (MUL-6268).
  *
  * Server state → TanStack Query; the key includes `wsId` and the identifier,
  * so identical identifiers across the app share one request. Caller gates
@@ -426,14 +465,18 @@ export function issueDetailOptions(wsId: string, id: string) {
 export function issueIdentifierOptions(wsId: string, identifier: string) {
   return queryOptions({
     queryKey: issueKeys.identifier(wsId, identifier),
-    queryFn: async ({ signal }) => {
-      const res = await api.searchIssues({
-        q: identifier,
-        limit: 10,
-        include_closed: true,
-        signal,
-      });
-      return res.issues.find((i) => i.identifier === identifier) ?? null;
+    // Keep this small, cacheable lookup alive when the last mention unmounts.
+    // A remount can then share its request instead of aborting and restarting it.
+    queryFn: async () => {
+      try {
+        return await api.getIssue(identifier);
+      } catch (err) {
+        // Unknown identifier / wrong workspace prefix → render as plain text.
+        // Any other failure (401/5xx) must keep propagating so the query
+        // can retry instead of being cached as "no such issue".
+        if (err instanceof ApiError && err.status === 404) return null;
+        throw err;
+      }
     },
     // Identifier→issue mapping is effectively immutable; avoid refetch churn
     // when the same key renders across many comments/messages.
@@ -452,6 +495,18 @@ export function childIssueProgressOptions(wsId: string) {
       }
       return map;
     },
+  });
+}
+
+/** Both sides of an issue's duplicate relation: its original and its duplicates. */
+export function issueDuplicatesOptions(wsId: string, id: string) {
+  return queryOptions({
+    queryKey: issueKeys.duplicates(wsId, id),
+    queryFn: () => api.listIssueDuplicates(id),
+    // Same reason as childIssuesOptions: a mark written while this workspace
+    // is not the active realtime subscription would otherwise leave the
+    // Infinity-stale snapshot wrong when the issue is opened again.
+    refetchOnMount: "always",
   });
 }
 

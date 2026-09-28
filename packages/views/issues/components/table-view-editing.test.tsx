@@ -8,6 +8,8 @@
  * the column defs' render closures — flexRender treats those as component
  * TYPES, so React remounted every cell and the just-opened picker closed.
  */
+import { useIssueOpeningStore } from "@multica/core/issues/stores/issue-opening-store";
+import { IssuePeekActionsContext } from "../surface/peek-context";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -21,6 +23,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setApiInstance } from "@multica/core/api";
+import { useModalStore } from "@multica/core/modals";
 import type { ApiClient } from "@multica/core/api/client";
 import { issueKeys } from "@multica/core/issues/queries";
 import { ViewStoreProvider } from "@multica/core/issues/stores/view-store-context";
@@ -66,6 +69,13 @@ vi.mock("@tanstack/react-virtual", () => ({
 vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({ getActorName: () => "Someone" }),
   buildActorNameResolver: () => () => "Someone",
+}));
+
+// The assignee cell's avatar only renders for a row that HAS an assignee (the
+// run-confirm case below) and pulls in presence, images and the rest of the
+// workspace-hooks surface. None of that is under test here.
+vi.mock("../../common/actor-avatar", () => ({
+  ActorAvatar: () => <span data-testid="actor-avatar" />,
 }));
 
 const mockAuthUser = { id: "user-1", email: "t@t.co", name: "Tester" };
@@ -226,9 +236,51 @@ function Harness({
 }
 
 describe("TableView cell editors under data refresh", () => {
+  // The table's inline pickers are single-issue writes like the issue detail's,
+  // so they route on the same run-confirm gate: promoting an agent-owned issue
+  // out of backlog starts a run and must confirm first (MUL-6463). The gate's
+  // own matrix lives in ../actions/run-confirm-gate.test.ts; this only proves
+  // the table asks it instead of writing straight through.
+  it("confirms a status change that would start an agent run instead of applying it", async () => {
+    const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
+    serverIssues = [
+      {
+        ...makeIssue("c", "Parked task", "backlog"),
+        assignee_type: "agent",
+        assignee_id: "agent-1",
+      },
+    ];
+    useModalStore.getState().close();
+
+    renderWithI18n(
+      <QueryClientProvider client={queryClient}>
+        <Harness
+          childProgressMap={new Map<string, ChildProgress>()}
+          surfaceKey={`test-surface-${Math.floor(Math.random() * 1e9)}`}
+        />
+      </QueryClientProvider>,
+    );
+
+    await screen.findByText("MUL-c");
+    const row = screen.getByText("MUL-c").closest("tr")!;
+    await user.click(within(row).getByRole("button", { name: /Backlog/ }));
+    await user.click(screen.getByRole("button", { name: /^Todo$/ }));
+
+    const { modal, data } = useModalStore.getState();
+    expect(modal).toBe("issue-run-confirm");
+    expect(data).toMatchObject({
+      mode: "promote",
+      status: "todo",
+      assigneeType: "agent",
+      assigneeId: "agent-1",
+    });
+    useModalStore.getState().close();
+  });
+
   let queryClient: QueryClient;
 
   beforeEach(() => {
+    useIssueOpeningStore.setState({ openMode: "page" });
     navigationMocks.push.mockReset();
     navigationMocks.openInNewTab.mockReset();
     navigationMocks.getShareableUrl.mockReset();
@@ -247,6 +299,7 @@ describe("TableView cell editors under data refresh", () => {
       listAgents: async () => [],
       listSquads: async () => [],
       getAssigneeFrequency: async () => [],
+      listIssueStatuses: async () => ({ statuses: [] }),
       listIssueTableRows: async () => ({
         query_fingerprint: "test",
         group_key: null,
@@ -379,6 +432,33 @@ describe("TableView cell editors under data refresh", () => {
       parent_issue_identifier: "MUL-a",
       project_id: "project-1",
     });
+  });
+
+  it("uses the preferred peek for both titles and row space; Shift opens the full page instead", async () => {
+    useIssueOpeningStore.getState().setOpenMode("peek");
+    serverIssues = [makeIssue("a", "Alpha task", "todo")];
+    const peek = { open: vi.fn(), toggle: vi.fn(), close: vi.fn(), publishColumns: vi.fn() };
+    renderWithI18n(
+      <QueryClientProvider client={queryClient}>
+        <IssuePeekActionsContext.Provider value={peek}>
+          <Harness childProgressMap={new Map()} surfaceKey="test-preferred-peek" />
+        </IssuePeekActionsContext.Provider>
+      </QueryClientProvider>,
+    );
+    const row = (await screen.findByText("MUL-a")).closest("tr")!;
+    const title = within(row).getByRole("button", { name: "Alpha task" });
+    fireEvent.click(title);
+    fireEvent.click(row);
+    expect(peek.open).toHaveBeenCalledTimes(2);
+    expect(peek.open).toHaveBeenCalledWith("a");
+    expect(navigationMocks.push).not.toHaveBeenCalled();
+    // In preview mode Shift+Click opens the other target: the full page, in place.
+    fireEvent.click(title, { shiftKey: true });
+    expect(navigationMocks.push).toHaveBeenCalledWith("/test/issues/a");
+    expect(peek.toggle).not.toHaveBeenCalled();
+    fireEvent.click(row, { metaKey: true });
+    expect(navigationMocks.openInNewTab).toHaveBeenCalledWith("/test/issues/a", "MUL-a");
+    expect(peek.open).toHaveBeenCalledTimes(2);
   });
 
   it("navigates in place on plain title and row clicks; modifiers open tabs", async () => {

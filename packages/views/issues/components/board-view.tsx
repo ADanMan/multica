@@ -1,5 +1,8 @@
 "use client";
 
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
+import { cn } from "@multica/ui/lib/utils";
+
 import { useState, useCallback, useMemo, useEffect, useRef, memo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -43,6 +46,8 @@ import type {
   IssueGroupPageState,
 } from "../surface/use-issue-group-branches";
 import { useDragSettle } from "./use-drag-settle";
+import { useIssuePeekActions } from "../surface/peek-context";
+import { useBoardDragPan } from "./use-board-drag-pan";
 import { useT } from "../../i18n";
 import {
   type DragMoveUpdates,
@@ -57,6 +62,7 @@ import {
   issueMatchesGroup,
   getMoveUpdates,
   propertyGroupId,
+  projectGroupId,
 } from "../utils/drag-utils";
 
 function isStatusGroup(
@@ -65,21 +71,87 @@ function isStatusGroup(
   return group.status !== undefined;
 }
 
+interface ProjectColumnLabels {
+  noProject: string;
+  /** A project id the projects query cannot resolve — deleted, or not visible
+   *  to this member. Shares the Table's wording so one board column and one
+   *  table group row never describe the same project differently. */
+  unavailableProject: string;
+}
+
+interface BuildGroupsContext extends ProjectColumnLabels {
+  getActorName: (type: string, id: string) => string;
+  groupingProperty: IssueProperty | null;
+  projectMap: Map<string, Project> | undefined;
+  noAssigneeLabel: string;
+  noValueLabel: string;
+}
+
+/**
+ * One project column. Shared by the client fallback (columns derived from
+ * loaded cards) and the server path (columns derived from group descriptors)
+ * so the two can never describe the same project differently.
+ */
+function projectColumn(
+  id: string,
+  projectId: string | null,
+  projectMap: Map<string, Project> | undefined,
+  labels: ProjectColumnLabels,
+  totalCount?: number,
+): BoardColumnGroup {
+  const project = projectId ? projectMap?.get(projectId) ?? null : null;
+  return {
+    id,
+    title: projectId
+      ? project?.title ?? labels.unavailableProject
+      : labels.noProject,
+    projectId,
+    project,
+    totalCount,
+    createData: { project_id: projectId },
+  };
+}
+
+/**
+ * Keep the "No project" column present as a drop target — clearing a card's
+ * project by dragging has to stay possible even in a workspace where every
+ * card currently has one. A board with no columns at all is left alone: that
+ * is the surface's empty state, not a board missing one column.
+ */
+function withNoProjectColumn(
+  columns: BoardColumnGroup[],
+  projectMap: Map<string, Project> | undefined,
+  labels: ProjectColumnLabels,
+): BoardColumnGroup[] {
+  if (columns.length === 0) return columns;
+  if (columns.some((column) => column.projectId === null)) return columns;
+  // No-project sorts first server-side, so it is always in the first page of
+  // descriptors when it exists — an absent one cannot arrive with a later page.
+  return [
+    projectColumn(projectGroupId(null), null, projectMap, labels, 0),
+    ...columns,
+  ];
+}
+
 function buildGroups(
   issues: Issue[],
   visibleStatuses: IssueStatus[],
   grouping: IssueGrouping,
-  getActorName: (type: string, id: string) => string,
-  noAssigneeLabel: string,
-  groupingProperty: IssueProperty | null,
-  noValueLabel: string,
+  {
+    getActorName,
+    groupingProperty,
+    projectMap,
+    noAssigneeLabel,
+    noValueLabel,
+    ...projectLabels
+  }: BuildGroupsContext,
 ): BoardColumnGroup[] {
   if (grouping === "status") {
     return visibleStatuses.map((status) => ({
       id: statusGroupId(status),
       title: status,
       status,
-      createData: { status },
+      createData: { status: status },
     }));
   }
 
@@ -103,6 +175,26 @@ function buildGroups(
       propertyOptionId: null,
     });
     return columns;
+  }
+
+  // Project board: one column per project the loaded cards reference, plus the
+  // "No project" column. Ordering mirrors the server's group order (no-project
+  // first, then project title) so the client fallback and the paged server
+  // columns cannot disagree.
+  if (grouping === "project") {
+    const columns = new Map<string, BoardColumnGroup>();
+    for (const issue of issues) {
+      const projectId = issue.project_id ?? null;
+      const id = projectGroupId(projectId);
+      if (columns.has(id)) continue;
+      columns.set(id, projectColumn(id, projectId, projectMap, projectLabels));
+    }
+    const ordered = Array.from(columns.values()).toSorted((a, b) => {
+      if (a.projectId === null) return b.projectId === null ? 0 : -1;
+      if (b.projectId === null) return 1;
+      return a.title.localeCompare(b.title);
+    });
+    return withNoProjectColumn(ordered, projectMap, projectLabels);
   }
 
   const groups = new Map<string, BoardColumnGroup>();
@@ -182,6 +274,7 @@ function BoardViewImpl({
   const storeGrouping = useViewStore((s) => s.grouping);
   const sortBy = useViewStore((s) => s.sortBy);
   const boardWsId = useWorkspaceId();
+  const catalog = useIssueStatuses(boardWsId);
   const { data: workspaceProperties = [] } = useQuery(propertyListOptions(boardWsId));
   const groupingPropertyId = propertyIdFromViewKey(storeGrouping);
   const groupingProperty = groupingPropertyId
@@ -274,6 +367,34 @@ function BoardViewImpl({
     }
     return undefined;
   }, [getActorName, groupBranches, grouping, t]);
+  const projectColumnLabels = useMemo<ProjectColumnLabels>(
+    () => ({
+      noProject: t(($) => $.swimlane.no_project),
+      unavailableProject: t(($) => $.table.value_unavailable),
+    }),
+    [t],
+  );
+  const hydratedProjectGroups = useMemo<BoardColumnGroup[] | undefined>(() => {
+    if (grouping !== "project" || !groupBranches?.enabled) return undefined;
+    const columns = groupBranches.descriptors.flatMap(
+      (descriptor): BoardColumnGroup[] =>
+        descriptor.value.kind === "project"
+          ? [
+              projectColumn(
+                // The descriptor key, not our own: it is what `groupPagination`
+                // is keyed by. `projectGroupId` reproduces it exactly, which is
+                // what lets cards bucket into these columns at all.
+                descriptor.key,
+                descriptor.value.project_id ?? null,
+                projectMap,
+                projectColumnLabels,
+                descriptor.count,
+              ),
+            ]
+          : [],
+    );
+    return withNoProjectColumn(columns, projectMap, projectColumnLabels);
+  }, [groupBranches, grouping, projectColumnLabels, projectMap]);
   const groupPagination = useMemo(() => {
     if (!groupBranches?.enabled) return undefined;
     const grouped = new Map<string, IssueGroupPageState[]>();
@@ -320,21 +441,21 @@ function BoardViewImpl({
     () => {
       const built =
         hydratedAssigneeGroups ??
-        buildGroups(
-        issues,
-        visibleStatuses,
-        grouping,
-        getActorName,
-        t(($) => $.filters.no_assignee),
-        groupingProperty,
-        t(($) => $.board.no_value),
-        );
+        hydratedProjectGroups ??
+        buildGroups(issues, visibleStatuses, grouping, {
+          getActorName,
+          groupingProperty,
+          projectMap,
+          noAssigneeLabel: t(($) => $.filters.no_assignee),
+          noValueLabel: t(($) => $.board.no_value),
+          ...projectColumnLabels,
+        });
       return built.map((group) => ({
         ...group,
         totalCount: groupPagination?.[group.id]?.total ?? group.totalCount,
       }));
     },
-    [hydratedAssigneeGroups, issues, visibleStatuses, grouping, getActorName, groupingProperty, groupPagination, t],
+    [hydratedAssigneeGroups, hydratedProjectGroups, issues, visibleStatuses, grouping, getActorName, groupingProperty, projectMap, projectColumnLabels, groupPagination, t],
   );
   const groupIds = useMemo(
     () => new Set(groups.map((group) => group.id)),
@@ -393,6 +514,17 @@ function BoardViewImpl({
     })
   );
 
+  // Side peek steps through a column with J / K, in the order shown here.
+  const peek = useIssuePeekActions();
+  useEffect(() => {
+    peek?.publishColumns(groups.map((group) => columns[group.id] ?? EMPTY_IDS));
+  }, [peek, groups, columns]);
+  useEffect(() => () => peek?.publishColumns(null), [peek]);
+
+  // #6700: drag empty board background with the left button to pan horizontally
+  // (Trello/Linear). Card drags start on `[data-board-card]` and are ignored.
+  const pan = useBoardDragPan<HTMLDivElement>();
+
   const handleDragStart = useCallback(
     (event: DragStartEvent) => {
       isDraggingRef.current = true;
@@ -414,6 +546,8 @@ function BoardViewImpl({
         const activeCol = findColumn(prev, activeId, groupIds);
         const overCol = findColumn(prev, overId, groupIds);
         if (!activeCol || !overCol || activeCol === overCol) return prev;
+        const targetStatus = groups.find((group) => group.id === overCol)?.status;
+        if (targetStatus && catalog.entryOf(targetStatus)?.archived_at) return prev;
 
         if (sortBy !== "position") return prev;
 
@@ -426,7 +560,7 @@ function BoardViewImpl({
         return { ...prev, [activeCol]: oldIds, [overCol]: newIds };
       });
     },
-    [groupIds, sortBy, recentlyMovedRef, setColumns],
+    [groupIds, groups, catalog, sortBy, recentlyMovedRef, setColumns],
   );
 
   const handleDragEnd = useCallback(
@@ -481,12 +615,21 @@ function BoardViewImpl({
       }
 
       const map = issueMapRef.current;
+      if (finalGroup.status && map.get(activeId)?.status !== finalGroup.status && catalog.entryOf(finalGroup.status)?.archived_at) {
+        resetColumns();
+        return;
+      }
 
       if (sortBy !== "position") {
         // Cross-column: only update group (status/assignee), keep original position.
         const currentIssue = map.get(activeId);
         if (!currentIssue || issueMatchesGroup(currentIssue, finalGroup)) {
           resetColumns();
+          if (activeId !== overId) {
+            toast.info(t(($) => $.board.manual_reorder_hint), {
+              id: "issue-manual-reorder-hint",
+            });
+          }
           return;
         }
         // Optimistically move the card into the target column *now*. Without
@@ -509,7 +652,7 @@ function BoardViewImpl({
         onMoveIssue(
           activeId,
           {
-            ...getMoveUpdates(finalGroup, currentIssue.position),
+            ...getMoveUpdates(finalGroup, currentIssue.position, currentIssue),
             ...getMoveAnchors(targetIds, activeId),
           },
           beginSettle(),
@@ -538,15 +681,25 @@ function BoardViewImpl({
       onMoveIssue(
         activeId,
         {
-          ...getMoveUpdates(finalGroup, newPosition),
+          ...getMoveUpdates(finalGroup, newPosition, currentIssue),
           ...getMoveAnchors(finalIds, activeId),
         },
         beginSettle(),
       );
       applyPropertyGroupValue(finalGroup, activeId);
     },
-    [groupedIssues, groups, grouping, groupingOptionIds, onMoveIssue, groupIds, groupMap, sortBy, beginSettle, columnsRef, isDraggingRef, setColumns, applyPropertyGroupValue],
+    [groupedIssues, groups, grouping, groupingOptionIds, onMoveIssue, groupIds, groupMap, sortBy, beginSettle, columnsRef, isDraggingRef, setColumns, applyPropertyGroupValue, catalog, t],
   );
+
+  // An aborted drag (pointercancel, window resize, tab hide, Escape) fires
+  // onDragCancel instead of onDragEnd. Releasing the drag lock here keeps the
+  // column mirror resyncing with the cache afterwards — see the same handler in
+  // list-view for the touch path that makes this routine (MUL-6240).
+  const handleDragCancel = useCallback(() => {
+    isDraggingRef.current = false;
+    setActiveIssue(null);
+    setColumns(buildColumns(groupedIssues, groups, grouping, groupingOptionIds));
+  }, [groupedIssues, groups, grouping, groupingOptionIds, setColumns, isDraggingRef]);
 
   return (
     <DndContext
@@ -555,8 +708,23 @@ function BoardViewImpl({
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
+      onDragCancel={handleDragCancel}
     >
-      <div className="flex flex-1 min-h-0 gap-4 overflow-x-auto p-2">
+      <div
+        ref={pan.ref}
+        onPointerDown={pan.onPointerDown}
+        onPointerMove={pan.onPointerMove}
+        onPointerUp={pan.onPointerUp}
+        onPointerCancel={pan.onPointerCancel}
+        onLostPointerCapture={pan.onLostPointerCapture}
+        data-board-scroller=""
+        className={cn(
+          "flex flex-1 min-h-0 gap-4 overflow-x-auto p-2",
+          // While a side peek is open, a trailing spacer as wide as the panel
+          // lets every column scroll clear of it (IssuePeekHost).
+          "group-data-[peek-open]/peek:after:w-(--issue-peek-width) group-data-[peek-open]/peek:after:shrink-0 group-data-[peek-open]/peek:after:content-['']",
+        )}
+      >
         {groups.length === 0 ? (
           groupBranches?.isError ? (
             <button

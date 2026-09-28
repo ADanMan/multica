@@ -1,11 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { FilterX, ListTodo, Plus } from "lucide-react";
+import type { StoreApi } from "zustand/vanilla";
+import type { IssueViewState } from "@multica/core/issues/stores/view-store";
+import type { IssueViewBaseline } from "@multica/core/issue-views/baseline";
+import { AlertTriangle, FilterX, ListTodo, Plus } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { cn } from "@multica/ui/lib/utils";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useQuery } from "@tanstack/react-query";
+import { workspaceWakeupSummariesOptions } from "@multica/core/issues/wakeups";
 import {
   useViewStore,
   ViewStoreProvider,
@@ -35,6 +40,7 @@ import { TableView } from "../components/table-view";
 import { useT } from "../../i18n";
 import { IssueContextMenuProvider } from "../actions";
 import { IssueSurfaceActionsProvider } from "./actions-context";
+import { IssuePeekHost } from "../components/issue-peek";
 import { IssueSurfaceSelectionProvider } from "./selection-context";
 import type { IssueCreateDefaults, IssueSurfaceProps } from "./types";
 import {
@@ -55,6 +61,19 @@ interface IssueSurfaceComponentProps extends IssueSurfaceProps {
   showClientEmpty?: (context: IssueSurfaceRenderContext) => boolean;
   batchToolbar?: "always" | "list" | "never";
   contentClassName?: string;
+}
+
+/** An explicit, caller-owned store bypasses saved views and persisted surfaces. */
+export function IssueSurfaceWithStore({ store, baseline, ...props }: Omit<IssueSurfaceComponentProps, "surfaceKey"> & {
+  store: StoreApi<IssueViewState>;
+  baseline: IssueViewBaseline;
+}) {
+  const wsId = useWorkspaceId();
+  return <ViewStoreProvider store={store}>
+    <ViewBaselineProvider baseline={baseline}>
+      <IssueSurfaceContent key={wsId} {...props} />
+    </ViewBaselineProvider>
+  </ViewStoreProvider>;
 }
 
 export function IssueSurface({
@@ -178,6 +197,9 @@ function IssueSurfaceContent({
   batchToolbar,
   contentClassName,
 }: Omit<IssueSurfaceComponentProps, "surfaceKey">) {
+  const workspaceId = useWorkspaceId();
+  // One polling owner for the whole surface; individual cards only select cache data.
+  useQuery({ ...workspaceWakeupSummariesOptions(workspaceId), refetchInterval: 10_000 });
   const { t } = useT("projects");
   const controller = useIssueSurfaceController({
     scope,
@@ -261,7 +283,17 @@ function IssueSurfaceContent({
             }
           />
         )}
-        {controller.isLoading ? (
+        {/* Every view opens the side peek on Shift+Click. The host wraps the
+            loading and empty states too, so a view switch that briefly shows
+            a skeleton keeps the peek open. */}
+        <IssuePeekHost>
+        {/* A failed status catalog precedes loading/empty/content on purpose.
+            Row fetching is suspended while it is down (a custom status filter
+            cannot be routed without it), so every branch below would render an
+            unexplained empty surface with no way out. (MUL-6243) */}
+        {controller.isStatusCatalogError ? (
+          <StatusCatalogErrorState onRetry={controller.retryStatusCatalog} />
+        ) : controller.isLoading ? (
           renderLoading ? (
             renderLoading(renderContext)
           ) : (
@@ -314,6 +346,7 @@ function IssueSurfaceContent({
               <ListView
                 issues={issues}
                 visibleStatuses={controller.visibleStatuses}
+                hiddenStatuses={controller.hiddenStatuses}
                 childProgressMap={controller.childProgressMap}
                 projectMap={controller.projectMap}
                 projectId={controller.projectId}
@@ -354,6 +387,7 @@ function IssueSurfaceContent({
             )}
           </div>
         )}
+        </IssuePeekHost>
         {shouldShowBatchToolbar && (
           <BatchActionToolbar
             issues={
@@ -373,6 +407,23 @@ function IssueSurfaceContent({
  * copy only describes the unfiltered case. The action clears exactly the
  * filters this state tests for, so it always restores content.
  */
+function StatusCatalogErrorState({ onRetry }: { onRetry: () => void }) {
+  const { t } = useT("issues");
+  return (
+    <div
+      role="alert"
+      className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-muted-foreground"
+    >
+      <AlertTriangle className="h-10 w-10 text-faint-foreground" />
+      <p className="text-body">{t(($) => $.status_catalog_error.title)}</p>
+      <p className="text-caption">{t(($) => $.status_catalog_error.hint)}</p>
+      <Button variant="outline" size="sm" className="mt-1" onClick={onRetry}>
+        {t(($) => $.status_catalog_error.retry)}
+      </Button>
+    </div>
+  );
+}
+
 function FilteredEmptyState() {
   const { t } = useT("issues");
   const clearFilters = useViewStore((s) => s.clearFilters);
@@ -388,7 +439,6 @@ function FilteredEmptyState() {
     <div className="flex flex-1 min-h-0 flex-col items-center justify-center gap-3 text-muted-foreground">
       <FilterX className="h-10 w-10 text-faint-foreground" />
       <p className="text-body">{t(($) => $.filtered_empty.title)}</p>
-      <p className="text-caption">{t(($) => $.filtered_empty.hint)}</p>
       <Button variant="outline" size="sm" className="mt-1" onClick={handleClear}>
         {t(($) => $.filtered_empty.clear_button)}
       </Button>

@@ -12,6 +12,9 @@ import {
 import { useViewStoreApi } from "@multica/core/issues/stores/view-store-context";
 import { StatusIcon } from "./status-icon";
 import { useT } from "../../i18n";
+import { useWorkspaceId } from "@multica/core/hooks";
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
+import { useStatusLabel } from "../utils/status-label";
 
 /**
  * Single source of truth for the "Hidden columns" side panel rendered by
@@ -57,12 +60,15 @@ export function HiddenColumnRow({
   total?: number;
 }) {
   const { t } = useT("issues");
+  const wsId = useWorkspaceId();
+  const labelOf = useStatusLabel(wsId);
+  const { categoryOf, colorOf, iconOf } = useIssueStatuses(wsId);
   const viewStoreApi = useViewStoreApi();
   return (
     <div className="flex items-center justify-between rounded-lg px-2.5 py-2 hover:bg-muted/50">
       <div className="flex items-center gap-2">
-        <StatusIcon status={status} className="h-3.5 w-3.5" />
-        <span className="text-body">{t(($) => $.status[status])}</span>
+        <StatusIcon category={categoryOf(status)} color={colorOf(status)} icon={iconOf(status)} status={status} className="h-3.5 w-3.5" />
+        <span className="text-body">{labelOf(status)}</span>
       </div>
       <div className="flex items-center gap-1.5">
         {total !== undefined && (

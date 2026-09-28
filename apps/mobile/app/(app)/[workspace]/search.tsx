@@ -29,7 +29,7 @@ import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import type {
   Issue,
-  IssueStatus,
+  IssueStatusCategory,
   SearchIssueResult,
   SearchProjectResult,
 } from "@multica/core/types";
@@ -40,12 +40,14 @@ import { ProjectIcon } from "@/components/ui/project-icon";
 import { ProjectStatusIcon } from "@/components/ui/project-status-icon";
 import { api } from "@/data/api";
 import { useWorkspaceStore } from "@/data/workspace-store";
+import { useT } from "@/lib/i18n";
 import {
   selectViewedIssueIds,
   useViewedIssuesStore,
 } from "@/data/viewed-issues-store";
 import { issueDetailOptions } from "@/data/queries/issues";
-import { STATUS_LABEL } from "@/lib/issue-status";
+import { issueColumnCategory } from "@/lib/issue-status";
+import { useIssueStatuses } from "@/lib/use-issue-statuses";
 import { projectStatusLabel } from "@/lib/project-status";
 import { buildSearchRows, type RowItem } from "@/lib/search-rows";
 
@@ -53,6 +55,15 @@ const DEBOUNCE_MS = 300;
 const ISSUE_LIMIT = 20;
 const PROJECT_LIMIT = 10;
 const RECENT_LIMIT = 5;
+
+// `buildSearchRows` stays pure; it supplies stable section identities and the
+// localized render owns the label lookup.
+const SEARCH_HEADER_LABELS: Record<string, string> = {
+  "h-recent": "navigation:routes.recent",
+  "h-projects": "navigation:routes.projects",
+  "h-issues": "navigation:routes.issues",
+  "h-cancelled": "issues:status.cancelled",
+};
 
 // =====================================================
 // HighlightText — mobile port of web's HighlightText
@@ -120,19 +131,16 @@ function HighlightText({
 // RowItem + buildSearchRows live in lib/search-rows.ts so the ordering rules
 // (including the cancelled partition) are testable without mounting the screen.
 
-function issueIconColor(status: IssueStatus): string {
+function issueIconColor(category: IssueStatusCategory): string {
   // Tag color for the status label at the end of an issue row.
-  // Mirrors STATUS_CONFIG.iconColor (status-icon.tsx STATUS_COLOR) so the
-  // text tint matches the leading status icon visually.
-  switch (status) {
-    case "in_progress":
+  // Mirrors STATUS_CONFIG.iconColor (status-icon.tsx CATEGORY_COLOR) so the
+  // text tint matches the leading status icon visually. Keyed on CATEGORY: a
+  // custom status inherits its category's tint, exactly as its glyph does.
+  switch (category) {
+    case "started":
       return "text-warning";
-    case "in_review":
-      return "text-success";
     case "done":
       return "text-info";
-    case "blocked":
-      return "text-destructive";
     default:
       return "text-muted-foreground";
   }
@@ -161,14 +169,21 @@ function SearchIssueRow({ item, query, slug }: SearchIssueRowProps) {
   // (server/internal/handler/issue.go:592). Keep mobile strictly aligned.
   const showSnippet =
     item.match_source === "comment" && !!item.matched_snippet;
-  const statusLabel = STATUS_LABEL[item.status as IssueStatus] ?? item.status;
+  const { colorOf, labelOf, iconOf } = useIssueStatuses();
+  const category = issueColumnCategory(item);
+  const statusLabel = labelOf(item.status);
   return (
     <Pressable
       onPress={() => navigateOnTap(slug, `/${slug}/issue/${item.id}`)}
       className="active:bg-secondary px-4 py-3"
     >
       <View className="flex-row items-center gap-3">
-        <StatusIcon status={item.status as IssueStatus} size={14} />
+        <StatusIcon
+          status={item.status}
+          category={category}
+          icon={iconOf(item.status)} color={colorOf(item.status)}
+          size={14}
+        />
         <PriorityIcon priority={item.priority} size={14} />
         <Text className="text-xs text-muted-foreground shrink-0 w-16">
           {item.identifier}
@@ -181,7 +196,7 @@ function SearchIssueRow({ item, query, slug }: SearchIssueRowProps) {
             numberOfLines={1}
           />
         </View>
-        <Text className={`text-xs shrink-0 ${issueIconColor(item.status as IssueStatus)}`}>
+        <Text className={`text-xs shrink-0 ${issueIconColor(category)}`}>
           {statusLabel}
         </Text>
       </View>
@@ -260,21 +275,28 @@ interface RecentRowProps {
 }
 
 function RecentRow({ item, slug }: RecentRowProps) {
-  const statusLabel = STATUS_LABEL[item.status as IssueStatus] ?? item.status;
+  const { colorOf, labelOf, iconOf } = useIssueStatuses();
+  const category = issueColumnCategory(item);
+  const statusLabel = labelOf(item.status);
   return (
     <Pressable
       onPress={() => navigateOnTap(slug, `/${slug}/issue/${item.id}`)}
       className="active:bg-secondary px-4 py-3"
     >
       <View className="flex-row items-center gap-3">
-        <StatusIcon status={item.status as IssueStatus} size={14} />
+        <StatusIcon
+          status={item.status}
+          category={category}
+          icon={iconOf(item.status)} color={colorOf(item.status)}
+          size={14}
+        />
         <Text className="text-xs text-muted-foreground shrink-0 w-16">
           {item.identifier}
         </Text>
         <Text className="flex-1 text-sm text-foreground" numberOfLines={1}>
           {item.title}
         </Text>
-        <Text className={`text-xs shrink-0 ${issueIconColor(item.status as IssueStatus)}`}>
+        <Text className={`text-xs shrink-0 ${issueIconColor(category)}`}>
           {statusLabel}
         </Text>
       </View>
@@ -296,6 +318,7 @@ const EMPTY_RESULTS: SearchResultsState = { issues: [], projects: [] };
 export default function SearchModal() {
   const wsId = useWorkspaceStore((s) => s.currentWorkspaceId);
   const slug = useWorkspaceStore((s) => s.currentWorkspaceSlug);
+  const { t } = useT("issues");
 
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResultsState>(EMPTY_RESULTS);
@@ -407,7 +430,7 @@ export default function SearchModal() {
         case "header":
           return (
             <Text className="px-4 pt-4 pb-1 text-xs font-medium text-muted-foreground uppercase">
-              {item.title}
+              {t(SEARCH_HEADER_LABELS[item.key] ?? item.title)}
             </Text>
           );
         case "issue":
@@ -418,7 +441,7 @@ export default function SearchModal() {
           return <RecentRow item={item.issue} slug={slug} />;
       }
     },
-    [slug],
+    [slug, t],
   );
 
   return (
@@ -433,7 +456,7 @@ export default function SearchModal() {
           <TextInput
             value={query}
             onChangeText={handleChange}
-            placeholder="Search issues and projects"
+            placeholder={t("list.search_placeholder")}
             placeholderTextColor="#a1a1aa"
             autoFocus
             autoCorrect={false}
@@ -460,12 +483,6 @@ export default function SearchModal() {
               <View className="items-center justify-center py-12 px-6">
                 <Text className="text-sm text-muted-foreground text-center">
                   No results for &ldquo;{trimmedQuery}&rdquo;
-                </Text>
-              </View>
-            ) : !trimmedQuery && recentIssues.length === 0 ? (
-              <View className="items-center justify-center py-12 px-6">
-                <Text className="text-sm text-muted-foreground text-center">
-                  Type to search issues and projects.
                 </Text>
               </View>
             ) : null

@@ -6,48 +6,39 @@ import { useSortable, defaultAnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { Issue, IssueProperty, Project, UpdateIssueRequest } from "@multica/core/types";
-import { stripChannelMediaMarkers } from "@multica/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { propertyListOptions } from "@multica/core/properties";
 import { CustomPropertyValueDisplay } from "./pickers/custom-property-picker";
+import { descriptionPreview } from "./description-preview";
 import { formatDateOnly, isPastDateOnly } from "@multica/core/issues/date";
 import { CalendarClock, CalendarDays } from "lucide-react";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PropertyIcon } from "../../common/property-icon";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
-import { useTimeAgo } from "../../i18n";
+import { useLocale, useT, useTimeAgo } from "../../i18n";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { PriorityIcon } from "./priority-icon";
 import { PriorityPicker, AssigneePicker, StartDatePicker, DueDatePicker } from "./pickers";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
+import { propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
 import { ProgressRing } from "./progress-ring";
 import type { ChildProgress } from "./list-row";
 import { IssueActionsContextMenu } from "../actions";
 import { LabelChip } from "../../labels/label-chip";
 import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
+import { CustomStatusChip, useIsCustomStatus } from "./custom-status-chip";
+import { IssueDuplicateOfMarker } from "./issue-duplicates";
 import { useIssueSurfaceActionsOptional } from "../surface/actions-context";
-import { useT } from "../../i18n";
-
-function formatDate(date: string): string {
-  return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
-}
-
-// Flatten description Markdown into the card's one-line preview. Channel-media
-// provenance is server-owned merge metadata, not authored content, so it is
-// stripped first: the image Markdown it annotates is removed a line below, and
-// without this the bare HTML comment survives every remaining pass and becomes
-// visible preview text. Exported for tests.
-export function descriptionPreview(markdown: string): string {
-  return stripChannelMediaMarkers(markdown)
-    .replace(/!file\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/[*_`~]+/g, "")
-    .replace(/^[\s>#]+/gm, "")
-    .replace(/\s+/g, " ")
-    .trim();
+import {
+  PEEK_TARGET_ATTR,
+  useIsIssuePeeked,
+  useIssuePeekActions,
+  useIssuePeekLinkProps,
+} from "../surface/peek-context";
+function formatDate(date: string, locale: string): string {
+  return formatDateOnly(date, { month: "short", day: "numeric" }, locale);
 }
 
 /** Stops event from bubbling to Link/drag handlers */
@@ -75,14 +66,28 @@ export const BoardCardContent = memo(function BoardCardContent({
   project?: Project;
 }) {
   const { t } = useT("issues");
+  const locale = useLocale();
   const timeAgo = useTimeAgo();
   const storeProperties = useViewStore((s) => s.cardProperties);
   const cardPropertyIds = useViewStore((s) => s.cardPropertyIds);
+  const viewMode = useViewStore((s) => s.viewMode);
+  const grouping = useViewStore((s) => s.grouping);
+  const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
+  const cardGrouping =
+    viewMode === "board"
+      ? grouping
+      : viewMode === "swimlane"
+        ? swimlaneGrouping
+        : null;
+  const groupedPropertyId = cardGrouping
+    ? propertyIdFromViewKey(cardGrouping)
+    : null;
   const cardWsId = useWorkspaceId();
   const { data: workspaceProperties = [] } = useQuery(propertyListOptions(cardWsId));
   // Custom properties toggled on in Display options, in toggle order, only
   // when this issue actually carries a value.
   const cardCustomProperties = cardPropertyIds
+    .filter((id) => id !== groupedPropertyId)
     .map((id) => workspaceProperties.find((p) => p.id === id))
     .filter((p): p is IssueProperty => !!p && issue.properties?.[p.id] !== undefined);
   const labels = issue.labels ?? [];
@@ -98,15 +103,20 @@ export const BoardCardContent = memo(function BoardCardContent({
   );
   const canEdit = editable && !!surfaceActions;
 
-  const showPriority = storeProperties.priority;
-  const showDescription = storeProperties.description && issue.description;
-  const showAssigneeSection = storeProperties.assignee;
   const hasAssignee = !!issue.assignee_type && !!issue.assignee_id;
+  const showPriority = storeProperties.priority && issue.priority !== "none";
+  const showDescription = storeProperties.description && issue.description;
+  const showAssigneeSection =
+    storeProperties.assignee && cardGrouping !== "assignee" && hasAssignee;
   const showStartDate = storeProperties.startDate && issue.start_date;
   const showDueDate = storeProperties.dueDate && issue.due_date;
-  const showProject = storeProperties.project && project;
+  const showProject =
+    storeProperties.project && cardGrouping !== "project" && project;
   const showChildProgress = storeProperties.childProgress && childProgress;
   const showLabels = storeProperties.labels && labels.length > 0;
+  // Keeps the chip row from rendering an empty flex container when the status
+  // chip is the only thing in it and it decides to render nothing.
+  const showCustomStatus = useIsCustomStatus(issue.status);
 
   const showAssigneeName = showAssigneeSection && hasAssignee && !showStartDate && !showDueDate;
   const showUpdatedHint = showAssigneeName && !showChildProgress;
@@ -127,7 +137,7 @@ export const BoardCardContent = memo(function BoardCardContent({
             <button
               type="button"
               aria-label={priorityLabel}
-              className="inline-flex size-5 shrink-0 items-center justify-center rounded hover:bg-muted/60"
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded-xs hover:bg-muted/60"
             >
               <PriorityIcon priority={issue.priority} />
             </button>
@@ -157,6 +167,7 @@ export const BoardCardContent = memo(function BoardCardContent({
         actorId={issue.assignee_id!}
         size="sm"
         enableHoverCard
+        profileLink={false}
         className="shrink-0"
       />
       {assigneeName && (
@@ -186,12 +197,13 @@ export const BoardCardContent = memo(function BoardCardContent({
   const showRightMeta = !!showStartDate || !!showDueDate || !!showChildProgress || showUpdatedHint;
 
   return (
-    <div className="rounded-lg border-[0.5px] border-surface-border bg-surface py-3 px-2.5 shadow-[var(--surface-shadow)] transition-colors group-hover/card:border-foreground/15 group-hover/card:bg-surface-hover group-data-[popup-open]/card:border-foreground/15 group-data-[popup-open]/card:bg-surface-hover">
+    <div className="rounded-lg border-[0.5px] border-surface-border bg-surface py-3 px-2.5 shadow-[var(--surface-shadow)] transition-colors group-hover/card:border-foreground/15 group-hover/card:bg-surface-hover group-data-[popup-open]/card:border-foreground/15 group-data-[popup-open]/card:bg-surface-hover group-data-[peeked]/card:ring-2 group-data-[peeked]/card:ring-brand/50">
       {/* Row 1: priority + identifier (left), agent activity + assignee (right) */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           {priorityIconNode}
           <p className="text-caption text-muted-foreground truncate">{issue.identifier}</p>
+          <IssueDuplicateOfMarker issue={issue} insideLink />
         </div>
         <IssueAgentActivityIndicator issueId={issue.id} />
       </div>
@@ -211,18 +223,26 @@ export const BoardCardContent = memo(function BoardCardContent({
         );
       })()}
 
-      {/* Chip row: project + labels + custom property values */}
-      {(showProject || showLabels || cardCustomProperties.length > 0) && (
+      {/* Chip row: status + project + labels + custom property values.
+          The status chip renders only for a CUSTOM status — the column header
+          already names the category. (MUL-6243) */}
+      {(showCustomStatus || showProject || showLabels || cardCustomProperties.length > 0) && (
         <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+          <CustomStatusChip status={issue.status} />
           {showProject && (
             <span className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5 text-micro text-muted-foreground max-w-[160px]">
               <ProjectIcon project={project} size="sm" />
               <span className="truncate">{project!.title}</span>
             </span>
           )}
-          {showLabels && labels.map((label) => (
+          {showLabels && labels.slice(0, 2).map((label) => (
             <LabelChip key={label.id} label={label} />
           ))}
+          {showLabels && labels.length > 2 && (
+            <span className="text-micro text-muted-foreground">
+              +{labels.length - 2}
+            </span>
+          )}
           {cardCustomProperties.map((property) => (
             <span
               key={property.id}
@@ -254,7 +274,7 @@ export const BoardCardContent = memo(function BoardCardContent({
                       trigger={
                         <span className="flex items-center gap-1 text-caption text-muted-foreground">
                           <CalendarClock className="size-3" />
-                          {formatDate(issue.start_date!)}
+                          {formatDate(issue.start_date!, locale)}
                         </span>
                       }
                     />
@@ -262,7 +282,7 @@ export const BoardCardContent = memo(function BoardCardContent({
                 ) : (
                   <span className="flex shrink-0 items-center gap-1 text-caption text-muted-foreground">
                     <CalendarClock className="size-3" />
-                    {formatDate(issue.start_date!)}
+                    {formatDate(issue.start_date!, locale)}
                   </span>
                 )
               )}
@@ -281,7 +301,7 @@ export const BoardCardContent = memo(function BoardCardContent({
                           }`}
                         >
                           <CalendarDays className="size-3" />
-                          {formatDate(issue.due_date!)}
+                          {formatDate(issue.due_date!, locale)}
                         </span>
                       }
                     />
@@ -295,7 +315,7 @@ export const BoardCardContent = memo(function BoardCardContent({
                     }`}
                   >
                     <CalendarDays className="size-3" />
-                    {formatDate(issue.due_date!)}
+                    {formatDate(issue.due_date!, locale)}
                   </span>
                 )
               )}
@@ -338,6 +358,9 @@ export const DraggableBoardCard = memo(function DraggableBoardCard({
   disableSorting?: boolean;
 }) {
   const p = useWorkspacePaths();
+  const peek = useIssuePeekActions();
+  const peeked = useIsIssuePeeked(issue.id);
+  const peekLinkProps = useIssuePeekLinkProps(issue.id);
   const {
     attributes,
     listeners,
@@ -362,14 +385,31 @@ export const DraggableBoardCard = memo(function DraggableBoardCard({
       <div
         ref={setNodeRef}
         style={style}
+        data-board-card=""
+        {...{ [PEEK_TARGET_ATTR]: issue.id }}
+        data-peeked={peeked ? "" : undefined}
         {...attributes}
         {...listeners}
         className={`group/card ${isDragging ? "opacity-30" : ""}`}
+        onKeyDown={
+          peek
+            ? (e) => {
+                // Space peeks the focused card (the card itself or its link,
+                // never a picker button inside it). The board registers no
+                // keyboard drag sensor, so Space is free here.
+                if (e.key !== " " || e.repeat) return;
+                if (e.target !== e.currentTarget && (e.target as HTMLElement).tagName !== "A") return;
+                e.preventDefault();
+                peek.toggle(issue.id);
+              }
+            : undefined
+        }
       >
         <AppLink
           href={p.issueDetail(issue.id)}
           newTabTitle={issue.identifier}
           className={`group block transition-colors ${isDragging ? "pointer-events-none" : ""}`}
+          {...peekLinkProps}
         >
           <BoardCardContent
             issue={issue}

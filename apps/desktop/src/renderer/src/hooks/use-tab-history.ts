@@ -1,5 +1,16 @@
-import { useCallback, useEffect } from "react";
-import { useTabStore, useActiveTabHistory } from "@/stores/tab-store";
+import { useCallback, useEffect, useMemo } from "react";
+import {
+  browsingHistoryKeyForUrl,
+  useTabStore,
+  useActiveBrowsingHistory,
+  useActiveBrowsingHistoryTitles,
+  useActiveTabHistory,
+} from "@/stores/tab-store";
+
+export interface BrowsingHistoryEntry {
+  url: string;
+  title?: string;
+}
 
 /**
  * Shell back/forward for the active tab (MUL-4741 session architecture).
@@ -11,7 +22,17 @@ import { useTabStore, useActiveTabHistory } from "@/stores/tab-store";
  * direction hints, no router.navigate(±1).
  */
 export function useTabHistory() {
-  const { historyIndex, historyLength } = useActiveTabHistory();
+  const { historyIndex, historyLength, historyEntries } = useActiveTabHistory();
+  const browsingHistoryUrls = useActiveBrowsingHistory();
+  const browsingHistoryTitles = useActiveBrowsingHistoryTitles();
+  const browsingHistory = useMemo<BrowsingHistoryEntry[]>(
+    () =>
+      browsingHistoryUrls.map((url) => ({
+        url,
+        title: browsingHistoryTitles[browsingHistoryKeyForUrl(url)],
+      })),
+    [browsingHistoryTitles, browsingHistoryUrls],
+  );
 
   const canGoBack = historyIndex > 0;
   const canGoForward = historyIndex < historyLength - 1;
@@ -24,7 +45,20 @@ export function useTabHistory() {
     useTabStore.getState().goForward();
   }, []);
 
-  return { canGoBack, canGoForward, goBack, goForward };
+  const goToHistoryIndex = useCallback((index: number) => {
+    useTabStore.getState().goToHistoryIndex(index);
+  }, []);
+
+  return {
+    canGoBack,
+    canGoForward,
+    historyEntries,
+    historyIndex,
+    browsingHistory,
+    goBack,
+    goForward,
+    goToHistoryIndex,
+  };
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -36,10 +70,13 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 /**
  * Keyboard and mouse back/forward for the active tab's history:
- * Cmd/Ctrl+[ / ] and Cmd/Ctrl+←/→ (browser convention), plus mouse side
- * buttons 3/4. The renderer's mouseup is the ONE cross-platform source for
- * side buttons — the main process deliberately does not forward
- * `app-command` (Windows/Linux emit both, which would double-navigate).
+ * Cmd/Ctrl+←/→ (browser convention), plus mouse side buttons 3/4. The
+ * Cmd/Ctrl+[ / ] chords are handled by the shared shortcut registry
+ * (packages/core/shortcuts via <GlobalShortcuts>) instead, so they stay
+ * rebindable and identical on web and desktop. The renderer's mouseup is the
+ * ONE cross-platform source for side buttons — the main process deliberately
+ * does not forward `app-command` (Windows/Linux emit both, which would
+ * double-navigate).
  */
 export function useNavigationInputBindings() {
   const { goBack, goForward } = useTabHistory();
@@ -48,8 +85,15 @@ export function useNavigationInputBindings() {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod || e.altKey || e.shiftKey) return;
-      const back = e.key === "[" || e.key === "ArrowLeft";
-      const forward = e.key === "]" || e.key === "ArrowRight";
+      // Cmd/Ctrl+[ and +] are intentionally NOT handled here: they are
+      // registered as goBack/goForward in packages/core/shortcuts and driven
+      // by <GlobalShortcuts>, so both web and desktop share one rebindable
+      // binding. Handling the brackets here too would double-navigate on
+      // desktop (DesktopShell mounts both this window listener and the
+      // document-level GlobalShortcuts), which only shows up on a history
+      // stack of 3+ because stepHistory clamps at the ends.
+      const back = e.key === "ArrowLeft";
+      const forward = e.key === "ArrowRight";
       if (!back && !forward) return;
       // In editable contexts these chords belong to the text field:
       // cmd+arrow moves the caret to the line edge, cmd+bracket indents.

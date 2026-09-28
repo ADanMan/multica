@@ -180,7 +180,8 @@ export function DesktopNavigationProvider({
     const { pathname, suffix } = splitTabUrl(url);
     const hashIdx = suffix.indexOf("#");
     const search = hashIdx === -1 ? suffix : suffix.slice(0, hashIdx);
-    return { pathname, search };
+    const hash = hashIdx === -1 ? "" : suffix.slice(hashIdx);
+    return { pathname, search, hash };
   }, [activeUrl]);
 
   const adapter: NavigationAdapter = useMemo(
@@ -206,6 +207,9 @@ export function DesktopNavigationProvider({
       back: () => {
         useTabStore.getState().goBack();
       },
+      forward: () => {
+        useTabStore.getState().goForward();
+      },
       // The active tab's virtual history, same source the shell's back button
       // reads. A tab opened straight onto a destination sits at index 0 and
       // has nothing behind it.
@@ -215,6 +219,9 @@ export function DesktopNavigationProvider({
       },
       pathname: location.pathname,
       searchParams: new URLSearchParams(location.search),
+      // The tab's URL is the only place the fragment survives on desktop: the
+      // renderer's own `window.location` is the packaged file:// page.
+      hash: location.hash,
       openInNewTab: (
         path: string,
         title?: string,

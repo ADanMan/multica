@@ -1,8 +1,12 @@
 "use client";
 
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
+import { useStatusLabel } from "../utils/status-label";
+import { NO_PROPERTY_VALUE } from "../utils/filter";
 import { useMemo, type ReactNode } from "react";
 import {
   CalendarDays,
+  CircleDashed,
   CircleDot,
   FolderKanban,
   SignalHigh,
@@ -16,8 +20,10 @@ import { Button } from "@multica/ui/components/ui/button";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { memberListOptions, agentListOptions, squadListOptions } from "@multica/core/workspace/queries";
 import { projectListOptions } from "@multica/core/projects/queries";
+import { PROJECT_STATUS_CONFIG } from "@multica/core/projects/config";
 import { labelListOptions } from "@multica/core/labels/queries";
 import { propertyListOptions } from "@multica/core/properties";
+import { isActorPropertyType, isScalarPropertyType, parseActorRef, propertyFilterValueKey, PROPERTY_FILTER_OP_SYMBOLS, type PropertyFilterValue } from "@multica/core/types";
 import {
   type ActorFilterValue,
   type FilterDimension,
@@ -32,6 +38,7 @@ import { useViewStore, useViewStoreApi } from "@multica/core/issues/stores/view-
 import { StatusIcon } from "./status-icon";
 import { PriorityIcon } from "./priority-icon";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { useProjectStatusLabels } from "../../projects/components/labels";
 import { useT } from "../../i18n";
 
 /** One rendered chip: a dimension with its selected values summarised. */
@@ -70,6 +77,59 @@ function IconStack({ children }: { children: ReactNode[] }) {
         </span>
       ))}
     </span>
+  );
+}
+
+/**
+ * Name lookup for chip values, keyed the way filters actually store actors.
+ *
+ * Members are keyed by `user_id`, NOT by the membership row id: every actor
+ * filter value — assignee, creator, and actor properties — carries the user
+ * id. Keying by `Member.id` silently resolved nothing (MUL-6286 review).
+ *
+ * Returns undefined for anything unresolved so the caller can omit it, rather
+ * than rendering a placeholder like "Unknown".
+ */
+export function buildChipActorNames(
+  members: readonly { user_id: string; name: string }[],
+  agents: readonly { id: string; name: string }[],
+  squads: readonly { id: string; name: string }[],
+): (actor: ActorFilterValue) => string | undefined {
+  const byKey = new Map<string, string>();
+  for (const m of members) byKey.set(`member:${m.user_id}`, m.name);
+  for (const a of agents) byKey.set(`agent:${a.id}`, a.name);
+  for (const s of squads) byKey.set(`squad:${s.id}`, s.name);
+  return (actor: ActorFilterValue) => byKey.get(`${actor.type}:${actor.id}`);
+}
+
+/**
+ * Actor-property filter values ("member:<uuid>") as actor refs, for the avatar
+ * stack. Unparseable entries drop out — the chip degrades to fewer avatars
+ * rather than rendering a broken one.
+ */
+export function actorFilterValues(selected: PropertyFilterValue[]): ActorFilterValue[] {
+  return selected
+    .map((value) => parseActorRef(value))
+    .filter((ref): ref is NonNullable<ReturnType<typeof parseActorRef>> => ref !== null)
+    .map((ref) => ({ type: ref.kind, id: ref.id }));
+}
+
+/**
+ * Whether any active property filter targets an actor-typed definition.
+ *
+ * The chips bar loads each directory lazily, and actor properties are the one
+ * property type whose chip needs the member directory to say anything useful:
+ * their values are references, not config options, so without this the chip
+ * can only render a bare count (MUL-6286 review).
+ */
+export function hasActorPropertyFilterSelection(
+  propertyFilters: Record<string, PropertyFilterValue[]>,
+  properties: { id: string; type: string }[],
+): boolean {
+  return Object.entries(propertyFilters).some(
+    ([propertyId, selected]) =>
+      selected.length > 0 &&
+      isActorPropertyType(properties.find((p) => p.id === propertyId)?.type ?? ""),
   );
 }
 
@@ -123,7 +183,10 @@ function useFilterChips(
   baseline?: IssueViewBaseline,
 ) {
   const { t } = useT("issues");
+  const projectStatusLabels = useProjectStatusLabels();
   const wsId = useWorkspaceId();
+  const resolveStatusLabel = useStatusLabel(wsId);
+  const { categoryOf, colorOf, iconOf } = useIssueStatuses(wsId);
 
   const statusFilters = useViewStore((s) => s.statusFilters);
   const priorityFilters = useViewStore((s) => s.priorityFilters);
@@ -132,6 +195,7 @@ function useFilterChips(
   const creatorFilters = useViewStore((s) => s.creatorFilters);
   const projectFilters = useViewStore((s) => s.projectFilters);
   const includeNoProject = useViewStore((s) => s.includeNoProject);
+  const projectStatusFilters = useViewStore((s) => s.projectStatusFilters);
   const labelFilters = useViewStore((s) => s.labelFilters);
   const propertyFilters = useViewStore((s) => s.propertyFilters);
   const store = useViewStoreApi();
@@ -144,14 +208,28 @@ function useFilterChips(
     creatorFilters.length > 0 ||
     projectFilters.length > 0 ||
     includeNoProject ||
+    projectStatusFilters.length > 0 ||
     labelFilters.length > 0 ||
     Object.values(propertyFilters).some((selected) => selected.length > 0);
   const showDateChip = !!onDateFilterChange && !!dateFilter;
 
   const enabled = hasStoreFilters;
+  const { data: workspaceProperties = [] } = useQuery({
+    ...propertyListOptions(wsId),
+    enabled: enabled && Object.keys(propertyFilters).length > 0,
+  });
+  // An active actor-property filter needs the member directory too, or its
+  // chip can only render a bare count instead of who was filtered on. The
+  // catalog resolves first, so this flips true on its second render.
+  const hasActorPropertyFilter = useMemo(
+    () => hasActorPropertyFilterSelection(propertyFilters, workspaceProperties),
+    [propertyFilters, workspaceProperties],
+  );
   const { data: members = [] } = useQuery({
     ...memberListOptions(wsId),
-    enabled: enabled && (assigneeFilters.length > 0 || creatorFilters.length > 0),
+    enabled:
+      enabled &&
+      (assigneeFilters.length > 0 || creatorFilters.length > 0 || hasActorPropertyFilter),
   });
   const { data: agents = [] } = useQuery({
     ...agentListOptions(wsId),
@@ -169,18 +247,10 @@ function useFilterChips(
     ...labelListOptions(wsId),
     enabled: enabled && labelFilters.length > 0,
   });
-  const { data: workspaceProperties = [] } = useQuery({
-    ...propertyListOptions(wsId),
-    enabled: enabled && Object.keys(propertyFilters).length > 0,
-  });
-
-  const actorName = useMemo(() => {
-    const byKey = new Map<string, string>();
-    for (const m of members) byKey.set(`member:${m.id}`, m.name);
-    for (const a of agents) byKey.set(`agent:${a.id}`, a.name);
-    for (const s of squads) byKey.set(`squad:${s.id}`, s.name);
-    return (actor: ActorFilterValue) => byKey.get(`${actor.type}:${actor.id}`);
-  }, [members, agents, squads]);
+  const actorName = useMemo(
+    () => buildChipActorNames(members, agents, squads),
+    [members, agents, squads],
+  );
 
   // Inside a saved view chips show only the user's additions ON TOP of the
   // view; removing one returns the dimension to the view's values (never
@@ -200,6 +270,7 @@ function useFilterChips(
       creatorFilters: s.creatorFilters,
       projectFilters: s.projectFilters,
       includeNoProject: s.includeNoProject,
+      projectStatusFilters: s.projectStatusFilters,
       labelFilters: s.labelFilters,
       propertyFilters: s.propertyFilters,
     };
@@ -225,6 +296,12 @@ function useFilterChips(
           ...current,
           projectFilters: raw.projectFilters,
           includeNoProject: raw.includeNoProject,
+        });
+        break;
+      case "projectStatus":
+        s.resetFiltersTo({
+          ...current,
+          projectStatusFilters: raw.projectStatusFilters,
         });
         break;
       case "label":
@@ -263,13 +340,22 @@ function useFilterChips(
   const deltaNoProject = baseline
     ? includeNoProject && !baseline.includeNoProject
     : includeNoProject;
+  const deltaProjectStatuses = (
+    baseline
+      ? projectStatusFilters.filter((s) => !baseline.projectStatus.has(s))
+      : projectStatusFilters
+    // The store sanitizes on rehydrate; this keeps a member the config does
+    // not know from throwing on `.dotColor` if one ever gets past that.
+  ).filter((status) => PROJECT_STATUS_CONFIG[status] !== undefined);
   const deltaLabels = baseline
     ? labelFilters.filter((id) => !baseline.label.has(id))
     : labelFilters;
-  const deltaProperties: Record<string, string[]> = {};
+  const deltaProperties: Record<string, PropertyFilterValue[]> = {};
   for (const [id, selected] of Object.entries(propertyFilters)) {
     const fixed = baseline?.property.get(id);
-    const delta = fixed ? selected.filter((v) => !fixed.has(v)) : selected;
+    const delta = fixed
+      ? selected.filter((v) => !fixed.has(propertyFilterValueKey(v)))
+      : selected;
     if (delta.length > 0) deltaProperties[id] = delta;
   }
 
@@ -284,13 +370,20 @@ function useFilterChips(
       valueIcons: (
         <IconStack>
           {deltaStatus.slice(0, 3).map((s) => (
-            <StatusIcon key={s} status={s} className="size-3" />
+            <StatusIcon
+              key={s}
+              status={s}
+              category={categoryOf(s)}
+              color={colorOf(s)}
+              icon={iconOf(s)}
+              className="size-3"
+            />
           ))}
         </IconStack>
       ),
       value:
         onlyStatus !== undefined && deltaStatus.length === 1
-          ? t(($) => $.status[onlyStatus])
+          ? resolveStatusLabel(onlyStatus)
           : t(($) => $.filters.chip_status_count, { count: deltaStatus.length }),
       onRemove: () => clearDimension("status"),
     });
@@ -360,6 +453,29 @@ function useFilterChips(
       onRemove: () => clearDimension("project"),
     });
   }
+  if (deltaProjectStatuses.length > 0) {
+    chips.push({
+      key: "projectStatus",
+      icon: <CircleDashed className={CHIP_ICON_CLASS} />,
+      label: t(($) => $.filters.section_project_status),
+      valueIcons: (
+        // PROJECT_STATUS_CONFIG carries Tailwind classes, not CSS colors, so
+        // DotStack (inline styles) does not apply here.
+        <IconStack>
+          {deltaProjectStatuses.slice(0, 3).map((status) => (
+            <span
+              key={status}
+              className={`size-2.5 rounded-full ${PROJECT_STATUS_CONFIG[status].dotColor}`}
+            />
+          ))}
+        </IconStack>
+      ),
+      value: summarize(
+        deltaProjectStatuses.map((status) => projectStatusLabels[status]),
+      ),
+      onRemove: () => clearDimension("projectStatus"),
+    });
+  }
   if (deltaLabels.length > 0) {
     const labelById = new Map(labels.map((l) => [l.id, l]));
     chips.push({
@@ -383,16 +499,46 @@ function useFilterChips(
     // A stale filter on an archived definition is stripped by the surface
     // controller before querying; hide its chip rather than render a ghost.
     if (!definition) continue;
-    const optionName = (optionId: string): string | undefined => {
+    // Actor properties carry no config options — their values are member
+    // references, so names come from the directory and the icons are avatars.
+    const actorProperty = isActorPropertyType(definition.type);
+    const actorValues = actorProperty ? actorFilterValues(selected) : [];
+    const optionName = (member: PropertyFilterValue): string | undefined => {
+      if (member === NO_PROPERTY_VALUE) {
+        return t(($) => $.pickers.custom_property.none);
+      }
+      // Scalar operator members summarize with their operator; the comparison
+      // symbols are locale-independent, the word ops get chip phrases.
+      if (typeof member === "object") {
+        if (member.op === "contains") {
+          return t(($) => $.filters.chip_op_contains, { value: member.value });
+        }
+        if (member.op === "before") {
+          return t(($) => $.filters.chip_op_before, { value: member.value });
+        }
+        if (member.op === "after") {
+          return t(($) => $.filters.chip_op_after, { value: member.value });
+        }
+        const symbol = PROPERTY_FILTER_OP_SYMBOLS[member.op] ?? member.op;
+        return `${symbol} ${member.value}`;
+      }
+      if (actorProperty) {
+        const ref = parseActorRef(member);
+        return ref ? actorName({ type: ref.kind, id: ref.id }) : undefined;
+      }
       if (definition.type === "checkbox") {
-        return optionId === "true"
+        return member === "true"
           ? t(($) => $.pickers.custom_property.true_label)
           : t(($) => $.pickers.custom_property.false_label);
       }
-      return definition.config.options?.find((o) => o.id === optionId)?.name;
+      // Scalar properties have no option list — the filter value IS the label.
+      if (isScalarPropertyType(definition.type)) {
+        return member;
+      }
+      return definition.config.options?.find((o) => o.id === member)?.name;
     };
     const optionColors =
-      definition.type === "checkbox"
+      definition.type === "checkbox" || actorProperty
         ? []
         : selected
             .map((id) => definition.config.options?.find((o) => o.id === id)?.color)
@@ -401,7 +547,11 @@ function useFilterChips(
       key: `property:${propertyId}`,
       icon: <Tag className={CHIP_ICON_CLASS} />,
       label: definition.name,
-      valueIcons: optionColors.length > 0 ? <DotStack colors={optionColors} /> : undefined,
+      valueIcons: actorValues.length > 0 ? (
+        <AvatarStack actors={actorValues} />
+      ) : optionColors.length > 0 ? (
+        <DotStack colors={optionColors} />
+      ) : undefined,
       value: summarize(selected.map(optionName)),
       onRemove: () => clearDimension(`property:${propertyId}`),
     });

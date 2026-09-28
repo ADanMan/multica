@@ -1,6 +1,6 @@
 -- name: CreateChatSession :one
-INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id)
-VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'))
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id, is_agent_intro, project_id, id)
+VALUES ($1, $2, $3, $4, (SELECT runtime_id FROM agent WHERE id = $2), $5, sqlc.narg('project_id'), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()))
 RETURNING *;
 
 -- name: ClearChatSessionProjectByProject :exec
@@ -23,27 +23,18 @@ WHERE id = $1 AND workspace_id = $2;
 -- A channel command is a durable control-plane record, not a public chat turn.
 -- Channel-created sessions therefore become public only after they contain a
 -- non-command message. Empty first-party sessions stay public so the member can
--- open a newly-created Web Chat and send its first message. channel_ingested is
--- the immutable fallback when a channel binding has since been removed.
+-- open a newly-created Web Chat and send its first message. The explicit marker
+-- is durable, so removing an installation cannot change list visibility.
 SELECT cs.* FROM chat_session AS cs
 WHERE cs.id = $1
   AND cs.workspace_id = $2
   AND (
+    cs.explicitly_created_at IS NOT NULL
+    OR
     EXISTS (
       SELECT 1 FROM chat_message AS public_message
       WHERE public_message.chat_session_id = cs.id
         AND public_message.message_kind != 'channel_command'
-    )
-    OR (
-      NOT EXISTS (
-        SELECT 1 FROM channel_chat_session_binding AS binding
-        WHERE binding.chat_session_id = cs.id
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM chat_message AS channel_message
-        WHERE channel_message.chat_session_id = cs.id
-          AND channel_message.channel_ingested
-      )
     )
   );
 
@@ -72,18 +63,9 @@ LEFT JOIN LATERAL (
 ) lm ON true
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2 AND cs.status = 'active'
   AND (
+    cs.explicitly_created_at IS NOT NULL
+    OR
     lm.created_at IS NOT NULL
-    OR (
-      NOT EXISTS (
-        SELECT 1 FROM channel_chat_session_binding AS binding
-        WHERE binding.chat_session_id = cs.id
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM chat_message AS channel_message
-        WHERE channel_message.chat_session_id = cs.id
-          AND channel_message.channel_ingested
-      )
-    )
   )
 ORDER BY (cs.pinned_at IS NOT NULL) DESC, cs.pinned_at DESC, COALESCE(lm.created_at, cs.updated_at) DESC;
 
@@ -118,18 +100,9 @@ LEFT JOIN LATERAL (
 ) lm ON true
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2
   AND (
+    cs.explicitly_created_at IS NOT NULL
+    OR
     lm.created_at IS NOT NULL
-    OR (
-      NOT EXISTS (
-        SELECT 1 FROM channel_chat_session_binding AS binding
-        WHERE binding.chat_session_id = cs.id
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM chat_message AS channel_message
-        WHERE channel_message.chat_session_id = cs.id
-          AND channel_message.channel_ingested
-      )
-    )
   )
 ORDER BY (cs.pinned_at IS NOT NULL) DESC, cs.pinned_at DESC, COALESCE(lm.created_at, cs.updated_at) DESC;
 
@@ -196,6 +169,63 @@ ORDER BY COALESCE(lm.created_at, d.updated_at, cs.updated_at) DESC;
 -- name: UpdateChatSessionTitle :one
 UPDATE chat_session SET title = $2, updated_at = now()
 WHERE id = $1
+RETURNING *;
+
+-- name: MarkChatSessionExplicitlyCreated :one
+UPDATE chat_session
+SET explicitly_created_at = COALESCE(explicitly_created_at, now())
+WHERE id = $1
+RETURNING *;
+
+-- name: InitializeChatSessionTitle :one
+UPDATE chat_session AS session
+SET title = @title
+WHERE session.id = @id
+  AND session.title = ''
+  AND NOT EXISTS (
+    SELECT 1 FROM chat_message AS message
+    WHERE message.chat_session_id = session.id
+      AND message.role = 'user'
+      AND message.message_kind != 'channel_command'
+  )
+RETURNING *;
+
+-- name: ReplaceImplicitChatSessionTitle :one
+-- Hidden channel sessions were not user-visible or manually renameable before
+-- their first ordinary turn. Replace the legacy platform-generic title (or the
+-- new empty placeholder) under the append transaction's route fence. An empty
+-- title deliberately prepares a media-only first turn for attachment naming.
+UPDATE chat_session AS session
+SET title = @title
+WHERE session.id = @id
+  AND session.explicitly_created_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM chat_message AS message
+    WHERE message.chat_session_id = session.id
+      AND message.role = 'user'
+      AND message.message_kind != 'channel_command'
+  )
+RETURNING *;
+
+-- name: InitializeChatSessionMediaTitle :one
+UPDATE chat_session AS session
+SET title = @title
+WHERE session.id = @id
+  AND session.title = ''
+  AND EXISTS (
+    SELECT 1 FROM chat_message AS message
+    WHERE message.id = @message_id
+      AND message.chat_session_id = session.id
+      AND message.role = 'user'
+      AND message.message_kind != 'channel_command'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM chat_message AS other_message
+    WHERE other_message.chat_session_id = session.id
+      AND other_message.role = 'user'
+      AND other_message.message_kind != 'channel_command'
+      AND other_message.id != @message_id
+  )
 RETURNING *;
 
 -- name: UpdateChatSessionProject :one
@@ -301,6 +331,12 @@ WHERE id = sqlc.arg('id')
 -- makes the late pin safe: a NEWER task on this chat that already recorded a
 -- session owns the pointer, and a straggler must not drag the conversation
 -- backwards onto the turn the user interrupted.
+--
+-- The newer-task lookup depends on
+-- idx_agent_task_queue_chat_session (migration 472). Neither chat_pending_v3
+-- nor chat_terminal_resume can replace it: this guard spans both in-flight and
+-- terminal tasks and compares created_at; the broader index also serves the
+-- chat_session foreign-key delete lookup.
 UPDATE chat_session cs
 SET session_id = t.session_id,
     runtime_id = t.runtime_id,
@@ -331,6 +367,14 @@ WHERE t.id = sqlc.arg('task_id')
 SELECT id FROM chat_session
 WHERE id = $1
 FOR UPDATE;
+
+-- name: LockChatSessionForAppend :one
+-- The append transaction's first lock. FOR KEY SHARE remains compatible with
+-- task enqueue's FOR NO KEY UPDATE while establishing chat_session -> binding
+-- -> generation order before the later TouchChatSession update.
+SELECT id FROM chat_session
+WHERE id = $1
+FOR KEY SHARE;
 
 -- name: LockChatSessionForRuntimeBind :one
 -- Acquires an exclusive (FOR UPDATE) row lock on chat_session(id), serialising
@@ -440,7 +484,8 @@ WHERE id = $1;
 -- 'no_response' to mark a visible turn with no text output (MUL-4351).
 INSERT INTO chat_message (
     chat_session_id, role, content, task_id, failure_reason, elapsed_ms,
-    message_kind, quick_actions, channel_media_pending_until, channel_ingested
+    message_kind, quick_actions, channel_media_pending_until, channel_ingested,
+    channel_context_revision, id
 )
 VALUES (
     $1, $2, $3, sqlc.narg(task_id), sqlc.narg(failure_reason), sqlc.narg(elapsed_ms),
@@ -454,7 +499,9 @@ VALUES (
     -- fallback window.
     CASE WHEN sqlc.narg(channel_media_pending_secs)::float8 IS NULL THEN NULL
          ELSE now() + make_interval(secs => sqlc.narg(channel_media_pending_secs)::float8) END,
-    COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE)
+    COALESCE(sqlc.narg(channel_ingested)::boolean, FALSE),
+    sqlc.narg(channel_context_revision),
+    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
 
@@ -475,6 +522,107 @@ SELECT EXISTS (
       AND channel_ingested
 ) AS channel_ingested;
 
+-- name: GetTaskChannelOrigin :one
+-- The whole origin question for one completed task in one round trip: is the
+-- task row still there, and did its input arrive over a channel?
+--
+-- This answers exactly what engine.TaskInputIsChannelIngested answers, in one
+-- read instead of two (GetAgentTask, then TaskHasChannelIngestedMessages). That
+-- function is the definition; this is a transcription of it, not an improvement
+-- on it. Both halves are load-bearing:
+--
+--   * A task with NO input batch owner is channel-ingested. Migration 158 left
+--     both legacy direct rows and channel tasks NULL here, so the owner cannot
+--     say which one a row was, and the adapters that read this deliver by
+--     default — the behaviour #5645 shipped. Keying the EXISTS on the task's
+--     own id instead (COALESCE(chat_input_task_id, id)) silently stops
+--     delivering the auto-retry of a legacy channel task: CreateRetryTask
+--     copies a NULL owner verbatim, on purpose (see agent.sql), and the clone
+--     owns no messages — so it reads as web UI while CopyChannelTaskDelivery
+--     has already given it the room's route.
+--   * Otherwise the verdict is the batch OWNER'S, not the task's. An auto-retry
+--     clone inherits its parent's chat_input_task_id while the user's message
+--     stays tagged with the parent, so reading the owner is what lets the clone
+--     reach the verdict its parent already has (MUL-4351).
+--
+-- NO ROW means the task is gone — cancelled and reaped while its ending was in
+-- flight. Callers receive pgx.ErrNoRows and must not fold that into "asked in
+-- the web UI": it is the absence of a verdict, not a negative one, and the two
+-- are recorded differently.
+--
+-- One round trip rather than two because this read is SYNCHRONOUS ON THE
+-- COMPLETION RESPONSE. It runs inside events.Bus.Publish
+-- (internal/events/bus.go:61-76), below TaskService.broadcastChatDone
+-- (internal/service/task.go:7330) and CompleteTaskWithTransition
+-- (internal/service/task.go:4518), which the daemon's POST /tasks/{id}/complete
+-- waits for before it answers (internal/handler/daemon.go:4269).
+--
+-- batch_owner_unknown IS THE SAME FACT, REPORTED SEPARATELY, and it exists for
+-- one reader: the log level on a turn that has no delivery row.
+--
+-- channel_ingested above says "deliver this", and for a NULL owner it says so
+-- without evidence — which is right, because delivering is the safe side and
+-- the auto-retry of a legacy channel turn depends on it. Warning is the other
+-- direction: a missing route is worth paging an operator about only when
+-- something actually established the turn was a channel's. A NULL owner
+-- establishes nothing, so a missing route on one of those is not evidence of a
+-- lost reply; migration 158 left legacy web rows and channel rows alike NULL
+-- here, and reading it as "channel" would put the loudest line this adapter has
+-- on a pre-158 web turn that auto-retried.
+--
+-- So one verdict, two readings: deliver on the open side, warn on the closed
+-- one. The query reports both and chooses neither.
+--
+-- Plan: agent_task_queue_pkey for the row, idx_chat_message_input_owner for the
+-- EXISTS. Neither side scans.
+SELECT (
+    task.chat_input_task_id IS NULL
+    OR EXISTS (
+        SELECT 1
+        FROM chat_message
+        WHERE task_id = task.chat_input_task_id
+          AND role = 'user'
+          AND channel_ingested
+    )
+)::boolean AS channel_ingested,
+    (task.chat_input_task_id IS NULL)::boolean AS batch_owner_unknown
+FROM agent_task_queue AS task
+WHERE task.id = $1;
+
+-- name: SetChatMessageChannelOutboundProvenanceByTask :execrows
+-- The assistant row is committed before EventChatDone is published. Attach the
+-- external identifiers produced by the adapter to that durable turn so a live
+-- provider-history reader can apply the same context-generation boundary as
+-- the stored transcript. A send that succeeds but cannot record provenance is
+-- deliberately treated as unknown (and therefore excluded from generation >1).
+UPDATE chat_message
+SET channel_outbound_type = @channel_type,
+    channel_outbound_installation_id = @installation_id,
+    channel_outbound_chat_id = @channel_chat_id,
+    channel_outbound_message_ids = @message_ids::text[]
+WHERE task_id = @task_id
+  AND role = 'assistant';
+
+-- name: ListChannelOutboundMessageIDsForContext :many
+-- Assistant generation is inherited from its owning task, matching
+-- ListChatMessagesPageForChannelContext. Provider IDs are scoped by session,
+-- adapter, and immutable generation before being trusted as agent context.
+SELECT external.message_id::text
+FROM chat_message AS message
+JOIN agent_task_queue AS owner ON owner.id = message.task_id
+CROSS JOIN LATERAL unnest(message.channel_outbound_message_ids) AS external(message_id)
+WHERE message.chat_session_id = @chat_session_id
+  AND message.role = 'assistant'
+  AND message.channel_outbound_type = @channel_type
+  AND message.channel_outbound_installation_id = @installation_id
+  AND message.channel_outbound_chat_id = @channel_chat_id
+  AND message.channel_outbound_message_ids IS NOT NULL
+  AND external.message_id = ANY(@candidate_message_ids::text[])
+  AND (
+      owner.channel_context_revision = @channel_context_revision
+      OR (@channel_context_revision = 1 AND owner.channel_context_revision IS NULL)
+  );
+
 -- name: GetChannelMediaPendingUntil :one
 -- The latest unexpired media deadline gates a channel task. Using a durable
 -- task fire_at means a process restart still produces the placeholder fallback.
@@ -487,6 +635,14 @@ FROM chat_message
 WHERE chat_session_id = $1
   AND role = 'user'
   AND message_kind != 'channel_command'
+  AND (
+      sqlc.narg('channel_context_revision')::bigint IS NULL
+      OR channel_context_revision = sqlc.narg('channel_context_revision')::bigint
+      OR (
+          sqlc.narg('channel_context_revision')::bigint = 1
+          AND channel_context_revision IS NULL
+      )
+  )
   AND channel_media_pending_until > now()
 ORDER BY channel_media_pending_until DESC
 LIMIT 1;
@@ -539,10 +695,20 @@ WHERE id = $1 AND role = 'user';
 -- pre-ownership rows of a legacy session are never swept into a new batch.
 UPDATE chat_message AS message
 SET task_id = @task_id
+FROM agent_task_queue AS task
 WHERE message.chat_session_id = @chat_session_id
+  AND task.id = @task_id
   AND message.role = 'user'
   AND message.task_id IS NULL
   AND message.message_kind != 'channel_command'
+  AND (
+      task.channel_context_revision IS NULL
+      OR message.channel_context_revision = task.channel_context_revision
+      OR (
+          task.channel_context_revision = 1
+          AND message.channel_context_revision IS NULL
+      )
+  )
   AND NOT EXISTS (
       SELECT 1
       FROM chat_message AS prior
@@ -555,6 +721,26 @@ WHERE message.chat_session_id = @chat_session_id
         AND (prior.created_at, prior.id) > (message.created_at, message.id)
         AND (prior_batch.id IS NULL OR prior_batch.created_at > message.created_at)
   );
+
+-- name: ListUnownedChannelChatContextRevisions :many
+-- Returns every durable context generation that still has channel input without
+-- a task owner. A process crash drops in-memory debounce timers; the next normal
+-- inbound message uses this list to re-arm older generations instead of only
+-- recovering the current one. Legacy NULL revisions are generation 1.
+WITH pending AS (
+    SELECT DISTINCT COALESCE(channel_context_revision, 1)::bigint AS context_revision
+    FROM chat_message
+    WHERE chat_session_id = $1
+      AND role = 'user'
+      AND task_id IS NULL
+      AND message_kind != 'channel_command'
+)
+SELECT pending.context_revision, generation.initiator_user_id
+FROM pending
+LEFT JOIN channel_chat_context_generation AS generation
+  ON generation.chat_session_id = $1
+ AND generation.revision = pending.context_revision
+ORDER BY pending.context_revision;
 
 -- name: DeferChatTaskForSealedPendingMedia :one
 -- Closes the enqueue-vs-append race: under READ COMMITTED a media message can
@@ -727,6 +913,40 @@ ORDER BY message.created_at ASC, message.id ASC;
 SELECT * FROM chat_message
 WHERE task_id = $1 AND role = 'user'
 ORDER BY created_at ASC, id ASC;
+
+-- name: ListChatMessagesPageForChannelContext :many
+-- Agent-only transcript projection. UI readers continue using the unfiltered
+-- ListChatMessagesPage query, while a channel task can see only the context
+-- generation snapshotted on that task. Assistant rows inherit their generation
+-- from their owning task, so retries and late completions stay in their turn.
+SELECT message.*
+FROM chat_message AS message
+LEFT JOIN agent_task_queue AS owner ON owner.id = message.task_id
+WHERE message.chat_session_id = @chat_session_id
+  AND message.message_kind != 'channel_command'
+  AND (
+      (
+          message.role = 'user'
+          AND (
+              message.channel_context_revision = @channel_context_revision
+              OR (@channel_context_revision = 1 AND message.channel_context_revision IS NULL)
+          )
+      )
+      OR
+      (
+          message.role != 'user'
+          AND (
+              owner.channel_context_revision = @channel_context_revision
+              OR (@channel_context_revision = 1 AND owner.channel_context_revision IS NULL)
+          )
+      )
+  )
+  AND (
+    sqlc.narg('before_created_at')::timestamptz IS NULL
+    OR (message.created_at, message.id) < (sqlc.narg('before_created_at')::timestamptz, sqlc.narg('before_id')::uuid)
+  )
+ORDER BY message.created_at DESC, message.id DESC
+LIMIT @page_limit;
 
 -- name: ReanchorClaimedDirectChatInput :exec
 -- An idle direct send is visible while it is the positional queue head. A
@@ -905,6 +1125,10 @@ SELECT * FROM chat_message
 WHERE id = $1;
 
 -- name: CreateChatTask :one
+-- Fenced against workspace teardown: lock_task_owner_rows (migration 284)
+-- locks the owners' workspace rows in the writer's own transaction and returns
+-- false once they are gone, so this statement writes no row instead of stranding
+-- a task in a workspace that has just been deleted (MUL-5999).
 -- The chat sender (initiator) is a direct_human originator and accountable;
 -- attribution provenance is stamped so this path is not a NULL-source enqueue
 -- bypass (MUL-4302 §2).
@@ -912,9 +1136,9 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, chat_session_id,
     initiator_user_id, originator_user_id, accountable_user_id, force_fresh_session, runtime_mcp_overlay,
     runtime_connected_apps, originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
-    fire_at
+    fire_at, channel_context_revision, id
 )
-VALUES (
+SELECT
     $1, $2, NULL,
     CASE WHEN sqlc.narg('fire_at')::timestamptz IS NULL THEN 'queued' ELSE 'deferred' END,
     $3, $4, $5,
@@ -926,8 +1150,10 @@ VALUES (
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
     sqlc.narg(trigger_evidence_ref_id),
-    sqlc.narg('fire_at')::timestamptz
-)
+    sqlc.narg('fire_at')::timestamptz,
+    sqlc.narg('channel_context_revision')::bigint,
+    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+WHERE lock_task_owner_rows($1, NULL, $2)
 RETURNING *;
 
 -- name: PromoteChannelChatTasksIfMediaReady :many
@@ -947,9 +1173,8 @@ WHERE task.chat_session_id = @chat_session_id
   AND NOT EXISTS (
       SELECT 1
       FROM chat_message AS message
-      WHERE message.chat_session_id = @chat_session_id
+      WHERE message.task_id = task.id
         AND message.role = 'user'
-        AND message.message_kind != 'channel_command'
         AND message.channel_media_pending_until > now()
   )
 RETURNING task.*;
@@ -972,10 +1197,16 @@ RETURNING *;
 -- session_id. Includes completed, failed AND cancelled tasks: each of them may
 -- have established a real agent session, and we'd rather resume there than
 -- start over and lose conversation memory. Used as a fallback when
--- chat_session.session_id is NULL. Resume-unsafe failures are excluded because
+-- chat_session.session_id is NULL, and as the authoritative generation-scoped
+-- source for channel tasks. Resume-unsafe failures are excluded because
 -- replaying those sessions deterministically reproduces the same terminal
 -- state. Keep this list in sync with resumeUnsafeFailureReason and
 -- GetLastTaskSession.
+--
+-- The plan depends on idx_agent_task_queue_chat_terminal_resume for the
+-- terminal/cutoff scans and idx_agent_task_queue_chat_retired_session for the
+-- retired set. Keep their partial predicates broad enough for every CTE here,
+-- especially the NULL-session resume_overflow_at rows.
 --
 -- 'cancelled' is resumable and its absence was GH #6340: the user stops a turn
 -- the agent had already started answering, and the next message starts from
@@ -1005,7 +1236,11 @@ RETURNING *;
 WITH retired_sessions AS (
     SELECT DISTINCT r.retired_session_id AS session_id
     FROM agent_task_queue r
-    WHERE r.chat_session_id = $1
+    WHERE r.chat_session_id = sqlc.arg('chat_session_id')
+      AND (
+        sqlc.narg('channel_context_revision')::bigint IS NULL
+        OR COALESCE(r.channel_context_revision, 1) = sqlc.narg('channel_context_revision')::bigint
+      )
       AND r.retired_session_id IS NOT NULL
 ), resume_overflow_at AS (
     -- completed_at alone, where the issue-side twin coalesces four columns:
@@ -1014,7 +1249,11 @@ WITH retired_sessions AS (
     -- compared against. Change both halves together if that ever moves.
     SELECT MAX(t.completed_at) AS at
     FROM agent_task_queue t
-    WHERE t.chat_session_id = $1
+    WHERE t.chat_session_id = sqlc.arg('chat_session_id')
+      AND (
+        sqlc.narg('channel_context_revision')::bigint IS NULL
+        OR COALESCE(t.channel_context_revision, 1) = sqlc.narg('channel_context_revision')::bigint
+      )
       AND t.status = 'failed'
       AND (
         COALESCE(t.failure_reason, '') = 'codex_resume_oversized'
@@ -1024,7 +1263,11 @@ WITH retired_sessions AS (
     SELECT DISTINCT ON (t.session_id)
         t.session_id, t.work_dir, t.runtime_id, t.status, t.failure_reason, t.error, t.completed_at
     FROM agent_task_queue t
-    WHERE t.chat_session_id = $1
+    WHERE t.chat_session_id = sqlc.arg('chat_session_id')
+      AND (
+        sqlc.narg('channel_context_revision')::bigint IS NULL
+        OR COALESCE(t.channel_context_revision, 1) = sqlc.narg('channel_context_revision')::bigint
+      )
       AND t.session_id IS NOT NULL
       AND t.status IN ('completed', 'failed', 'cancelled')
     ORDER BY t.session_id, t.completed_at DESC
@@ -1043,6 +1286,9 @@ WHERE session_id NOT IN (SELECT session_id FROM retired_sessions)
       -- text guard keeps the dead session from being replayed. This and
       -- GetLastTaskSession must move together.
       -- Keep in sync with ResumeUnsafeFailure and GetLastTaskSession.
+      -- The phrase itself lives in taskfailure.AuthMethodUnresolved, which the
+      -- daemon's in-turn fresh-session retry reads (GH #6777). This guard stays
+      -- because it is the only protection for rows an older daemon wrote.
       AND NOT (COALESCE(error, '') ILIKE '%could not resolve authentication method%')
       AND NOT (COALESCE(error, '') ~* 'must not be empty|must be non-?empty|must have non-?empty|non-?empty content|cannot be empty|should not be empty'
                AND COALESCE(error, '') ~* 'role[^a-z0-9]{0,2}assistant|assistant message|message at position|messages\.[0-9]|messages\[[0-9]')
@@ -1050,9 +1296,10 @@ WHERE session_id NOT IN (SELECT session_id FROM retired_sessions)
   )
   -- MUL-5722, mirroring GetLastTaskSession: an overflowed resume records no
   -- session, so exclude by time instead of by matching the failed row. Note
-  -- this only guards the FALLBACK — the claim handler reads
-  -- chat_session.session_id first, so a pointer still naming the oversized
-  -- thread has to be cleared at fail time (see FailTask) to be covered.
+  -- this only guards the FALLBACK for legacy tasks — the claim handler reads
+  -- chat_session.session_id first for them, so a pointer still naming the
+  -- oversized thread has to be cleared at fail time (see FailTask) to be
+  -- covered. Context-scoped channel tasks resolve directly from this query.
   AND (
     (SELECT at FROM resume_overflow_at) IS NULL
     OR completed_at > (SELECT at FROM resume_overflow_at)
@@ -1123,6 +1370,11 @@ SELECT
     task.id,
     task.status,
     task.created_at,
+    -- Only meaningful while status is waiting_local_directory: the daemon
+    -- stamps which directory this task is parked on and who holds it, so the
+    -- StatusPill can say why it is not moving. Stale on any other status; the
+    -- renderer reads it only for the waiting one.
+    task.wait_reason,
     message.id AS message_id,
     COALESCE(message.content, '')::text AS content
 FROM agent_task_queue AS task
@@ -1257,6 +1509,14 @@ SELECT EXISTS (
     SELECT 1 FROM chat_message
     WHERE chat_session_id = $1 AND role = 'user'
 ) AS has_user_message;
+
+-- name: ChatSessionHasPublicUserMessage :one
+SELECT EXISTS (
+    SELECT 1 FROM chat_message
+    WHERE chat_session_id = $1
+      AND role = 'user'
+      AND message_kind != 'channel_command'
+) AS has_public_user_message;
 
 -- name: CreateChatDraftRestore :one
 -- Persists the deferred-cancellation draft restore (#5219) in the same tx
@@ -1401,13 +1661,14 @@ SELECT
 --
 -- task_id stays NULL: no agent run produced this row, and nothing may treat it
 -- as a turn to regenerate or resume.
-INSERT INTO chat_message (chat_session_id, role, content, message_kind, created_at)
+INSERT INTO chat_message (chat_session_id, role, content, message_kind, created_at, id)
 VALUES (
     sqlc.arg(chat_session_id),
     'assistant',
     sqlc.arg(content),
     'onboarding_opening',
-    sqlc.arg(kickoff_created_at)::timestamptz + interval '1 microsecond'
+    sqlc.arg(kickoff_created_at)::timestamptz + interval '1 microsecond',
+    COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
 )
 RETURNING *;
 
