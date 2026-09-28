@@ -34,6 +34,7 @@
     "open_in_new_tab": "Открыть в новой вкладке"
   },
   "list": {
+    "loading_selection": "Загрузка уведомления…",
     "empty": "Нет уведомлений",
     "mark_done_tooltip": "Отметить как выполненное",
     "archive_tooltip": "Архивировать",
@@ -46,7 +47,10 @@
     "archived_title": "Архив",
     "archived_empty": "Нет архивных уведомлений",
     "unarchive_tooltip": "Восстановить из архива",
-    "actions_aria": "Действия с уведомлением"
+    "actions_aria": "Действия с уведомлением",
+    "load_more": "Загрузить ещё",
+    "loading_more": "Загрузка…",
+    "retry": "Повторить"
   },
   "detail": {
     "select_prompt": "Выберите уведомление, чтобы посмотреть детали",
@@ -54,10 +58,10 @@
     "original_input": "Исходный ввод",
     "retry_with_context": "Повторить с контекстом",
     "edit_advanced": "Редактировать как расширенную форму",
-    "archive": "Архивировать",
-    "unarchive": "Восстановить из архива",
     "autopilot_quota_exceeded_body": "Это рабочее пространство достигло лимита в {{limit}} запусков Автопилота за текущий период. Новые запуски Автопилота не начнутся, пока лимит не будет сброшен {{resetAt}}.",
-    "autopilot_quota_upgrade": "Посмотреть варианты обновления"
+    "autopilot_quota_upgrade": "Посмотреть варианты обновления",
+    "archive": "Архивировать",
+    "unarchive": "Восстановить из архива"
   },
   "types": {
     "issue_assigned": "Назначено",
@@ -80,6 +84,7 @@
     "quick_create_failed": "Ошибка создания с помощью агента",
     "quick_create_unconfirmed": "Создание с помощью агента не подтверждено",
     "autopilot_paused": "Автопилот приостановлен",
+    "children_done": "Подзадачи завершены",
     "autopilot_quota_exceeded": "Достигнут лимит запусков Автопилота"
   },
   "labels": {
@@ -94,7 +99,8 @@
     "reacted_to_comment": "Отреагировал(а) {{emoji}} на ваш комментарий",
     "created_with_agent": "Создано с помощью агента: {{identifier}}",
     "failed_with_detail": "Ошибка: {{detail}}",
-    "autopilot_quota_blocked": "Запуск заблокирован, так как достигнут лимит"
+    "autopilot_quota_blocked": "Запуск заблокирован, так как достигнут лимит",
+    "children_done_stage": "Подзадачи этапа {{stage}} завершены"
   },
   "toasts": {
     "source_context_retry_started": "Повтор запущен с исходным контекстом",
@@ -102,6 +108,7 @@
     "unarchived": "Уведомление восстановлено"
   },
   "errors": {
+    "archived_lookup_failed": "Не удалось загрузить связанное уведомление",
     "source_context_retry_failed": "Не удалось повторить с исходным контекстом",
     "source_context_retry_unavailable": "Этот контекст больше нельзя повторить. Начните заново с точки ветвления.",
     "mark_read_failed": "Не удалось отметить как прочитанное",
@@ -113,6 +120,7 @@
     "archive_all_read_failed": "Не удалось архивировать прочитанные элементы",
     "archive_completed_failed": "Не удалось архивировать завершённые",
     "unarchive_failed": "Не удалось восстановить из архива",
-    "archived_load_failed": "Не удалось загрузить архивные уведомления"
+    "archived_load_failed": "Не удалось загрузить архивные уведомления",
+    "filters_load_failed": "Не удалось загрузить фильтры"
   }
 }
