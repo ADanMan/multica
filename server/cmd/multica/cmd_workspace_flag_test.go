@@ -220,3 +220,34 @@ func TestRequireWorkspaceID_HonorsWorkspaceFlag(t *testing.T) {
 		t.Fatalf("requireWorkspaceID() = %q, want %q", got, bureauWorkspaceID)
 	}
 }
+
+func TestWorkspaceFlagPinsResolvedSlugAcrossPathAndHeader(t *testing.T) {
+	lists := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lists++
+		id := bureauWorkspaceID
+		if lists > 1 {
+			// Another user renamed/reassigned the slug between requests.
+			id = digLabWorkspaceID
+		}
+		json.NewEncoder(w).Encode([]map[string]any{{"id": id, "slug": "bureau"}})
+	}))
+	defer srv.Close()
+	t.Setenv("HOME", t.TempDir())
+	clearDaemonContextEnv(t)
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_TOKEN", "test-token")
+	t.Setenv("MULTICA_WORKSPACE_ID", "")
+	cmd := workspaceFlagTestCmd()
+	_ = cmd.Flags().Set("workspace", "bureau")
+	client, pathID, err := repoCommandClient(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.WorkspaceID != pathID || pathID != bureauWorkspaceID {
+		t.Fatalf("header workspace %q differs from pinned path workspace %q", client.WorkspaceID, pathID)
+	}
+	if lists != 1 {
+		t.Fatalf("workspace list requests = %d, want one per invocation", lists)
+	}
+}

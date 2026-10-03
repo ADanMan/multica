@@ -536,6 +536,12 @@ func resolveTargetWorkspaceID(cmd *cobra.Command) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Pin the resolved UUID in this invocation so URL paths and client
+		// headers cannot re-resolve a slug to different workspaces. This
+		// changes only the in-memory flag, never the saved profile default.
+		if err := cmd.Flags().Set("workspace", ws.ID); err != nil {
+			return "", err
+		}
 		return ws.ID, nil
 	}
 	return resolveWorkspaceID(cmd), nil
