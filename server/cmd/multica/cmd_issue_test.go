@@ -6031,3 +6031,34 @@ func TestRunIssueUpdateSurfacesRevisionConflict(t *testing.T) {
 		t.Fatalf("conflict exit code = %d, want non-zero", code)
 	}
 }
+
+func TestRunIssueUpdateRejectsInvalidRevisionBeforeAttachmentUpload(t *testing.T) {
+	t.Chdir(t.TempDir())
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method == http.MethodPost {
+			json.NewEncoder(w).Encode(map[string]any{"id": testIssueUUID, "url": "/attachment.txt"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"description": "existing"})
+	}))
+	defer srv.Close()
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+	path := "attachment.txt"
+	if err := os.WriteFile(path, []byte("attachment"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newIssueUpdateTestCmd()
+	_ = cmd.Flags().Set("attachment", path)
+	_ = cmd.Flags().Set("expected-revision", "0")
+	err := runIssueUpdate(cmd, []string{testIssueUUID})
+	if err == nil || !strings.Contains(err.Error(), "positive integer") {
+		t.Fatalf("error = %v, want invalid revision", err)
+	}
+	if requests != 0 {
+		t.Fatalf("invalid revision sent %d requests, want none before validation", requests)
+	}
+}

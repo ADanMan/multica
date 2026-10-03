@@ -43,26 +43,20 @@ import (
 // flag shared by the mutating issue commands.
 const expectedRevisionFlag = "expected-revision"
 
-// applyExpectedRevision reads the optional --expected-revision precondition and,
-// when set, writes it into the request body as expected_revision. The server
-// then performs the compare-and-set atomically and rejects the write with a 409
-// revision conflict on mismatch; omitting the flag preserves the unconditional
-// write that existing scripts and older clients rely on. A non-positive value is
-// rejected here so the caller gets a clear message without a round-trip (the
-// server enforces the same rule).
-func applyExpectedRevision(cmd *cobra.Command, body map[string]any) error {
+// readExpectedRevision validates the optional precondition before any request.
+// Zero means the flag was omitted and preserves unconditional writes.
+func readExpectedRevision(cmd *cobra.Command) (int64, error) {
 	if !cmd.Flags().Changed(expectedRevisionFlag) {
-		return nil
+		return 0, nil
 	}
 	rev, err := cmd.Flags().GetInt64(expectedRevisionFlag)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if rev < 1 {
-		return fmt.Errorf("--%s must be a positive integer", expectedRevisionFlag)
+		return 0, fmt.Errorf("--%s must be a positive integer", expectedRevisionFlag)
 	}
-	body["expected_revision"] = rev
-	return nil
+	return rev, nil
 }
 
 func resolveTextFlag(cmd *cobra.Command, flagName string) (string, bool, error) {
@@ -1677,6 +1671,10 @@ func activeDuplicateIssueCreateMessage(err error) (string, bool) {
 }
 
 func runIssueUpdate(cmd *cobra.Command, args []string) error {
+	expectedRevision, err := readExpectedRevision(cmd)
+	if err != nil {
+		return err
+	}
 	attachmentPaths, _ := cmd.Flags().GetStringSlice("attachment")
 	noStart, _ := cmd.Flags().GetBool("no-start")
 	statusChanged := cmd.Flags().Changed("status")
@@ -1847,8 +1845,8 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 	if noStart {
 		body["suppress_run"] = true
 	}
-	if err := applyExpectedRevision(cmd, body); err != nil {
-		return err
+	if expectedRevision > 0 {
+		body["expected_revision"] = expectedRevision
 	}
 
 	var result map[string]any
@@ -1881,6 +1879,10 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 }
 
 func runIssueAssign(cmd *cobra.Command, args []string) error {
+	expectedRevision, err := readExpectedRevision(cmd)
+	if err != nil {
+		return err
+	}
 	toName, _ := cmd.Flags().GetString("to")
 	unassign, _ := cmd.Flags().GetBool("unassign")
 	noStart, _ := cmd.Flags().GetBool("no-start")
@@ -1930,8 +1932,8 @@ func runIssueAssign(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := applyExpectedRevision(cmd, body); err != nil {
-		return err
+	if expectedRevision > 0 {
+		body["expected_revision"] = expectedRevision
 	}
 
 	var result map[string]any
@@ -1953,6 +1955,10 @@ func runIssueAssign(cmd *cobra.Command, args []string) error {
 }
 
 func runIssueStatus(cmd *cobra.Command, args []string) error {
+	expectedRevision, err := readExpectedRevision(cmd)
+	if err != nil {
+		return err
+	}
 	id := args[0]
 	status := args[1]
 	noStart, _ := cmd.Flags().GetBool("no-start")
@@ -1989,8 +1995,8 @@ func runIssueStatus(cmd *cobra.Command, args []string) error {
 	if noStart {
 		body["suppress_run"] = true
 	}
-	if err := applyExpectedRevision(cmd, body); err != nil {
-		return err
+	if expectedRevision > 0 {
+		body["expected_revision"] = expectedRevision
 	}
 	var result map[string]any
 	if err := client.PutJSON(ctx, "/api/issues/"+issueRef.ID, body, &result); err != nil {
