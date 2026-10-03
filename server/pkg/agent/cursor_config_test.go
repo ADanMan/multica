@@ -172,3 +172,28 @@ func assertJSONEqual(t *testing.T, label string, got, want any) {
 		t.Errorf("%s = %s, want %s", label, g, w)
 	}
 }
+
+func TestPrepareCursorContextConfigDirRelativeSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs Developer Mode or admin rights on Windows")
+	}
+	t.Chdir(t.TempDir())
+	source := "cursor-config"
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, cursorCLIConfigFile), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := prepareCursorContextConfigDir(t.TempDir(), source, "grok-4.7", "500k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if _, err := os.ReadFile(filepath.Join(dir, "mcp.json")); err != nil {
+		t.Fatalf("relative config source must keep MCP config readable: %v", err)
+	}
+}

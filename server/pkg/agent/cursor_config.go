@@ -62,6 +62,12 @@ func cursorSourceConfigDir(env map[string]string) (string, error) {
 // discarded afterwards and the user's own file is never modified. The caller
 // removes the returned directory when the run ends.
 func prepareCursorContextConfigDir(parent, sourceDir, modelID, contextValue string) (string, error) {
+	// Symlink targets resolve relative to the new config dir, not our cwd.
+	// Normalize a relative CURSOR_CONFIG_DIR before copying its entries.
+	sourceDir, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve cursor config dir: %w", err)
+	}
 	data, err := os.ReadFile(filepath.Join(sourceDir, cursorCLIConfigFile))
 	if err != nil {
 		return "", fmt.Errorf("read cursor %s: %w", cursorCLIConfigFile, err)
