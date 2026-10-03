@@ -54,6 +54,7 @@ const RESET_STATE = {
   },
   lastAssigneeType: undefined,
   lastAssigneeId: undefined,
+  lastProjectId: undefined,
 };
 
 describe("issue draft store — last assignee", () => {
@@ -236,6 +237,25 @@ describe("issue draft store — legacy rehydrate", () => {
 
   afterEach(() => {
     setCurrentWorkspace(null, null);
+  });
+
+  it("does not carry the remembered project into another workspace", async () => {
+    setCurrentWorkspace("project-source", "ws_source");
+    await flush();
+    await flush();
+    useIssueDraftStore.getState().setLastProject("source-project");
+
+    setCurrentWorkspace("project-destination", "ws_destination");
+    await flush();
+    await flush();
+    useIssueDraftStore.getState().clearDraft();
+    expect(useIssueDraftStore.getState().draft.shared.projectId).toBeUndefined();
+
+    setCurrentWorkspace("project-source", "ws_source");
+    await flush();
+    await flush();
+    useIssueDraftStore.getState().clearDraft();
+    expect(useIssueDraftStore.getState().draft.shared.projectId).toBe("source-project");
   });
 
   it("migrates a pre-MUL-5181 flat draft into the shared/manual slots", async () => {

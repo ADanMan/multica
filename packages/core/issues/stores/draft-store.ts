@@ -267,6 +267,7 @@ export const useIssueDraftStore = create<IssueDraftStore>()(
         return {
           ...currentState,
           ...persisted,
+          lastProjectId: persisted.lastProjectId,
           draft: migrateDraft(persisted.draft),
         };
       },
