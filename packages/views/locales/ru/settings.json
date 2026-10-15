@@ -552,7 +552,9 @@
       "checkbox": "Флажок",
       "url": "URL",
       "actor": "Участник",
-      "multi_actor": "Участники"
+      "multi_actor": "Участники",
+      "multi_text": "Список текстов",
+      "multi_url": "Список URL"
     },
     "actions": {
       "open": "Действия для {{name}}",

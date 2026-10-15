@@ -730,6 +730,8 @@ export interface StoredAgentDraft {
   member_ids: string[];
   team_ids: string[];
   applied_message_id: string | null;
+  /** Recovery notice acknowledged by manual editing or dismissal. */
+  dismissed_message_id?: string | null;
 }
 
 /** One unfinished agent-creation conversation, as listed by the studio. */

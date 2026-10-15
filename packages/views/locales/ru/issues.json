@@ -954,9 +954,11 @@
       "false_label": "Нет",
       "value_placeholder": "Введите значение…",
       "url_placeholder": "https://…",
+      "url_scheme_required": "Начните URL с http:// или https://.",
       "number_placeholder": "0",
       "actor_search_placeholder": "Поиск участников…",
       "open_link": "Открыть ссылку",
+      "remove_item": "Удалить {{value}}",
       "archived_hint": "Архивированное свойство — значение доступно только для чтения",
       "unknown_value": "Недоступно",
       "unknown_value_hint": "Это значение задано более новой версией Multica и не может быть изменено здесь — обновите приложение или очистите значение"

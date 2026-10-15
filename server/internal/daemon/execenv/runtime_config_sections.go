@@ -265,7 +265,7 @@ func writeAvailableCommands(b *strings.Builder, ctx TaskContextForEnv) {
 	b.WriteString("- `multica issue assign <id> (--to X | --to-id <uuid> | --unassign)` — change ownership; assigning to an agent can start a run.\n")
 	writeIssueStatusCommand(b, ctx)
 	b.WriteString(duplicateOfCommandLine)
-	b.WriteString("- `multica issue wakeup <create|list|get|update|disable|trigger|delete|runs|events>` — persist an event, condition or time wakeup on this issue, then finish the current run. When the platform can check the fact itself, use a condition (`--until-status`, `--until-pr checks`, `--until-children-done`, `--until-issue`) so no run starts before it holds. Use `--event comment.created --filter-actor-type member --filter-actor-id USER_ID` to wait for a specific member to comment. See `multica issue wakeup --help` and the multica-platform issues reference.\n")
+	b.WriteString("- `multica issue wakeup <create|list|get|update|disable|trigger|delete|runs|events>` — persist an event, condition or time wakeup on this issue, then finish the current run. When the platform can check the fact itself, use a condition (`--until-status`, `--until-pr checks`, `--until-children-done`, `--until-issue`) so no run starts before it holds. PR conditions watch only PRs linked to this exact issue; `--until-pr checks` also requires server-side GitHub check snapshots. Check the rule's `last_error` for missing links or unavailable snapshots; delayed links and snapshots are retried automatically. Use `--event comment.created --filter-actor-type member --filter-actor-id USER_ID` to wait for a specific member to comment. See `multica issue wakeup --help` and the multica-platform issues reference.\n")
 	b.WriteString("- `multica issue children <id> [--output json]` — list a parent's sub-issues grouped by stage.\n")
 	b.WriteString("- `multica issue comment add <issue-id> [--content \"...\" | --content-file <path> | --content-stdin] [--parent <comment-id>] [--attachment <path>]` — post a comment. Agent-authored bodies MUST use `--content-file`; see `## Comment Formatting` for why. `multica issue comment add --help` for full flags.\n")
 	b.WriteString("- `multica repo checkout <url> [--ref <branch-or-sha>] [--fresh]` — repository checkout on a dedicated branch. Re-running it keeps an existing checkout that has uncommitted or unpushed work, or is already on this task's branch, and only fetches. `--fresh` discards uncommitted and untracked files and starts a new branch; commits stay on the old branch, but push any you still need first.\n\n")
@@ -811,13 +811,6 @@ func writeSubIssueCreation(b *strings.Builder, ctx TaskContextForEnv) {
 // import; the brief's rendered-output tests pin the two together.
 const platformSkillName = "multica-platform"
 
-// legacyIssueSkillName is what that skill was called before the platform
-// merge (MUL-6986). A daemon can outlive the backend it talks to in either
-// direction — a backend deploy does not update installed apps, and an app
-// update does not wait for a deploy — so the brief resolves the name it points
-// at from the skills this task actually received instead of hardcoding one.
-const legacyIssueSkillName = "multica-working-on-issues"
-
 // issueContractsSkill returns how the brief should refer to the skill carrying
 // the issue contracts, and whether any such skill is installed at all.
 //
@@ -827,9 +820,6 @@ const legacyIssueSkillName = "multica-working-on-issues"
 func issueContractsSkill(skills []SkillContextForEnv) (string, bool) {
 	if slug, ok := builtinSlug(skills, platformSkillName); ok {
 		return "`references/issues.md` in the `" + slug + "` skill", true
-	}
-	if slug, ok := builtinSlug(skills, legacyIssueSkillName); ok {
-		return "the `" + slug + "` skill", true
 	}
 	return "", false
 }
