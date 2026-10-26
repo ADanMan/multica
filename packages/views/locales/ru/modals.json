@@ -19,6 +19,16 @@
     "toast_deleted": "Задача удалена",
     "toast_delete_failed": "Не удалось удалить задачу"
   },
+  "rename_issue": {
+    "title": "Переименовать задачу",
+    "placeholder": "Название задачи",
+    "input_aria_label": "Переименовать {{identifier}}",
+    "submit": "Сохранить",
+    "saving": "Сохранение…",
+    "title_required": "Введите название",
+    "toast_renamed": "Задача переименована",
+    "toast_failed": "Не удалось переименовать задачу"
+  },
   "feedback": {
     "title": "Обратная связь",
     "placeholder": "Расскажите о своём опыте, найденных багах или желаемых функциях…",

@@ -9,7 +9,8 @@
     "projects": "Проекты",
     "issues": "Задачи",
     "cancelled": "Отменено",
-    "recent": "Недавние"
+    "recent": "Недавние",
+    "workspaces": "Рабочие пространства"
   },
   "commands": {
     "current_theme_aria": "Текущая тема",

@@ -19,6 +19,7 @@
     "priority": "Приоритет",
     "from": "От",
     "unread_only": "Только непрочитанные",
+    "no_agents_working": "Нет работающих агентов",
     "notification_count_one": "{{count}} уведомление",
     "notification_count_few": "{{count}} уведомления",
     "notification_count_many": "{{count}} уведомлений",

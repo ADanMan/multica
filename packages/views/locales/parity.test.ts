@@ -138,13 +138,14 @@ describe("missing plural-form guard", () => {
             .filter((key) => /_(zero|one|two|few|many|other)$/.test(key))
             .map((key) => key.replace(/_(zero|one|two|few|many|other)$/, "")),
         );
-        // EN ships `_other` alone where a count of 1 never reaches the string
-        // (the UI shows the item's own label instead), so `one` is not owed.
+        // EN may omit `_one` when the UI handles 1 separately. Russian still
+        // needs it for counts such as 21 and 31.
         const enKeys = new Set(flattenKeys(en[ns] ?? {}));
         return [...bases].flatMap((base) =>
           categories
             .filter(
-              (category) => category !== "one" || enKeys.has(`${base}_one`),
+              (category) =>
+                locale === "ru" || category !== "one" || enKeys.has(`${base}_one`),
             )
             .filter((category) => !keys.has(`${base}_${category}`))
             .map((category) => `${ns}:${base}_${category}`),

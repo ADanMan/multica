@@ -129,6 +129,7 @@
   },
   "code_block": {
     "html_preview": "HTML-предпросмотр",
+    "close_preview": "Закрыть",
     "copy_code": "Скопировать код",
     "show_preview": "Показать предпросмотр",
     "show_source": "Показать исходный код",
@@ -176,5 +177,18 @@
     "export_png": "Скачать PNG",
     "export_svg": "Скачать SVG",
     "export_source": "Скачать .mmd"
+  },
+  "table": {
+    "reset_widths": "Сбросить ширину столбцов",
+    "expand": "Развернуть таблицу",
+    "copy_markdown": "Копировать как Markdown",
+    "copy_csv": "Копировать как CSV",
+    "copied": "Скопировано",
+    "resize_column": "Изменить ширину столбца {{name}}",
+    "expanded_title": "Таблица",
+    "filter_placeholder": "Фильтр строк",
+    "clear_filter": "Сбросить фильтр",
+    "no_matches": "Подходящих строк нет",
+    "close": "Закрыть"
   }
 }

@@ -40,6 +40,13 @@
     "loading_workspace": "Загрузка рабочего пространства…",
     "loading_named_prefix": "Загрузка"
   },
+  "window": {
+    "go_back": "Назад",
+    "go_forward": "Вперёд",
+    "hold_for_history": "Удерживайте для просмотра истории",
+    "back_history": "История переходов назад",
+    "forward_history": "История переходов вперёд"
+  },
   "sidebar": {
     "unpin_tooltip": "Открепить",
     "workspaces_label": "Рабочие пространства",
