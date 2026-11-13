@@ -228,6 +228,11 @@ multica daemon stop
 
 ### Status
 
+Run `multica doctor --tool hermes` to check the configured server, local daemon,
+and Hermes executable independently. Omit `--tool` to look for any supported
+coding tool, or pass `--output json` for automation. A failed check produces a
+nonzero exit code. Executable discovery does not validate provider credentials.
+
 ```bash
 multica daemon status
 multica daemon status --output json
