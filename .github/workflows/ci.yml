@@ -963,7 +963,7 @@ jobs:
         # -v so a skip is visible instead of passing silently as "ok".
         run: go test ./internal/daemon/execenv -v -run '^TestPruneTaskTempDirsSurvivesRealSharingViolation$' -count=1 -timeout=5m
 
-      - name: Test Windows agent executable junction resolution
+      - name: Test Windows agent executable discovery and junction resolution
         working-directory: server
         # The standalone Codex installer exposes bin as a directory junction.
         # filepath.EvalSymlinks cannot traverse that reparse-point shape, so
@@ -971,7 +971,7 @@ jobs:
         # explicitly configured path reach the release executable. The same job
         # covers the npm shape, where the entry point is a `.cmd` shim that only
         # the command interpreter can run.
-        run: go test ./internal/daemon -v -run '^(TestCanonicalExecutablePath|TestTrimExtendedLengthPrefix|TestResolveAgentExecutablePathKeeps|TestResolveAgentExecutablePath_ProfileOverride|TestResolveAgentEntry(FollowsRetargetedInstallerJunction|CanonicalizesRediscoveredJunction|ForLaunchKeepsCmdShimLaunchable|ForLaunchRejectsUnverifiedInitialJunctionTarget|ForLaunchRejectsRediscoveredJunctionWhenFinalPathResolutionFails|DoesNotSharePreRetargetSingleflightResult|ForLaunchFailsWhenJunctionKeepsRetargeting)|TestHandleTaskReportsWindowsCodexProcessStartFailure)' -count=1 -timeout=5m
+        run: go test ./internal/daemon -v -run '^(TestProbeAgentCLIsUsesRegisteredWindowsCodexCLI|TestCanonicalExecutablePath|TestTrimExtendedLengthPrefix|TestResolveAgentExecutablePathKeeps|TestResolveAgentExecutablePath_ProfileOverride|TestResolveAgentEntry(FollowsRetargetedInstallerJunction|CanonicalizesRediscoveredJunction|ForLaunchKeepsCmdShimLaunchable|ForLaunchRejectsUnverifiedInitialJunctionTarget|ForLaunchRejectsRediscoveredJunctionWhenFinalPathResolutionFails|DoesNotSharePreRetargetSingleflightResult|ForLaunchFailsWhenJunctionKeepsRetargeting)|TestHandleTaskReportsWindowsCodexProcessStartFailure)' -count=1 -timeout=5m
 
       - name: Test Windows task workdirs under a junctioned workspaces root
         working-directory: server
