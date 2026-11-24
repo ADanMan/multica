@@ -865,10 +865,11 @@ func agentExecutablePresent(path string) bool {
 // probe() order in LoadConfig: exec.LookPath (with the ~/.multica/hooks
 // exclusion preserved via resolveAgentExecutablePath) first, then the login
 // shell fallback for a bare command name a GUI-launched daemon can't see on
-// its own PATH. It is only called on the miss path — when a previously pinned
+// its own PATH. The bundled Codex Desktop path is the final candidate.
+// It is only called on the miss path — when a previously pinned
 // path has disappeared — so the login-shell cost is paid rarely, never on a
 // normal launch.
-func reresolveAgentCommand(cmd string) (string, bool) {
+func reresolveAgentCommand(provider, cmd string) (string, bool) {
 	if cmd == "" {
 		return "", false
 	}
@@ -882,6 +883,18 @@ func reresolveAgentCommand(cmd string) (string, bool) {
 	// stay a hard miss rather than silently resolve a different binary.
 	if !strings.ContainsAny(cmd, "/\\") {
 		if path, ok := resolveAgentsViaLoginShell([]string{cmd})[cmd]; ok {
+			return path, true
+		}
+	}
+	if provider == "codex" && cmd == "codex" {
+		return resolveCodexDesktopCLI()
+	}
+	return "", false
+}
+
+func resolveCodexDesktopCLI() (string, bool) {
+	for _, path := range codexDesktopAppBundlePaths() {
+		if executableCandidate(path) {
 			return path, true
 		}
 	}

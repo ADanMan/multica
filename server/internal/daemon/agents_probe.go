@@ -143,14 +143,12 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 		}
 		if defaultCmd == "codex" && cmd == defaultCmd {
 			// Codex Desktop can bundle a CLI without adding it to PATH.
-			for _, p := range codexDesktopAppBundlePaths() {
-				if executableCandidate(p) {
-					return AgentEntry{
-						Path:    p,
-						Command: cmd,
-						Model:   strings.TrimSpace(os.Getenv(modelEnv)),
-					}, true
-				}
+			if path, ok := resolveCodexDesktopCLI(); ok {
+				return AgentEntry{
+					Path:    path,
+					Command: cmd,
+					Model:   strings.TrimSpace(os.Getenv(modelEnv)),
+				}, true
 			}
 		}
 		if defaultCmd == "dsh" && cmd == defaultCmd {

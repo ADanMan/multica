@@ -291,6 +291,10 @@ func TestResolveAgentEntry_UninstalledLeavesEntryUnchanged(t *testing.T) {
 		t.Skip("POSIX-specific layout")
 	}
 
+	originalPaths := codexDesktopAppBundlePaths
+	codexDesktopAppBundlePaths = func() []string { return nil }
+	t.Cleanup(func() { codexDesktopAppBundlePaths = originalPaths })
+
 	root := t.TempDir()
 	stableBin := filepath.Join(root, "bin")
 	t.Setenv("PATH", stableBin)

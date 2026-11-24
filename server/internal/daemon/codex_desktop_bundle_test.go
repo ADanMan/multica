@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
+
+	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
 func TestCodexDesktopAppBundlePathsWindows(t *testing.T) {
@@ -83,4 +86,46 @@ func TestProbeAgentCLIsUsesRegisteredWindowsCodexCLI(t *testing.T) {
 	writeExecutable(override)
 	t.Setenv("MULTICA_CODEX_PATH", override)
 	assertPath(override)
+}
+
+func TestResolveAgentEntryAfterCodexDesktopPackageUpdate(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PATH", filepath.Join(root, "empty"))
+	t.Setenv("PATHEXT", ".EXE")
+	t.Setenv("SHELL", filepath.Join(root, "fish"))
+
+	oldPath := filepath.Join(root, "0.144.1", "app", "resources", "codex.exe")
+	newInstall := filepath.Join(root, "0.144.3", "app")
+	newPath := filepath.Join(newInstall, "resources", "codex.exe")
+	writeExecStub(t, newPath)
+	originalPaths := codexDesktopAppBundlePaths
+	originalDetect := detectAgentVersion
+	t.Cleanup(func() {
+		codexDesktopAppBundlePaths = originalPaths
+		detectAgentVersion = originalDetect
+	})
+	codexDesktopAppBundlePaths = func() []string {
+		return codexDesktopAppBundlePathsFor("windows", "", filepath.Dir(newInstall))
+	}
+	detectAgentVersion = func(_ context.Context, candidate agent.Command) (string, error) {
+		info, err := os.Stat(candidate.Path)
+		want, wantErr := os.Stat(newPath)
+		if err != nil || wantErr != nil || !os.SameFile(info, want) {
+			t.Fatalf("version detection used %q, want %q", candidate.Path, newPath)
+		}
+		return "0.144.3", nil
+	}
+
+	d := newSelfHealTestDaemon()
+	d.setAgentVersion("codex", "0.144.1")
+	pinned := AgentEntry{Path: oldPath, Command: "codex"}
+	updated, version, err := d.resolveAgentEntryForLaunch(t.Context(), "codex", pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, statErr := os.Stat(updated.Path)
+	want, wantErr := os.Stat(newPath)
+	if statErr != nil || wantErr != nil || !os.SameFile(info, want) || version != "0.144.3" {
+		t.Fatalf("resolved executable/version = (%q, %q), want (%q, %q)", updated.Path, version, newPath, "0.144.3")
+	}
 }

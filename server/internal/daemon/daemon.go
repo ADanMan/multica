@@ -1248,7 +1248,7 @@ func (d *Daemon) healAgentPath(ctx context.Context, provider, command string) he
 		return healOutcome{adopted: cached}
 	}
 
-	newPath, found := reresolveAgentCommand(command)
+	newPath, found := reresolveAgentCommand(provider, command)
 	if !found {
 		return healOutcome{}
 	}
