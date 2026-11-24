@@ -31,6 +31,7 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 				"For final-result comments, use `--output table` to confirm success without echoing the body",
 				"**enqueues a new run for that agent**",
 				"Access Multica platform resources only through the `multica` CLI",
+				"`--output json` writes JSON to stdout; confirmations and warnings go to stderr. Do not merge them (`2>&1`)",
 				"Runtime-local paths are never deliverables",
 				"Agent Identity instructions have priority over the issue workflow below",
 				"Catch up on the comment history",

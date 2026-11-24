@@ -2640,10 +2640,8 @@ func TestBriefPointsAtThePlatformSkill(t *testing.T) {
 // streams. Each builder must carry the prohibition verbatim, exactly once, with
 // the consequence attached.
 //
-// Both brief builders are checked, not one. The quick-create brief is a
-// separate function with its own copy of the `--output json` line, so guidance
-// added to the full brief alone would be missing from exactly the runs that are
-// given the least context to work it out for themselves.
+// Check issue and quick-create briefs because they advertise different
+// command sets while sharing the same CLI output contract.
 func TestEveryBriefThatTeachesJSONOutputAlsoWarnsAgainstMergingStderr(t *testing.T) {
 	t.Parallel()
 	const (
