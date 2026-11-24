@@ -1530,7 +1530,7 @@ func TestLoadConfig_PrefersNestedChatGPTCodexCLIPath(t *testing.T) {
 }
 
 func TestCodexDesktopAppBundlePaths_IncludesChatGPTAndLegacy(t *testing.T) {
-	paths := codexDesktopAppBundlePaths()
+	paths := codexDesktopAppBundlePathsFor("darwin", "", "")
 	const (
 		nestedSuffix = "ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
 		flatSuffix   = "ChatGPT.app/Contents/Resources/codex"

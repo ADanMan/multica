@@ -62,6 +62,8 @@ Multica 当前会检测以下命令：
 
 安装后，先在终端里单独启动一次工具，按它自己的流程登录或配置模型服务。工具在终端中完成不了请求，守护进程调用它也会失败。
 
+在 Windows 上，如果你用运行 Multica 守护进程的同一个 Windows 账户从 Microsoft Store 安装了 Codex Desktop，请打开 Codex Desktop 并登录。Multica 可以检测到应用自带的 CLI，无需单独安装。
+
 这些登录凭据由工具保存在本机。Multica 不会接收 Claude、Codex、Cursor 或其他 CLI 的登录 token。
 
 低于最低版本时，守护进程不会注册对应运行时：
