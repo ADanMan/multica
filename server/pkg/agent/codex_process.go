@@ -127,21 +127,22 @@ func (c *codexClient) turnUsage() TokenUsage {
 // A one-shot process inherits the task env directly and is reaped with its
 // turn.
 type codexProcess struct {
-	pooled        bool
-	fingerprint   string
-	threadID      string
-	cmd           *exec.Cmd
-	stdin         *codexSyncWriter
-	stdout        io.ReadCloser
-	stderrBuf     *stderrTail
-	client        *codexClient
-	stopProcess   context.CancelFunc
-	readerDone    chan struct{}
-	sessionDir    string
-	taskEnvFile   string
-	attempt       int
-	launchStarted time.Time
-	logger        *slog.Logger
+	pooled           bool
+	fingerprint      string
+	threadID         string
+	cmd              *exec.Cmd
+	stdin            *codexSyncWriter
+	stdout           io.ReadCloser
+	stderrBuf        *stderrTail
+	client           *codexClient
+	stopProcess      context.CancelFunc
+	processCancelled <-chan struct{}
+	readerDone       chan struct{}
+	sessionDir       string
+	taskEnvFile      string
+	attempt          int
+	launchStarted    time.Time
+	logger           *slog.Logger
 
 	closed           atomic.Bool
 	closeOnce        sync.Once
@@ -184,6 +185,30 @@ func (p *codexProcess) endTurn() {
 	p.clearTaskEnv()
 }
 
+// waitForReader retries a forced stop while the leader is still unreaped.
+// A subprocess fork racing the first kill can keep an inherited pipe open.
+func (p *codexProcess) waitForReader(grace time.Duration) bool {
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	cancelled := p.processCancelled
+	var retry <-chan time.Time
+	for {
+		select {
+		case <-p.readerDone:
+			return true
+		case <-deadline.C:
+			return false
+		case <-cancelled:
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer ticker.Stop()
+			retry = ticker.C
+			cancelled = nil
+		case <-retry:
+			signalProcessGroup(p.cmd, syscall.SIGKILL)
+		}
+	}
+}
+
 // Close closes stdin and joins the process exactly once, reporting whether
 // the whole process tree was confirmed reaped. Read stderrBuf only after it
 // returns, when os/exec's copy goroutines have finished.
@@ -213,12 +238,7 @@ func (p *codexProcess) Close() bool {
 		}
 
 		// Phase 1: let the reader finish before invoking cmd.Wait().
-		select {
-		case <-p.readerDone:
-			// reader drained cleanly (codex shutdown closed stdout) or aborted
-			// early (e.g. scanner overflow). Either way it is now safe to call
-			// cmd.Wait().
-		case <-time.After(grace):
+		if !p.waitForReader(grace) {
 			// codex did not close stdout within the grace window. Force the
 			// shutdown via context cancellation — cmd.Cancel group-kills the
 			// tree, the reader unblocks when stdout EOFs, and we proceed to
@@ -442,20 +462,21 @@ func (b *codexBackend) spawnCodexProcess(
 	}
 
 	return &codexProcess{
-		pooled:        pooled,
-		fingerprint:   fingerprint,
-		cmd:           cmd,
-		stdin:         stdin,
-		stdout:        stdout,
-		stderrBuf:     stderrBuf,
-		client:        c,
-		stopProcess:   stopProcess,
-		readerDone:    make(chan struct{}),
-		sessionDir:    sessionDir,
-		taskEnvFile:   taskEnvFile,
-		attempt:       attempt,
-		launchStarted: launchStarted,
-		logger:        b.cfg.Logger,
+		pooled:           pooled,
+		fingerprint:      fingerprint,
+		cmd:              cmd,
+		stdin:            stdin,
+		stdout:           stdout,
+		stderrBuf:        stderrBuf,
+		client:           c,
+		stopProcess:      stopProcess,
+		processCancelled: processCtx.Done(),
+		readerDone:       make(chan struct{}),
+		sessionDir:       sessionDir,
+		taskEnvFile:      taskEnvFile,
+		attempt:          attempt,
+		launchStarted:    launchStarted,
+		logger:           b.cfg.Logger,
 	}, nil
 }
 
