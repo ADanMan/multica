@@ -1403,6 +1403,46 @@ func TestCodexRawItemCommandExecution(t *testing.T) {
 	}
 }
 
+func TestCodexRawItemCommandExecutionReportsSilentFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{"nonzero exit", `"status":"failed","exitCode":17,"aggregatedOutput":null`, "Command exited with code 17."},
+		{"exit zero", `"status":"completed","exitCode":0,"aggregatedOutput":""`, ""},
+		{"missing exit code", `"status":"completed","aggregatedOutput":null`, ""},
+		{"command output kept", `"status":"failed","exitCode":17,"aggregatedOutput":"file not found"`, "file not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, _ := newTestCodexClient(t)
+			c.notificationProtocol = "raw"
+			var messages []Message
+			c.onMessage = func(msg Message) {
+				messages = append(messages, msg)
+			}
+			c.handleLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"shell-1",` + tc.fields + `}}}`)
+			if len(messages) != 1 || messages[0].Type != MessageToolResult || messages[0].Output != tc.want {
+				t.Fatalf("tool result = %+v, want output %q", messages, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexLegacyCommandResultPreservesOutputOrReportsExitCode(t *testing.T) {
+	t.Parallel()
+	c, _, _ := newTestCodexClient(t)
+	var messages []Message
+	c.onMessage = func(msg Message) { messages = append(messages, msg) }
+	c.handleLine(`{"jsonrpc":"2.0","method":"codex/event","params":{"msg":{"type":"exec_command_end","call_id":"silent","exit_code":9,"aggregated_output":""}}}`)
+	c.handleLine(`{"jsonrpc":"2.0","method":"codex/event","params":{"msg":{"type":"exec_command_end","call_id":"with-output","exit_code":9,"aggregated_output":"file not found"}}}`)
+	if len(messages) != 2 || messages[0].Output != "Command exited with code 9." || messages[1].Output != "file not found" {
+		t.Fatalf("legacy tool results = %+v", messages)
+	}
+}
+
 func TestCodexRawItemMCPToolCall(t *testing.T) {
 	t.Parallel()
 

@@ -3337,6 +3337,10 @@ func (c *codexClient) handleEvent(msg map[string]any) {
 	case "exec_command_end":
 		callID, _ := msg["call_id"].(string)
 		output, _ := msg["output"].(string)
+		if output == "" {
+			output, _ = msg["aggregated_output"].(string)
+		}
+		output = codexCommandOutput(output, msg["exit_code"])
 		if c.onMessage != nil {
 			c.onMessage(Message{
 				Type:   MessageToolResult,
@@ -3646,6 +3650,13 @@ func (c *codexClient) completeAgentMessage(itemID, text string) {
 	stream.pending.WriteString(suffix)
 }
 
+func codexCommandOutput(output string, exitCode any) string {
+	if code, ok := exitCode.(float64); output == "" && ok && code != 0 {
+		return fmt.Sprintf("Command exited with code %d.", int32(code))
+	}
+	return output
+}
+
 func (c *codexClient) handleItemNotification(method string, params map[string]any) {
 	item, _ := params["item"].(map[string]any)
 	itemType, _ := item["type"].(string)
@@ -3684,6 +3695,7 @@ func (c *codexClient) handleItemNotification(method string, params map[string]an
 
 	case method == "item/completed" && itemType == "commandExecution":
 		output, _ := item["aggregatedOutput"].(string)
+		output = codexCommandOutput(output, item["exitCode"])
 		if c.onMessage != nil {
 			c.onMessage(Message{
 				Type:   MessageToolResult,

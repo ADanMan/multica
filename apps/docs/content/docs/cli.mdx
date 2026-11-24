@@ -134,6 +134,8 @@ multica issue rerun-task <run-id> --issue MUL-123
 multica issue rerun-task <run-id> --issue MUL-123 --fresh
 ```
 
+If a Codex shell command exits with a nonzero code and produces no output, its tool result shows the exit code.
+
 Add a comment to a run that is still working, instead of queueing a follow-up run (only runs that accept additional messages; you can steer an agent exactly when your comment could start it):
 
 ```bash
