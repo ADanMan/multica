@@ -9788,7 +9788,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// pass the very same check in Finalize.
 	if env.LocalWorktree != nil && result.Status == "completed" {
 		if problem := env.LocalWorktree.CheckDelivery(); problem != nil {
-			result, tools = d.repairWorktreeDelivery(ctx, backend, execOpts, result, tools, problem, env, taskLog, task.ID, &msgSeq)
+			result, tools = d.repairWorktreeDelivery(ctx, backend, execOpts, runDeadline, result, tools, problem, env, taskLog, task.ID, &msgSeq)
 		}
 	}
 	phaseRecorder.Mark(taskPhaseTurnCompleted)
@@ -10206,7 +10206,17 @@ const worktreeRepairTimeout = 10 * time.Minute
 // its work back where Finalize can record it (#9404), then reports what came of
 // it. It never fails the task on its own: whatever state the worktree is in
 // afterwards, Finalize makes the same decision it always made.
-func (d *Daemon) repairWorktreeDelivery(ctx context.Context, backend agent.Backend, execOpts agent.ExecOptions, result agent.Result, tools int32, problem *execenv.DeliveryProblem, env *execenv.Environment, taskLog *slog.Logger, taskID string, msgSeq *atomic.Int32) (agent.Result, int32) {
+func (d *Daemon) repairWorktreeDelivery(ctx context.Context, backend agent.Backend, execOpts agent.ExecOptions, runDeadline time.Time, result agent.Result, tools int32, problem *execenv.DeliveryProblem, env *execenv.Environment, taskLog *slog.Logger, taskID string, msgSeq *atomic.Int32) (agent.Result, int32) {
+	timeout := worktreeRepairTimeout
+	if !runDeadline.IsZero() {
+		remaining := time.Until(runDeadline)
+		if remaining <= 0 {
+			taskLog.Warn("local_directory: skipping worktree delivery repair after the run timeout", "reason", problem.Reason)
+			return result, tools
+		}
+		timeout = min(timeout, remaining)
+	}
+
 	taskLog.Warn("local_directory: worktree delivery would be refused; asking the agent to repair it",
 		"branch", problem.Branch, "base", problem.BaseCommit, "tip", problem.Tip, "reason", problem.Reason)
 
@@ -10222,9 +10232,7 @@ func (d *Daemon) repairWorktreeDelivery(ctx context.Context, backend agent.Backe
 	// ends, so its receipt honestly reads "run ended before delivery" and the
 	// author can resend it (MUL-8139 review).
 	opts.EnableTaskSupplement = false
-	if opts.Timeout <= 0 || opts.Timeout > worktreeRepairTimeout {
-		opts.Timeout = worktreeRepairTimeout
-	}
+	opts.Timeout = timeout
 	repair, repairTools, repairErr := d.executeAndDrain(ctx, backend, BuildWorktreeDeliveryRepairPrompt(problem), opts, taskLog, taskID, env.CodexHome, msgSeq)
 	if repairErr != nil {
 		taskLog.Error("local_directory: worktree delivery repair turn failed to start", "error", repairErr)

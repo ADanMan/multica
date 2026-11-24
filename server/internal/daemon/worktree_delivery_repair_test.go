@@ -276,7 +276,7 @@ func TestRepairWorktreeDeliveryLetsTheAgentFixItsBranch(t *testing.T) {
 
 	var liveUsage map[string]agent.TokenUsage
 	opts := agent.ExecOptions{Timeout: time.Hour, OnUsage: func(usage map[string]agent.TokenUsage) { liveUsage = usage }}
-	got, _ := d.repairWorktreeDelivery(context.Background(), backend, opts, original, 1, problem, env, slog.Default(), "task-repair", new(atomic.Int32))
+	got, _ := d.repairWorktreeDelivery(context.Background(), backend, opts, time.Time{}, original, 1, problem, env, slog.Default(), "task-repair", new(atomic.Int32))
 	if liveUsage["m"].InputTokens != 107 || liveUsage["m"] != got.Usage["m"] {
 		t.Errorf("repair's live usage = %v, want terminal task total %v", liveUsage, got.Usage)
 	}
@@ -317,9 +317,40 @@ func TestRepairWorktreeDeliveryLeavesTheRefusalWhenTheAgentDoesNotFixIt(t *testi
 	d, _ := newPinRecorder(t)
 	backend := &repairingBackend{worktree: wt, problem: problem, comply: false}
 	env := &execenv.Environment{LocalWorktree: wt}
-	d.repairWorktreeDelivery(context.Background(), backend, agent.ExecOptions{}, agent.Result{Status: "completed"}, 0, problem, env, slog.Default(), "task-norepair", new(atomic.Int32))
+	d.repairWorktreeDelivery(context.Background(), backend, agent.ExecOptions{}, time.Time{}, agent.Result{Status: "completed"}, 0, problem, env, slog.Default(), "task-norepair", new(atomic.Int32))
 
 	if _, err := wt.Finalize(slog.Default()); err == nil || !strings.Contains(err.Error(), "no longer contains") {
 		t.Fatalf("Finalize = %v, want the original refusal", err)
 	}
+}
+
+func TestRepairWorktreeDeliveryUsesRemainingRunTimeout(t *testing.T) {
+	_, wt := squashedWorktree(t)
+	problem := wt.CheckDelivery()
+	if problem == nil {
+		t.Fatal("expected a delivery problem after the squash")
+	}
+	d, _ := newPinRecorder(t)
+	env := &execenv.Environment{LocalWorktree: wt}
+	opts := agent.ExecOptions{Timeout: time.Hour}
+	original := agent.Result{Status: "completed", SessionID: "original"}
+
+	t.Run("remaining time caps repair", func(t *testing.T) {
+		backend := &repairingBackend{worktree: wt, problem: problem}
+		remaining := 20 * time.Second
+		deadline := time.Now().Add(remaining)
+		d.repairWorktreeDelivery(t.Context(), backend, opts, deadline, original, 1, problem, env, slog.Default(), "task-repair", new(atomic.Int32))
+		if got := backend.gotOpts.Timeout; got <= 0 || got > remaining {
+			t.Fatalf("repair timeout = %s, want at most %s", got, remaining)
+		}
+	})
+
+	t.Run("expired run never starts repair", func(t *testing.T) {
+		backend := &repairingBackend{worktree: wt, problem: problem}
+		deadline := time.Now().Add(-time.Second)
+		got, tools := d.repairWorktreeDelivery(t.Context(), backend, opts, deadline, original, 1, problem, env, slog.Default(), "task-expired", new(atomic.Int32))
+		if backend.gotPrompt != "" || got.SessionID != original.SessionID || tools != 1 {
+			t.Fatalf("expired run started repair or changed outcome: prompt=%t, session=%q, tools=%d", backend.gotPrompt != "", got.SessionID, tools)
+		}
+	})
 }

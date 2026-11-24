@@ -75,7 +75,7 @@ func TestRepairWorktreeDeliveryDoesNotConsumeAdditionalMessages(t *testing.T) {
 	backend := &supplementRepairBackend{repairingBackend: repairingBackend{worktree: wt, problem: problem, comply: true}, ack: ack}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	result, _ := d.repairWorktreeDelivery(ctx, backend, agent.ExecOptions{EnableTaskSupplement: true}, agent.Result{Status: "completed", Output: "original reply"}, 0, problem, &execenv.Environment{LocalWorktree: wt}, slog.Default(), "review-task", new(atomic.Int32))
+	result, _ := d.repairWorktreeDelivery(ctx, backend, agent.ExecOptions{EnableTaskSupplement: true}, time.Time{}, agent.Result{Status: "completed", Output: "original reply"}, 0, problem, &execenv.Environment{LocalWorktree: wt}, slog.Default(), "review-task", new(atomic.Int32))
 	if backend.runErr != nil {
 		t.Fatal(backend.runErr)
 	}
