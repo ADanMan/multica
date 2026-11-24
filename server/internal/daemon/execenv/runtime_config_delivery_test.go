@@ -18,7 +18,7 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 		t.Run(tc.provider, func(t *testing.T) {
 			ctx := TaskContextForEnv{
 				IssueID:           "issue-1",
-				AgentInstructions: strings.Repeat("Synthetic workspace instruction.\n", 600),
+				AgentInstructions: strings.Repeat("Synthetic workspace instruction.\n", 1000),
 			}
 			brief := buildMetaSkillContent(tc.provider, ctx)
 			if len(brief) <= tc.budget {
@@ -27,6 +27,8 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 			retained := brief[:tc.budget]
 			for _, rule := range []string{
 				"Final results MUST be delivered via `multica issue comment add`",
+				"always write the comment body to a UTF-8 file with your file-write tool first, then post it with `--content-file <path>`",
+				"For final-result comments, use `--output table` to confirm success without echoing the body",
 				"**enqueues a new run for that agent**",
 				"Access Multica platform resources only through the `multica` CLI",
 				"Runtime-local paths are never deliverables",

@@ -1102,6 +1102,9 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeMentions(&b, ctx.DocsEnabled)
 	}
 	writeOutput(&b, kind, ctx)
+	if kind == kindIssue {
+		writeCommentFormatting(&b)
+	}
 
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
@@ -1114,10 +1117,6 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeAvailableCommands(&b, ctx)
 	}
 	writeIssueBodyFormatting(&b)
-
-	if kind == kindIssue {
-		writeCommentFormatting(&b)
-	}
 
 	if kind != kindQuickCreate {
 		writeRepositories(&b, ctx)

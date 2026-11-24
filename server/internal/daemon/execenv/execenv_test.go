@@ -2474,8 +2474,7 @@ func TestInjectRuntimeConfigLinuxCommentFormattingEmphasizesFile(t *testing.T) {
 			// Assert inside the section slice: "#4182" also appears in
 			// Available Commands, so a whole-file Contains would stay green
 			// with the HEREDOC ban deleted here (review catch on #6453).
-			// Match the HEADING at line start — Available Commands references
-			// "## Comment Formatting" inline earlier in the file.
+			// Match the HEADING at line start rather than inline references.
 			cfStart := strings.Index(s, "\n## Comment Formatting\n")
 			if cfStart < 0 {
 				t.Fatalf("%s missing ## Comment Formatting section\n---\n%s", fileName, s)
