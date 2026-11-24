@@ -32,6 +32,10 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 				"**enqueues a new run for that agent**",
 				"Access Multica platform resources only through the `multica` CLI",
 				"Runtime-local paths are never deliverables",
+				"Agent Identity instructions have priority over the issue workflow below",
+				"Catch up on the comment history",
+				"reply in its thread with the `--parent` value it gives you for THIS turn",
+				"Before exiting, confirm the status still matches where things actually stand",
 			} {
 				if !strings.Contains(retained, rule) {
 					t.Errorf("first %d bytes are missing %q", tc.budget, rule)

@@ -810,8 +810,8 @@ func TestWorkspaceContextRenderedAcrossTaskKinds(t *testing.T) {
 			}
 			// The block must precede Available Commands so it acts as
 			// background framing, not a footer hidden below CLI usage.
-			ctxIdx := strings.Index(out, "## Workspace Context")
-			cmdsIdx := strings.Index(out, "## Available Commands")
+			ctxIdx := strings.Index(out, "\n## Workspace Context\n")
+			cmdsIdx := strings.Index(out, "\n## Available Commands\n")
 			if ctxIdx == -1 || cmdsIdx == -1 || ctxIdx > cmdsIdx {
 				t.Errorf("[%s] `## Workspace Context` must appear above `## Available Commands` (ctx=%d, cmds=%d)", tc.name, ctxIdx, cmdsIdx)
 			}

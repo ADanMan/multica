@@ -612,9 +612,9 @@ const SessionContinuityNoticeChatTranscript = "## Session Continuity Notice\n\n"
 const SessionContinuityNoticeUnrecoverable = "## Session Continuity Notice\n\n" +
 	"This run was meant to continue an earlier conversation, but that session's context could NOT be restored — you are starting fresh with no memory of the previous turns. That history is not readable from anywhere now: there is no command that fetches it, and only the context already in this message survives. **When you reply, tell the user up front (one short sentence) that the previous conversation context was unavailable and this is a new session**, so they understand why the thread did not carry over.\n\n"
 
-// writeWorkflowHeader emits the unconditional `### Workflow` heading.
+// writeWorkflowHeader emits the unconditional `## Workflow` heading.
 func writeWorkflowHeader(b *strings.Builder) {
-	b.WriteString("### Workflow\n\n")
+	b.WriteString("## Workflow\n\n")
 }
 
 // writeWorkflowChat emits the chat-mode workflow. Follow-up quick actions are
@@ -1104,6 +1104,21 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	writeOutput(&b, kind, ctx)
 	if kind == kindIssue {
 		writeCommentFormatting(&b)
+		writeInstructionPrecedence(&b)
+	}
+
+	writeWorkflowHeader(&b)
+	switch kind {
+	case kindChat:
+		writeWorkflowChat(&b)
+	case kindDocComment:
+		writeWorkflowDocComment(&b)
+	case kindQuickCreate:
+		writeWorkflowQuickCreate(&b)
+	case kindAutopilotRunOnly:
+		writeWorkflowAutopilot(&b)
+	case kindIssue:
+		writeWorkflowIssue(&b, ctx)
 	}
 
 	writeAgentIdentity(&b, ctx)
@@ -1123,24 +1138,6 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	}
 
 	writeProjectContext(&b, ctx)
-
-	if kind == kindIssue {
-		writeInstructionPrecedence(&b)
-	}
-
-	writeWorkflowHeader(&b)
-	switch kind {
-	case kindChat:
-		writeWorkflowChat(&b)
-	case kindDocComment:
-		writeWorkflowDocComment(&b)
-	case kindQuickCreate:
-		writeWorkflowQuickCreate(&b)
-	case kindAutopilotRunOnly:
-		writeWorkflowAutopilot(&b)
-	case kindIssue:
-		writeWorkflowIssue(&b, ctx)
-	}
 
 	if kind.hasIssueContext() && ctx.IssueID != "" {
 		writeSubIssueCreation(&b, ctx)

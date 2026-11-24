@@ -152,7 +152,7 @@ func TestBuildMetaSkillContentSlimKindMatrix(t *testing.T) {
 		{"## Agent Identity", allKinds},
 		{"## Available Commands", allKinds},
 		{"## Issue Body Formatting", allKinds},
-		{"### Workflow", allKinds},
+		{"## Workflow", allKinds},
 		{"## Important: Always Use the `multica` CLI", allKinds},
 		{"## Output", allKinds},
 		{"## Comment Formatting", issueKinds},
