@@ -808,12 +808,13 @@ func TestWorkspaceContextRenderedAcrossTaskKinds(t *testing.T) {
 			if !strings.Contains(out, wsContext) {
 				t.Errorf("[%s] brief missing workspace context body %q", tc.name, wsContext)
 			}
-			// The block must precede Available Commands so it acts as
-			// background framing, not a footer hidden below CLI usage.
+			// Quick-create needs its one allowed command and file rules before
+			// variable context. Other tasks frame the general command reference.
 			ctxIdx := strings.Index(out, "\n## Workspace Context\n")
 			cmdsIdx := strings.Index(out, "\n## Available Commands\n")
-			if ctxIdx == -1 || cmdsIdx == -1 || ctxIdx > cmdsIdx {
-				t.Errorf("[%s] `## Workspace Context` must appear above `## Available Commands` (ctx=%d, cmds=%d)", tc.name, ctxIdx, cmdsIdx)
+			wantCommandsFirst := tc.ctx.QuickCreatePrompt != ""
+			if ctxIdx == -1 || cmdsIdx == -1 || (cmdsIdx < ctxIdx) != wantCommandsFirst {
+				t.Errorf("command order: context=%d commands=%d want commands first=%t", ctxIdx, cmdsIdx, wantCommandsFirst)
 			}
 		})
 	}

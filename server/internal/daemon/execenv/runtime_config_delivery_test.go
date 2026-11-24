@@ -36,6 +36,40 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 				"Catch up on the comment history",
 				"reply in its thread with the `--parent` value it gives you for THIS turn",
 				"Before exiting, confirm the status still matches where things actually stand",
+				"Fetch issue/comment attachments via the authenticated CLI",
+				"`--status backlog` parks it for later promotion",
+			} {
+				if !strings.Contains(retained, rule) {
+					t.Errorf("first %d bytes are missing %q", tc.budget, rule)
+				}
+			}
+		})
+	}
+}
+
+func TestQuickCreateBriefKeepsCreateCommandWithinProjectDocumentBudget(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		provider string
+		budget   int
+	}{
+		{provider: "codex", budget: 32 * 1024},
+		{provider: "antigravity", budget: 24000},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			brief := buildMetaSkillContent(tc.provider, TaskContextForEnv{
+				QuickCreatePrompt: "Create one issue",
+				AgentInstructions: strings.Repeat("Synthetic workspace instruction.\n", 1000),
+			})
+			if len(brief) <= tc.budget {
+				t.Fatalf("brief is %d bytes, want fixture to exceed %d", len(brief), tc.budget)
+			}
+			retained := brief[:tc.budget]
+			for _, rule := range []string{
+				"Do not retry for any reason",
+				"Prefer `--description-file <path>` over `--description-stdin`",
+				"Write that file inside your working directory",
 			} {
 				if !strings.Contains(retained, rule) {
 					t.Errorf("first %d bytes are missing %q", tc.budget, rule)

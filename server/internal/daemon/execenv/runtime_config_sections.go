@@ -1115,20 +1115,22 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 		writeWorkflowDocComment(&b)
 	case kindQuickCreate:
 		writeWorkflowQuickCreate(&b)
+		writeAvailableCommandsQuickCreate(&b)
 	case kindAutopilotRunOnly:
 		writeWorkflowAutopilot(&b)
 	case kindIssue:
 		writeWorkflowIssue(&b, ctx)
+		writeAttachments(&b)
+	}
+	if kind.hasIssueContext() && ctx.IssueID != "" {
+		writeSubIssueCreation(&b, ctx)
 	}
 
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeWorkspaceContext(&b, ctx)
 
-	switch kind {
-	case kindQuickCreate:
-		writeAvailableCommandsQuickCreate(&b)
-	default:
+	if kind != kindQuickCreate {
 		writeAvailableCommands(&b, ctx)
 	}
 	writeIssueBodyFormatting(&b)
@@ -1139,18 +1141,10 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 
 	writeProjectContext(&b, ctx)
 
-	if kind.hasIssueContext() && ctx.IssueID != "" {
-		writeSubIssueCreation(&b, ctx)
-	}
-
 	// Every kind, quick-create included. Quick-create used to be skipped here
 	// and carried its own names-only index in the workdir sidecar instead;
 	// that sidecar is gone (MUL-6984) and the brief is the single index.
 	writeSkills(&b, provider, ctx)
-
-	if kind == kindIssue {
-		writeAttachments(&b)
-	}
 
 	return b.String()
 }
