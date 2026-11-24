@@ -238,6 +238,68 @@ func TestTerminalReportReplaysAfterDaemonRestart(t *testing.T) {
 	}
 }
 
+func TestTaskTimeoutReportReplaysOverHTTPAfterDaemonRestart(t *testing.T) {
+	defer noSleepRetry(t)()
+	var online atomic.Bool
+	var rejected atomic.Int32
+	var accepted atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost || req.URL.Path != "/api/daemon/tasks/task-timeout/fail" {
+			t.Errorf("unexpected callback: %s %s", req.Method, req.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			FailureReason string `json:"failure_reason"`
+			Error         string `json:"error"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Errorf("decode failure callback: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if body.FailureReason != "timeout" || body.Error != "execution deadline exceeded" {
+			t.Errorf("unexpected failure callback: %+v", body)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !online.Load() {
+			rejected.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		accepted.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := Config{
+		ServerBaseURL:  srv.URL,
+		WorkspacesRoot: t.TempDir(),
+		DaemonID:       "daemon-timeout",
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	beforeRestart := New(cfg, logger)
+	beforeRestart.reportTaskResult(context.Background(), "task-timeout", TaskResult{
+		Status:        "failed",
+		Comment:       "execution deadline exceeded",
+		FailureReason: "timeout",
+	}, logger)
+	if rejected.Load() == 0 {
+		t.Fatal("expected the initial failure callback to reach the unavailable server")
+	}
+	if reports, err := beforeRestart.terminalReports.list(); err != nil || len(reports) != 1 {
+		t.Fatalf("pending reports before restart = %d, %v; want 1", len(reports), err)
+	}
+
+	online.Store(true)
+	afterRestart := New(cfg, logger)
+	pending, delivered := afterRestart.replayPendingTerminalReports(context.Background())
+	if pending != 0 || delivered != 1 || accepted.Load() != 1 {
+		t.Fatalf("restart replay pending=%d delivered=%d accepted=%d, want 0/1/1", pending, delivered, accepted.Load())
+	}
+}
+
 func TestTerminalReportEnqueueFailureStillAttemptsHTTP(t *testing.T) {
 	cfg := Config{
 		ServerBaseURL:  "https://api.example.test",
