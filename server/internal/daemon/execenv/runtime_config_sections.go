@@ -287,7 +287,7 @@ func writeAvailableCommands(b *strings.Builder, ctx TaskContextForEnv) {
 	b.WriteString("- `multica issue comment list <issue-id> [--roots-only] [--summary] [--thread <comment-id> [--tail N] | --recent N] [--since <RFC3339>] [--compact] --output json` — thread-aware comment reads. Read in two bounded steps: scan with `--roots-only --summary`, then expand one thread with `--thread <id> --tail N`. Careful with `--recent N`: it caps THREADS, not comments, and can return the whole history on a small issue. Resolved-thread folding, paging cursors, and full flag semantics: `--help`.\n")
 	b.WriteString("- `multica issue create --title \"...\" [--description-file <path>] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>] [--attachment <path>]` — create an issue. Put agent-authored long descriptions in `--description-file <path>` (heredoc stdin can swallow trailing flags, #4182); write that file inside your working directory, never `/tmp` or shared paths.\n")
 	b.WriteString("- `multica issue update <id> [--title X] [--description-file <path> [--description-base-revision N]] [--priority X] [--status X] [--assignee X] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>]` — update fields; pass `--parent \"\"` to clear parent.\n")
-	b.WriteString("- `multica issue edit-description <id> --old <exact text> --new <text>` (`--old-file` / `--new-file` for multi-line text or anything with code or quotes) — change part of a description with this, so the rest, including what people are typing live, is kept; a whole new `--description-file` on `issue update` should carry `--description-base-revision <description_revision from issue get>`, so edits made since are merged in or the write is refused — never silently overwritten.\n")
+	b.WriteString("- `multica issue edit-description <id>` — change part of a description. See `## Issue Body Formatting`.\n")
 	b.WriteString("- `multica issue assign <id> (--to X | --to-id <uuid> | --unassign)` — change ownership; assigning to an agent can start a run.\n")
 	writeIssueStatusCommand(b, ctx)
 	b.WriteString(duplicateOfCommandLine)
@@ -425,13 +425,14 @@ func writeAvailableCommandsQuickCreate(b *strings.Builder) {
 	b.WriteString("- `multica issue create --title \"...\" [--description \"...\" | --description-file <path> | --description-stdin] [--priority X] [--status X] [--assignee X | --assignee-id <uuid> | --assignee-picker] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>] [--attachment <path>]` — Create a new issue; `--attachment` may be repeated. Inline `--description \"...\"` is only for a short single-line body with no code, quotes, backticks or `$()`. Anything multi-line, or carrying code snippets / file paths / quotes / backticks / `$()` — which quick-create descriptions usually are — MUST go to a file, because the shell rewrites or truncates rich text passed inline (MUL-2904). Prefer `--description-file <path>` over `--description-stdin` (flags after a HEREDOC terminator can be silently swallowed, #4182). Write that file inside your working directory (e.g. `./description.md`), never `/tmp` or shared paths, and treat a failed write as fatal — never run `--description-file` against a file whose write did not succeed. The CLI rejects a path outside the workdir so a stale file from another run can't leak in (MUL-4252).\n\n")
 }
 
-// writeIssueBodyFormatting emits the default Markdown hierarchy for issue
-// descriptions. It is shared by every task kind because issue creation and
-// updates can be requested from issue, chat, autopilot, and quick-create
-// surfaces.
-func writeIssueBodyFormatting(b *strings.Builder) {
+// writeIssueBodyFormatting keeps description rules together for every surface
+// that can create issues. Quick-create cannot edit an existing description.
+func writeIssueBodyFormatting(b *strings.Builder, kind taskKind) {
 	b.WriteString("## Issue Body Formatting\n\n")
 	b.WriteString("An issue title already serves as its H1. By default, do not add a Markdown H1 (`# ...`) to an issue body or description; start with prose or `##` subheadings. Only add an H1 when the user specifically requests one.\n\n")
+	if kind != kindQuickCreate {
+		b.WriteString("To change part of a description, use `multica issue edit-description <id> --old <exact text> --new <text>` (`--old-file` / `--new-file` for multi-line text, code, or quotes). This preserves the rest, including concurrent edits. For a full replacement via `issue update --description-file`, pass `--description-base-revision <description_revision from issue get>` so concurrent edits are merged or the write is refused.\n\n")
+	}
 }
 
 // commentReceiptRule picks the receipt mode for a posting command. It trails
@@ -1124,6 +1125,7 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	if kind.hasIssueContext() && ctx.IssueID != "" {
 		writeSubIssueCreation(&b, ctx)
 	}
+	writeIssueBodyFormatting(&b, kind)
 
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
@@ -1132,8 +1134,6 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	if kind != kindQuickCreate {
 		writeAvailableCommands(&b, ctx)
 	}
-	writeIssueBodyFormatting(&b)
-
 	if kind != kindQuickCreate {
 		writeRepositories(&b, ctx)
 	}

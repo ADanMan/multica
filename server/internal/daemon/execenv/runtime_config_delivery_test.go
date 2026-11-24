@@ -39,6 +39,8 @@ func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
 				"Before exiting, confirm the status still matches where things actually stand",
 				"Fetch issue/comment attachments via the authenticated CLI",
 				"`--status backlog` parks it for later promotion",
+				"`multica issue edit-description <id> --old <exact text> --new <text>`",
+				"`--description-base-revision <description_revision from issue get>`",
 			} {
 				if !strings.Contains(retained, rule) {
 					t.Errorf("first %d bytes are missing %q", tc.budget, rule)
