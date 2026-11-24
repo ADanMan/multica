@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"io"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -47,16 +46,15 @@ func discoverMuseModels(ctx context.Context, runtimeCmd Command) (Catalog, error
 		_ = stdin.Close()
 		return Catalog{Models: []Model{}, Fallback: true}, nil
 	}
-	cmd.Stderr = io.Discard
+	// Leave stderr connected to the null device so Wait has no stderr pipe to drain.
 	if err := startOwnedProcessTree(cmd, runtimeCmd.logger); err != nil {
 		return Catalog{Models: []Model{}, Fallback: true}, nil
 	}
-	// This probe runs on a discovery schedule, so a leaked host would
-	// accumulate. Always reap the process group.
 	defer func() {
 		_ = stdin.Close()
 		signalProcessGroup(cmd, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
+		// Cmd.Wait also closes the pipes and joins the context watcher.
+		_ = cmd.Wait()
 		releaseProcessGroup(cmd)
 	}()
 
