@@ -5,6 +5,40 @@ import (
 	"testing"
 )
 
+func TestIssueBriefKeepsCriticalRulesWithinProjectDocumentBudget(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		provider string
+		budget   int
+	}{
+		{provider: "codex", budget: 32 * 1024},
+		{provider: "antigravity", budget: 24000},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			ctx := TaskContextForEnv{
+				IssueID:           "issue-1",
+				AgentInstructions: strings.Repeat("Synthetic workspace instruction.\n", 600),
+			}
+			brief := buildMetaSkillContent(tc.provider, ctx)
+			if len(brief) <= tc.budget {
+				t.Fatalf("brief is %d bytes, want fixture to exceed %d", len(brief), tc.budget)
+			}
+			retained := brief[:tc.budget]
+			for _, rule := range []string{
+				"Final results MUST be delivered via `multica issue comment add`",
+				"**enqueues a new run for that agent**",
+				"Access Multica platform resources only through the `multica` CLI",
+				"Runtime-local paths are never deliverables",
+			} {
+				if !strings.Contains(retained, rule) {
+					t.Errorf("first %d bytes are missing %q", tc.budget, rule)
+				}
+			}
+		})
+	}
+}
+
 // The MUL-4899 delivery contract as the BRIEF states it. Two orthogonal
 // properties are pinned here and must not be collapsed:
 //

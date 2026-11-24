@@ -2421,7 +2421,9 @@ func TestBriefSkillsListIsNamesOnly(t *testing.T) {
 			if !ok {
 				t.Fatal("brief has no Skills section")
 			}
-			section, _, _ = strings.Cut(section, "## Mentions\n\n")
+			if beforeNextHeading, _, found := strings.Cut(section, "\n## "); found {
+				section = beforeNextHeading + "\n"
+			}
 			const want = "You have the following skills installed (discovered automatically):\n\n- **pr-review**\n\n"
 			if section != want {
 				t.Errorf("native-discovery Skills section changed:\ngot  %q\nwant %q", section, want)

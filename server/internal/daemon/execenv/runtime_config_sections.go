@@ -1095,6 +1095,14 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	// (daemon.BuildPrompt) instead. See MUL-5377.
 	writeHeader(&b)
 	writeBackgroundTaskSafetySlim(&b, provider)
+	// Some runtimes read only a prefix of the generated instruction file.
+	// Keep the platform's action and delivery rules ahead of variable context.
+	writeAlwaysUseCLI(&b)
+	if kind == kindIssue || kind == kindDocComment {
+		writeMentions(&b, ctx.DocsEnabled)
+	}
+	writeOutput(&b, kind, ctx)
+
 	writeAgentIdentity(&b, ctx)
 	writeRequestingUser(&b, ctx)
 	writeWorkspaceContext(&b, ctx)
@@ -1145,15 +1153,8 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	writeSkills(&b, provider, ctx)
 
 	if kind == kindIssue {
-		writeMentions(&b, ctx.DocsEnabled)
 		writeAttachments(&b)
 	}
-	if kind == kindDocComment {
-		writeMentions(&b, ctx.DocsEnabled)
-	}
-
-	writeAlwaysUseCLI(&b)
-	writeOutput(&b, kind, ctx)
 
 	return b.String()
 }

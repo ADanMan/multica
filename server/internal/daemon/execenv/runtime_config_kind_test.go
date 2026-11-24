@@ -266,13 +266,12 @@ func TestQuickCreateBriefOwnsRunAndOutputRules(t *testing.T) {
 	}
 
 	// ## Output states where the output goes and how a FILE is delivered; the
-	// rules themselves are stated once, above. A second copy here is what this
-	// change removed.
-	outputIdx := strings.Index(out, "## Output")
-	if outputIdx < 0 {
+	// rules themselves are stated once in Workflow.
+	_, outputSection, ok := strings.Cut(out, "\n## Output\n\n")
+	if !ok {
 		t.Fatalf("quick-create brief has no ## Output section\n---\n%s", out)
 	}
-	outputSection := out[outputIdx:]
+	outputSection, _, _ = strings.Cut(outputSection, "\n## ")
 	if !strings.Contains(outputSection, "**Delivering files here:**") {
 		t.Errorf("## Output lost the file-delivery channel\n---\n%s", outputSection)
 	}
