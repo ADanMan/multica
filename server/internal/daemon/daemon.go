@@ -9654,6 +9654,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	observeRateLimits, stopRateLimitFlush := d.startRateLimitFlush(ctx, task.ID, taskLog)
 	execOpts.OnRateLimits = observeRateLimits
 	defer stopRateLimitFlush()
+	var runDeadline time.Time
+	if execOpts.Timeout > 0 {
+		runDeadline = time.Now().Add(execOpts.Timeout)
+	}
 	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
 	if err != nil {
 		return TaskResult{}, err
@@ -9739,10 +9743,22 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			d.reportContextReceipt(receiptCtx, task.ID, retryReceipt, taskLog)
 		}(ctx)
 
-		retryResult, retryTools, retryErr := d.executeAndDrain(ctx, backend, freshPrompt, withPriorTaskUsage(execOpts, firstUsage), taskLog, task.ID, env.CodexHome, &msgSeq)
+		retryOpts := withPriorTaskUsage(execOpts, firstUsage)
+		if !runDeadline.IsZero() {
+			retryOpts.Timeout = time.Until(runDeadline)
+		}
+		var retryResult agent.Result
+		var retryTools int32
+		var retryErr error
+		if !runDeadline.IsZero() && retryOpts.Timeout <= 0 {
+			retryResult.Status = "timeout"
+		} else {
+			retryResult, retryTools, retryErr = d.executeAndDrain(ctx, backend, freshPrompt, retryOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
+		}
+		hitRunDeadline := retryResult.Status == "timeout" && !runDeadline.IsZero() && !time.Now().Before(runDeadline)
 		if retryErr != nil {
 			taskLog.Error("fresh session also failed to start; keeping the original poisoned result", "error", retryErr)
-		} else if retryResult.Status != "completed" && retryResult.SessionID == "" {
+		} else if !hitRunDeadline && retryResult.Status != "completed" && retryResult.SessionID == "" {
 			taskLog.Warn("fresh session retry also failed without establishing a new session; keeping the original poisoned result",
 				"retry_status", retryResult.Status,
 				"retry_error", retryResult.Error,
@@ -9754,7 +9770,15 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// session wins with its own id; a retry that fails without a new
 		// session keeps firstResult so the bad session stays excluded rather
 		// than being relabeled resumable by a benign-looking second error.
-		result, tools = reconcileFreshRetryResult(firstResult, firstUsage, firstTools, retryResult, retryTools, retryErr)
+		if hitRunDeadline {
+			// Report the task's configured cap even when the retry never opened a
+			// session. The rejected session is retired independently.
+			retryResult.Error = fmt.Sprintf("%s timed out after %s", provider, execOpts.Timeout)
+			retryResult.Usage = mergeUsage(firstUsage, retryResult.Usage)
+			result, tools = retryResult, retryTools
+		} else {
+			result, tools = reconcileFreshRetryResult(firstResult, firstUsage, firstTools, retryResult, retryTools, retryErr)
+		}
 	}
 
 	// Worktree mode: if the agent finished with its work somewhere Finalize
