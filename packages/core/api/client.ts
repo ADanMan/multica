@@ -950,6 +950,8 @@ type WorkspaceScope = string | { workspaceId: string };
 /** `readOnly` marks a POST that changes nothing on the server. */
 type ApiRequestInit = RequestInit & { readOnly?: boolean };
 
+const ISSUE_TIMELINE_TIMEOUT_MS = 15_000;
+
 function workspaceHeader(
   scope?: WorkspaceScope,
 ): Record<string, string> | undefined {
@@ -2172,6 +2174,7 @@ export class ApiClient {
   async listTimeline(issueId: string): Promise<TimelineEntry[]> {
     const raw = await this.fetch<unknown>(
       `/api/issues/${issueId}/timeline`,
+      { signal: AbortSignal.timeout(ISSUE_TIMELINE_TIMEOUT_MS) },
     );
     return parseWithFallback(raw, TimelineEntriesSchema, EMPTY_TIMELINE_ENTRIES, {
       endpoint: "GET /api/issues/:id/timeline",

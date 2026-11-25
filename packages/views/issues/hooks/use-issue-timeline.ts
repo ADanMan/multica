@@ -512,6 +512,9 @@ export function useIssueTimeline(issueId: string, userId?: string, focusCommentI
   return {
     timeline: optimisticTimeline,
     loading: loading || (needsThread && threadQuery.isPending),
+    hasLoadError: query.isError,
+    retrying: query.isFetching,
+    retryTimeline: query.refetch,
     /**
      * When the cached timeline was last written (Query's `dataUpdatedAt`).
      * Lets a caller tell whether `timeline` already reflects a read it

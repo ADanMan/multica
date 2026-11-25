@@ -1824,6 +1824,7 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
   // Custom hooks — encapsulate timeline, reactions, subscribers
   const {
     timeline, loading: timelineLoading, dataUpdatedAt: timelineUpdatedAt,
+    hasLoadError: timelineLoadError, retrying: timelineRetrying, retryTimeline,
     submitComment, submitReply,
     editComment, deleteComment, toggleResolveComment, toggleReaction: handleToggleReaction,
   } = useIssueTimeline(id, user?.id, activeDeliverableJump?.commentId);
@@ -4515,6 +4516,22 @@ export function IssueDetail({ issueId, onDelete, inbox, defaultSidebarOpen = tru
                 doesn't compete with sticky banners in this content column.
                 The per-task timeline + past runs live in the right panel
                 via ExecutionLogSection. */}
+
+            {timelineLoadError && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
+                <p role="status">{t(($) => $.inline_run.load_failed)}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  aria-busy={timelineRetrying}
+                  disabled={timelineRetrying}
+                  onClick={() => void retryTimeline()}
+                >
+                  {t(($) => $.inline_run.try_again)}
+                </Button>
+              </div>
+            )}
 
             {/* Timeline entries — virtualized via react-virtuoso to keep
                 first-paint cost O(viewport) instead of O(N). On a 500-comment

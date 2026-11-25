@@ -839,6 +839,35 @@ function threadRow(el: Element): Element {
   return el.closest("[data-thread-row]") ?? el;
 }
 describe("IssueDetail (shared)", () => {
+  it("lets readers retry a failed activity request", async () => {
+    mockApiObj.listTimeline.mockRejectedValueOnce(new Error("network disconnected"));
+    renderIssueDetail();
+
+    expect(await screen.findByText(enIssues.inline_run.load_failed)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: enIssues.inline_run.try_again }));
+
+    await waitFor(() => expect(mockApiObj.listTimeline).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Started working on this")).toBeInTheDocument();
+    expect(screen.queryByText(enIssues.inline_run.load_failed)).not.toBeInTheDocument();
+  });
+
+  it("keeps cached activity visible if its refresh fails", async () => {
+    const client = createTestQueryClient();
+    client.setQueryData(issueKeys.timeline("issue-1"), mockTimeline);
+    mockApiObj.listTimeline.mockRejectedValueOnce(new Error("network disconnected"));
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={client}>
+          <IssueDetail issueId="issue-1" />
+        </QueryClientProvider>
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText(enIssues.inline_run.load_failed)).toBeInTheDocument();
+    expect(screen.getByText("Started working on this")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: enIssues.inline_run.try_again })).toBeEnabled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     contentEditorMounts.count = 0;

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import { setApiInstance } from "../api";
-import { ApiError, type ApiClient } from "../api/client";
+import { ApiClient, ApiError } from "../api/client";
 import type {
   Issue,
   IssueTableRowsRequest,
@@ -26,6 +26,7 @@ import {
   issueKeys,
   issueListOptions,
   issueTableRowPageOptions,
+  issueTimelineOptions,
   prefetchIssuePage,
   projectGanttIssuesOptions,
   sidebarIssuesOptions,
@@ -35,6 +36,36 @@ import { onIssueUpdated } from "./ws-updaters";
 
 const WS_ID = "ws-1";
 const PROJECT_ID = "project-1";
+
+describe("issueTimelineOptions", () => {
+  it("aborts the HTTP request when its timeline deadline expires", async () => {
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const api = new ApiClient("https://api.example.test");
+    setApiInstance(api);
+    const fetchTimeline = vi.fn((_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) return Promise.reject(new Error("timeline did not supply an abort signal"));
+      return new Promise<Response>((_, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchTimeline);
+    const client = new QueryClient();
+    try {
+      const request = client.fetchQuery(issueTimelineOptions("issue-1"));
+      const result = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+      deadline.abort(new DOMException("Timeline request timed out", "TimeoutError"));
+      await result;
+      expect(timeout).toHaveBeenCalledWith(15_000);
+      expect(fetchTimeline).toHaveBeenCalledTimes(1);
+    } finally {
+      client.clear();
+      vi.unstubAllGlobals();
+      timeout.mockRestore();
+    }
+  });
+});
 
 describe("sourceContextPreviewOptions", () => {
   it("isolates preview cache entries by workspace", () => {
