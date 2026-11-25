@@ -2171,10 +2171,11 @@ export class ApiClient {
     });
   }
 
-  async listTimeline(issueId: string): Promise<TimelineEntry[]> {
+  async listTimeline(issueId: string, signal?: AbortSignal): Promise<TimelineEntry[]> {
+    const deadline = AbortSignal.timeout(ISSUE_TIMELINE_TIMEOUT_MS);
     const raw = await this.fetch<unknown>(
       `/api/issues/${issueId}/timeline`,
-      { signal: AbortSignal.timeout(ISSUE_TIMELINE_TIMEOUT_MS) },
+      { signal: signal ? AbortSignal.any([signal, deadline]) : deadline },
     );
     return parseWithFallback(raw, TimelineEntriesSchema, EMPTY_TIMELINE_ENTRIES, {
       endpoint: "GET /api/issues/:id/timeline",

@@ -38,6 +38,38 @@ const WS_ID = "ws-1";
 const PROJECT_ID = "project-1";
 
 describe("issueTimelineOptions", () => {
+  it("cancels an abandoned timeline request so a later visit can load it", async () => {
+    setApiInstance(new ApiClient("https://api.example.test"));
+    const abandoned = vi.fn();
+    const fetchTimeline = vi.fn()
+      .mockImplementationOnce((_url: string, init?: RequestInit) => {
+        const signal = init?.signal;
+        return new Promise<Response>((_, reject) => {
+          signal?.addEventListener("abort", () => {
+            abandoned();
+            reject(signal.reason);
+          }, { once: true });
+        });
+      })
+      .mockResolvedValueOnce(Response.json([]));
+    vi.stubGlobal("fetch", fetchTimeline);
+    const client = new QueryClient();
+    const options = issueTimelineOptions("issue-1");
+    const observer = new QueryObserver(client, options);
+    const unsubscribe = observer.subscribe(() => {});
+    try {
+      expect(fetchTimeline).toHaveBeenCalledTimes(1);
+      unsubscribe();
+      expect(abandoned).toHaveBeenCalledOnce();
+      await expect(client.fetchQuery(options)).resolves.toEqual([]);
+      expect(fetchTimeline).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+      client.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("aborts the HTTP request when its timeline deadline expires", async () => {
     const deadline = new AbortController();
     const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
